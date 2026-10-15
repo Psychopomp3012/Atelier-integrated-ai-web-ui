@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none">
+  <defs>
+    <linearGradient id="fav-top" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#818CF8" />
+      <stop offset="50%" stop-color="#A78BFA" />
+      <stop offset="100%" stop-color="#E0E7FF" />
+    </linearGradient>
+    <linearGradient id="fav-left" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#3730A3" />
+    </linearGradient>
+    <linearGradient id="fav-right" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8B5CF6" />
+      <stop offset="60%" stop-color="#6D28D9" />
+      <stop offset="100%" stop-color="#312E81" />
+    </linearGradient>
+    <linearGradient id="fav-core" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="40%" stop-color="#10B981" />
+      <stop offset="100%" stop-color="#34D399" />
+    </linearGradient>
+  </defs>
+
+  <!-- Dark Base Squircle -->
+  <rect width="32" height="32" rx="7.5" fill="#0F131C" stroke="#262B38" stroke-width="1" />
+
+  <!-- Top Crown Facet -->
+  <polygon points="16,4 25.5,12 16,16.5 6.5,12" fill="url(#fav-top)" />
+
+  <!-- Left Lower Facet -->
+  <polygon points="6.5,12 16,16.5 16,27.5" fill="url(#fav-left)" />
+
+  <!-- Right Lower Facet -->
+  <polygon points="25.5,12 16,16.5 16,27.5" fill="url(#fav-right)" />
+
+  <!-- Inner Split Lines -->
+  <line x1="16" y1="4" x2="16" y2="16.5" stroke="#FFFFFF" stroke-opacity="0.45" stroke-width="0.75" />
+  <line x1="6.5" y1="12" x2="25.5" y2="12" stroke="#FFFFFF" stroke-opacity="0.25" stroke-width="0.5" />
+
+  <!-- Central Floating Diamond Gem -->
+  <polygon points="16,10 20.2,15 16,21.8 11.8,15" fill="url(#fav-core)" />
+  <polygon points="16,10 16,21.8 11.8,15" fill="#FFFFFF" opacity="0.18" />
+</svg>

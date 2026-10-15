@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>E2B Sandbox Lifecycle & Economics Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: #131d2e;
+      --card-border: #1e293b;
+      --accent-blue: #38bdf8;
+      --accent-green: #34d399;
+      --accent-amber: #fbbf24;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text-main);
+      line-height: 1.6;
+      padding: 32px 20px;
+    }
+    .container {
+      max-width: 1160px;
+      margin: 0 auto;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    header h1 {
+      font-size: 2.2rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #38bdf8, #818cf8, #34d399);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 10px;
+    }
+    header p {
+      color: var(--text-muted);
+      font-size: 1.05rem;
+    }
+    .badge-bar {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 9999px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .badge-blue { color: var(--accent-blue); border-color: rgba(56,189,248,0.3); }
+    .badge-green { color: var(--accent-green); border-color: rgba(52,211,153,0.3); }
+    .badge-amber { color: var(--accent-amber); border-color: rgba(251,191,36,0.3); }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 32px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+    }
+    .card h2 {
+      font-size: 1.4rem;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      padding-bottom: 12px;
+    }
+    .diagram-img {
+      width: 100%;
+      height: auto;
+      border-radius: 12px;
+      display: block;
+      border: 1px solid rgba(255,255,255,0.05);
+      background: #0b0f19;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 20px;
+    }
+    .metric-box {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .metric-box h3 {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .metric-value {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: var(--accent-green);
+    }
+    .metric-sub {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+      font-size: 0.92rem;
+    }
+    th, td {
+      padding: 12px 14px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    th {
+      background: rgba(255,255,255,0.03);
+      color: var(--accent-blue);
+      font-weight: 600;
+    }
+    tr:hover td {
+      background: rgba(255,255,255,0.02);
+    }
+
+    /* Interactive Calculator */
+    .calc-slider {
+      width: 100%;
+      margin: 18px 0;
+      accent-color: var(--accent-green);
+    }
+    .calc-result-box {
+      background: linear-gradient(135deg, rgba(52,211,153,0.1), rgba(56,189,248,0.1));
+      border: 1px solid rgba(52,211,153,0.3);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>E2B Cloud Sandbox Architecture &amp; Lifecycle</h1>
+      <p>Visual Flowcharts, State Transitions, Per-User Quota Engine &amp; Economics Modeling</p>
+      <div class="badge-bar">
+        <span class="badge badge-blue">● Lazy Boot (&lt;150ms)</span>
+        <span class="badge badge-green">● Auto-Pause (100% Free Idle State)</span>
+        <span class="badge badge-amber">● Per-User Quota (Max 3 / User-Controlled Deletion)</span>
+      </div>
+    </header>
+
+    <!-- Section 1: End to End Flowchart -->
+    <div class="card">
+      <h2>1. Visual Flowchart: End-to-End Sandbox Lifecycle</h2>
+      <p style="color: var(--text-muted); margin-bottom: 16px;">
+        Illustrates lazy microVM instantiation upon first message, auto-reconnect to existing sessions, and automatic hibernation when inactive.
+      </p>
+      <img src="./lifecycle-flowchart.svg" alt="Lifecycle Flowchart" class="diagram-img" />
+    </div>
+
+    <!-- Section 2: State Machine -->
+    <div class="card">
+      <h2>2. Sandbox Formal State Machine</h2>
+      <p style="color: var(--text-muted); margin-bottom: 16px;">
+        Details every valid state transition from uninitialized creation through active command execution, idle snapshotting, and safe teardown.
+      </p>
+      <img src="./state-machine.svg" alt="State Machine Diagram" class="diagram-img" />
+    </div>
+
+    <!-- Section 3: Quota & Explicit Deletion -->
+    <div class="card">
+      <h2>3. Per-User Quota Guard (MAX_SANDBOXES_PER_USER = 3)</h2>
+      <p style="color: var(--text-muted); margin-bottom: 16px;">
+        Zero Auto-Killing: Work is never destroyed automatically. When 3/3 capacity is full, the user is notified and explicitly chooses which sandbox or session to delete before creating new ones.
+      </p>
+      <img src="./quota-eviction.svg" alt="Quota Diagram" class="diagram-img" />
+    </div>
+
+    <!-- Section 4: Interactive Cost Calculator -->
+    <div class="card">
+      <h2>4. User Economics &amp; Real-Time Cost Estimator</h2>
+      <div class="grid-2">
+        <div class="metric-box">
+          <h3>Active Compute Hourly Rate</h3>
+          <div class="metric-value">$0.1656 / hr</div>
+          <div class="metric-sub">2 vCPU ($0.0504) + 4 GB RAM ($0.0162)</div>
+        </div>
+        <div class="metric-box">
+          <h3>Paused Sandbox Cost</h3>
+          <div class="metric-value" style="color: #38bdf8;">$0.00 (FREE)</div>
+          <div class="metric-sub">RAM &amp; disk snapshot storage is completely free</div>
+        </div>
+      </div>
+
+      <div style="margin-top: 24px; padding: 20px; background: #0f172a; border-radius: 12px; border: 1px solid #1e293b;">
+        <h3 style="font-size: 1.1rem; margin-bottom: 8px;">Interactive Monthly Cost Estimator</h3>
+        <label for="hoursSlider" style="color: var(--text-muted); font-size: 0.9rem;">
+          Select active coding/agent execution hours per day: <b id="hoursDisplay" style="color: #fff;">1 hour/day</b> (20 days/month)
+        </label>
+        <input type="range" id="hoursSlider" class="calc-slider" min="0.2" max="8" step="0.2" value="1" oninput="updateCost(this.value)">
+
+        <div class="calc-result-box">
+          <div style="font-size: 0.9rem; color: var(--text-muted);">Estimated Monthly Cost Per User</div>
+          <div id="costDisplay" style="font-size: 2.2rem; font-weight: 800; color: var(--accent-green); margin: 6px 0;">$3.31 / mo</div>
+          <div id="savingsDisplay" style="font-size: 0.85rem; color: var(--accent-blue);">
+            Compared to $119.23/mo for traditional 24/7 unpaused cloud servers (<b>97.2% Savings</b>)
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top: 28px; font-size: 1.1rem;">Standard Consumption Profiles</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Profile</th>
+            <th>Daily Usage</th>
+            <th>Monthly Active Hours</th>
+            <th>Estimated Cost</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>Casual / Learner</b></td>
+            <td>5–10 quick queries / week</td>
+            <td>~3 hours</td>
+            <td style="color: var(--accent-green); font-weight: 700;">$0.50 / month</td>
+            <td><span class="badge badge-green">Low</span></td>
+          </tr>
+          <tr>
+            <td><b>Active Developer</b></td>
+            <td>1–2 hours interactive agent pairing</td>
+            <td>~18 hours</td>
+            <td style="color: var(--accent-green); font-weight: 700;">$2.98 / month</td>
+            <td><span class="badge badge-blue">Standard</span></td>
+          </tr>
+          <tr>
+            <td><b>Power User</b></td>
+            <td>3–4 hours heavy builds &amp; test suites</td>
+            <td>~60 hours</td>
+            <td style="color: var(--accent-amber); font-weight: 700;">$9.94 / month</td>
+            <td><span class="badge badge-amber">Heavy</span></td>
+          </tr>
+          <tr>
+            <td><b>Unmanaged 24/7 VM</b></td>
+            <td>No auto-pause (Runaway VM)</td>
+            <td>720 hours</td>
+            <td style="color: #ef4444; font-weight: 700;">$119.23 / month</td>
+            <td><span class="badge" style="color: #ef4444; border-color: #ef4444;">Prevented</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    function updateCost(hoursPerDay) {
+      document.getElementById('hoursDisplay').innerText = hoursPerDay + " hour(s)/day";
+      const monthlyHours = hoursPerDay * 20; // 20 working days
+      const hourlyRate = 0.1656; // 2vCPU + 4GB RAM
+      const monthlyCost = (monthlyHours * hourlyRate).toFixed(2);
+      document.getElementById('costDisplay').innerText = "$" + monthlyCost + " / mo";
+
+      const unpaused = 119.23;
+      const savingsPct = (((unpaused - monthlyCost) / unpaused) * 100).toFixed(1);
+      document.getElementById('savingsDisplay').innerHTML = 
+        "Compared to $119.23/mo for traditional 24/7 unpaused cloud servers (<b>" + savingsPct + "% Savings</b>)";
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+Problem Statement:
+1. Ability to switch between CLIs seamlessly.
+2. The task keeps on executing on cloud in a sandbox
+
+Instructions(for me):
+1. Avoid Coding???
+2. Figure out, if i can't code what is in my hand? => Prompts Engineering?
+3. 
+
+Architecture:
+Frontend(React + TS + Tailwind(v3))
+
+Backend(TS + Fastify)
+
+"Atelier" (or Atelier Studio) — French for a master craftsman's workshop
+
+Sandbox(E2B):
+- 2vCPU + 500MB-RAM
+- upto 3 sandboxes max
+- 0.1656 USD / hour
+- 15 min inactivity timeout
+- costs nothing when inactive
+
+
+Antigravity(Useful settings):
+/settings: 
+1. Artifact Review: ask for review | always proceed
+2. Sandbox Mode: on | off
+3. Tool Permission: request-review | proceed-in-sandbox | always proceed | strict
+
+
+Scenarios:
+potentially read their own ~/.gemini/oauth_creds.json inside the VM.
+
+
+Future Objectives:
+4. Claude Auth (no auth for free account?)
+5. No visual testing possible as a cloud server has no GUI?
+
+
+Mistral free models:
+1. codestral-2508
+2. ministral-14b-2512
+3. ministral-8b-2512
+4. ministral-3b-2512
+5. voxtral-small-2507
+
+---
+
+## Visual Architecture & Plan
+- **Interactive Plan Dashboard (HTML):** [`plan_visual.html`](./plan_visual.html)
+- **Architecture Vector Diagram (SVG):** [`system_architecture_diagram.svg`](./system_architecture_diagram.svg)
+
+Open `plan_visual.html` in any browser to inspect interactive hardware allocation gauges (8vCPU / 12GB host vs 2vCPU / 4GB sandbox), Antigravity settings decision tree, Scenario 1 quota invalidation simulator, and multi-provider dynamic routing.

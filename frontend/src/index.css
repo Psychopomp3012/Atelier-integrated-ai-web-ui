@@ -1,0 +1,160 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Day Theme (Light Mode) Tokens */
+  --background: 248 249 252;
+  --surface: 255 255 255;
+  --surface-dim: 238 242 248;
+  --surface-bright: 255 255 255;
+  --surface-container-lowest: 255 255 255;
+  --surface-container-low: 244 247 252;
+  --surface-container: 235 239 247;
+  --surface-container-high: 224 230 240;
+  --surface-container-highest: 213 220 233;
+  --on-surface: 24 28 36;
+  --on-surface-variant: 74 85 104;
+  --on-background: 24 28 36;
+  --outline: 148 156 169;
+  --outline-variant: 222 228 238;
+  --primary: 79 70 229;
+  --on-primary: 255 255 255;
+  --primary-container: 224 231 255;
+  --on-primary-container: 49 46 129;
+  --primary-fixed: 224 231 255;
+  --primary-fixed-dim: 199 210 254;
+  --on-primary-fixed: 49 46 129;
+  --on-primary-fixed-variant: 67 56 202;
+  --inverse-primary: 199 210 254;
+  --secondary: 5 150 105;
+  --on-secondary: 255 255 255;
+  --secondary-container: 209 250 229;
+  --on-secondary-container: 6 95 70;
+  --secondary-fixed: 209 250 229;
+  --secondary-fixed-dim: 167 243 208;
+  --on-secondary-fixed: 6 95 70;
+  --on-secondary-fixed-variant: 4 120 87;
+  --tertiary: 2 132 199;
+  --on-tertiary: 255 255 255;
+  --tertiary-container: 224 242 254;
+  --on-tertiary-container: 3 105 161;
+  --tertiary-fixed: 224 242 254;
+  --tertiary-fixed-dim: 186 230 253;
+  --on-tertiary-fixed: 3 105 161;
+  --on-tertiary-fixed-variant: 2 132 199;
+  --error: 220 38 38;
+  --on-error: 255 255 255;
+  --error-container: 254 226 226;
+  --on-error-container: 153 27 27;
+  --surface-tint: 79 70 229;
+  --surface-variant: 229 231 235;
+  --inverse-surface: 31 41 55;
+  --inverse-on-surface: 249 250 251;
+}
+
+.dark {
+  /* Night Theme (Dark Mode) Tokens */
+  --background: 15 19 28;
+  --surface: 15 19 28;
+  --surface-dim: 15 19 28;
+  --surface-bright: 53 57 66;
+  --surface-container-lowest: 10 14 22;
+  --surface-container-low: 24 28 36;
+  --surface-container: 28 32 40;
+  --surface-container-high: 38 42 51;
+  --surface-container-highest: 49 53 62;
+  --on-surface: 223 226 238;
+  --on-surface-variant: 199 196 215;
+  --on-background: 223 226 238;
+  --outline: 144 143 160;
+  --outline-variant: 70 69 84;
+  --primary: 192 193 255;
+  --on-primary: 16 0 169;
+  --primary-container: 128 131 255;
+  --on-primary-container: 13 0 150;
+  --primary-fixed: 225 224 255;
+  --primary-fixed-dim: 192 193 255;
+  --on-primary-fixed: 7 0 108;
+  --on-primary-fixed-variant: 47 46 190;
+  --inverse-primary: 73 75 214;
+  --secondary: 78 222 163;
+  --on-secondary: 0 56 36;
+  --secondary-container: 0 165 114;
+  --on-secondary-container: 0 49 31;
+  --secondary-fixed: 111 251 190;
+  --secondary-fixed-dim: 78 222 163;
+  --on-secondary-fixed: 0 33 19;
+  --on-secondary-fixed-variant: 0 82 54;
+  --tertiary: 76 215 246;
+  --on-tertiary: 0 54 64;
+  --tertiary-container: 0 158 185;
+  --on-tertiary-container: 0 47 56;
+  --tertiary-fixed: 172 237 255;
+  --tertiary-fixed-dim: 76 215 246;
+  --on-tertiary-fixed: 0 31 38;
+  --on-tertiary-fixed-variant: 0 78 92;
+  --error: 255 180 171;
+  --on-error: 105 0 5;
+  --error-container: 147 0 10;
+  --on-error-container: 255 218 214;
+  --surface-tint: 192 193 255;
+  --surface-variant: 49 53 62;
+  --inverse-surface: 223 226 238;
+  --inverse-on-surface: 44 48 57;
+}
+
+@layer base {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: rgb(var(--background));
+    color: rgb(var(--on-surface));
+    transition: background-color 0.25s ease, color 0.25s ease;
+  }
+
+  body {
+    overscroll-behavior: none;
+  }
+
+  main > :first-child {
+    margin-top: 0 !important;
+  }
+
+  main > :last-child {
+    margin-bottom: 0 !important;
+  }
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(var(--outline), 0.25);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--outline), 0.5);
+}
+
+/* OpenAI Model Icon theme styling: black in day mode, white in night mode */
+img[src*="openai.svg"],
+.openai-icon {
+  filter: brightness(0);
+  transition: filter 0.2s ease;
+}
+
+.dark img[src*="openai.svg"],
+.dark .openai-icon {
+  filter: brightness(0) invert(1);
+}
+

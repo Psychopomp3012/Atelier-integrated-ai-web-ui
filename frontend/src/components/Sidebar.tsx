@@ -1,0 +1,166 @@
+import React from 'react';
+import type { ChatSession } from '../types';
+import { AtelierLogo } from './AtelierLogo';
+
+interface SidebarProps {
+  sessions: ChatSession[];
+  currentSessionId: string | null;
+  onSelectSession: (id: string) => void;
+  onDeleteSession?: (id: string) => void;
+  onNewSession: () => void;
+  isOpen?: boolean;
+  onClose?: () => void;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({
+  sessions,
+  currentSessionId,
+  onSelectSession,
+  onDeleteSession,
+  onNewSession,
+  isOpen = false,
+  onClose,
+}) => {
+  return (
+    <>
+      {/* Mobile Backdrop */}
+      {isOpen && (
+        <div
+          onClick={onClose}
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs lg:hidden animate-fade-in"
+        />
+      )}
+
+      {/* Sidebar Drawer Container */}
+      <aside
+        className={`fixed left-0 top-0 bottom-0 w-[260px] bg-surface-container-lowest border-r border-outline-variant/30 flex flex-col z-50 transition-transform duration-300 ease-in-out ${
+          isOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
+        }`}
+      >
+        {/* Brand Header */}
+        <div className="h-14 px-margin flex items-center justify-between border-b border-outline-variant/20">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-surface-container/70 border border-outline-variant/40 flex items-center justify-center text-primary shadow-xs group transition-all hover:border-primary/50">
+              <AtelierLogo className="w-5 h-5 transition-transform duration-300 group-hover:scale-110" withGlow />
+            </div>
+            <div className="flex flex-col">
+              <div className="flex items-center gap-1.5 leading-none">
+                <span className="font-headline-sm text-sm text-on-surface font-semibold tracking-tight">
+                  Atelier
+                </span>
+                <span className="text-[9px] font-mono font-medium px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 tracking-wider uppercase">
+                  Studio
+                </span>
+              </div>
+              <span className="text-[10px] text-on-surface-variant font-code-sm tracking-wide mt-0.5">
+                Cloud Workspace
+              </span>
+            </div>
+          </div>
+
+          {/* Mobile Close Button */}
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="lg:hidden w-7 h-7 rounded-lg bg-surface-container/70 hover:bg-surface-container-high border border-outline-variant/30 flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-all cursor-pointer shadow-sm active:scale-95"
+              title="Close sidebar"
+            >
+              <span className="material-symbols-outlined text-[16px]">close</span>
+            </button>
+          )}
+        </div>
+
+        {/* New Session Button */}
+        <div className="p-space-md border-b border-outline-variant/20">
+          <button
+            onClick={() => {
+              onNewSession();
+              onClose?.();
+            }}
+            className="w-full flex items-center justify-between px-space-md py-space-sm bg-primary hover:bg-primary-fixed-dim text-on-primary rounded-xl transition-all shadow-[0_0_16px_rgba(99,102,241,0.25)] group cursor-pointer"
+          >
+            <div className="flex items-center gap-space-sm">
+              <span className="material-symbols-outlined text-[18px]">add_circle</span>
+              <span className="font-label-md text-label-md font-semibold tracking-wide">NEW SESSION</span>
+            </div>
+            <kbd className="font-code-sm text-code-sm bg-on-primary/20 px-space-xs rounded text-on-primary">
+              ⌘N
+            </kbd>
+          </button>
+        </div>
+
+        {/* Chat Sessions Stream */}
+        <div className="flex-1 overflow-y-auto px-space-sm py-space-md space-y-space-md">
+          <div className="px-space-sm flex items-center justify-between">
+            <span className="font-label-sm text-label-sm uppercase tracking-wider text-outline">
+              Recent Chats
+            </span>
+            <span className="font-code-sm text-code-sm text-outline">
+              {sessions.length}
+            </span>
+          </div>
+
+          {sessions.length === 0 ? (
+            <div className="px-space-sm py-6 text-center text-outline">
+              <span className="material-symbols-outlined text-[28px] opacity-40 mb-1 block">
+                chat_bubble_outline
+              </span>
+              <p className="font-body-sm text-[12px] opacity-80">No recent chats yet.</p>
+              <p className="font-body-sm text-[11px] opacity-60 mt-0.5">
+                Send a prompt to start a session.
+              </p>
+            </div>
+          ) : (
+            <nav className="space-y-1">
+              {sessions.map((session) => {
+                const isActive = session.id === currentSessionId;
+                return (
+                  <div
+                    key={session.id}
+                    className={`group relative flex items-center justify-between rounded-lg transition-colors ${
+                      isActive
+                        ? 'bg-surface-container text-on-surface border-l-2 border-primary font-medium'
+                        : 'text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface'
+                    }`}
+                  >
+                    <button
+                      onClick={() => {
+                        onSelectSession(session.id);
+                        onClose?.();
+                      }}
+                      className="flex-1 min-w-0 flex items-center gap-2 px-space-sm py-2 text-left cursor-pointer truncate"
+                      title={session.title}
+                    >
+                      <span
+                        className={`material-symbols-outlined text-[15px] shrink-0 ${
+                          isActive ? 'text-primary' : 'text-outline'
+                        }`}
+                      >
+                        chat_bubble
+                      </span>
+                      <span className="truncate font-body-sm text-[13px]">{session.title}</span>
+                    </button>
+
+                    {onDeleteSession && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteSession(session.id);
+                        }}
+                        className="opacity-0 group-hover:opacity-100 p-1.5 mr-1 text-outline hover:text-error transition-all rounded hover:bg-surface-container-high cursor-pointer"
+                        title="Delete chat session"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">delete</span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </nav>
+          )}
+        </div>
+
+      </aside>
+    </>
+  );
+};

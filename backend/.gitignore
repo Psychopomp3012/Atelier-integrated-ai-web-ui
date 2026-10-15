@@ -1,0 +1,28 @@
+# Environment variables & Secrets
+.env
+.env.*
+.env.local
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+auth.json
+oauth_creds.json
+credentials.json
+client_secret*.json
+google_accounts.json
+*-oauth-token
+*keyring-unavailable*
+secrets/
+
+# Node & Build
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+*.log
+*.tsbuildinfo

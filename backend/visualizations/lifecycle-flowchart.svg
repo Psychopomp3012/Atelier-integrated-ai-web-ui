@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 820" width="100%" height="100%" style="background:#0b0f19; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="gradClient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+    <linearGradient id="gradServer" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1" />
+      <stop offset="100%" stop-color="#4338ca" />
+    </linearGradient>
+    <linearGradient id="gradE2B" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#047857" />
+    </linearGradient>
+    <linearGradient id="gradStorage" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#b45309" />
+    </linearGradient>
+    <linearGradient id="gradDanger" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ef4444" />
+      <stop offset="100%" stop-color="#b91c1c" />
+    </linearGradient>
+
+    <!-- Filters for soft glow/shadow -->
+    <filter id="cardShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="6" flood-color="#000" flood-opacity="0.4" />
+    </filter>
+
+    <!-- Arrow Marker -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#64748b" />
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#10b981" />
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#f59e0b" />
+    </marker>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#ef4444" />
+    </marker>
+  </defs>
+
+  <!-- Title & Subtitle -->
+  <text x="550" y="45" text-anchor="middle" font-size="24" font-weight="700" fill="#f8fafc">E2B Cloud Sandbox Lifecycle</text>
+  <text x="550" y="72" text-anchor="middle" font-size="13" font-weight="400" fill="#94a3b8">Interactive visualization of lazy provisioning, auto-pause/resume, quota &amp; execution flow</text>
+
+  <!-- Step 1: User Action -->
+  <g filter="url(#cardShadow)">
+    <rect x="50" y="120" width="220" height="90" rx="12" fill="#1e293b" stroke="#3b82f6" stroke-width="2" />
+    <circle cx="80" cy="165" r="18" fill="url(#gradClient)" />
+    <path d="M 75 160 A 5 5 0 1 0 85 160 A 5 5 0 1 0 75 160 Z M 71 174 C 71 169, 89 169, 89 174 Z" fill="#fff" />
+    <text x="110" y="153" font-size="14" font-weight="700" fill="#ffffff">User Action</text>
+    <text x="110" y="172" font-size="12" fill="#94a3b8">1. Clicks "New Chat"</text>
+    <text x="110" y="188" font-size="11" fill="#38bdf8">Lazy: Zero VM Cost ($0)</text>
+  </g>
+
+  <!-- Path from User to Session Init -->
+  <line x1="270" y1="165" x2="350" y2="165" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+
+  <!-- Step 2: Session Generated -->
+  <g filter="url(#cardShadow)">
+    <rect x="350" y="120" width="230" height="90" rx="12" fill="#1e293b" stroke="#6366f1" stroke-width="2" />
+    <rect x="365" y="147" width="36" height="36" rx="8" fill="url(#gradServer)" />
+    <text x="383" y="170" text-anchor="middle" font-size="16" fill="#fff">#</text>
+    <text x="412" y="153" font-size="14" font-weight="700" fill="#ffffff">Session Created</text>
+    <text x="412" y="172" font-size="12" fill="#cbd5e1">Generates unique sessionId</text>
+    <text x="412" y="188" font-size="11" fill="#a5b4fc">No cloud VM launched</text>
+  </g>
+
+  <!-- Path down to Prompt Sent -->
+  <line x1="465" y1="210" x2="465" y2="260" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <text x="475" y="240" font-size="11" fill="#94a3b8">User prompts code/tool</text>
+
+  <!-- Step 3: Fastify Check Engine -->
+  <g filter="url(#cardShadow)">
+    <rect x="330" y="260" width="270" height="100" rx="12" fill="#1e293b" stroke="#818cf8" stroke-width="2" />
+    <text x="465" y="290" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">SandboxService Router</text>
+    <text x="465" y="312" text-anchor="middle" font-size="12" fill="#94a3b8">Does this sessionId have a sandbox?</text>
+    <text x="465" y="332" text-anchor="middle" font-size="11" fill="#38bdf8">Checks active session map &amp; quota</text>
+  </g>
+
+  <!-- Split paths: Existing vs New -->
+  <!-- Left Path: New Sandbox / Check Quota -->
+  <path d="M 330 310 L 200 310 L 200 380" fill="none" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowAmber)" />
+  <text x="210" y="330" font-size="11" font-weight="600" fill="#f59e0b">No (Brand New)</text>
+
+  <!-- Right Path: Reconnect / Auto-Resume -->
+  <path d="M 600 310 L 730 310 L 730 380" fill="none" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)" />
+  <text x="740" y="330" font-size="11" font-weight="600" fill="#10b981">Yes (Existing Session)</text>
+
+  <!-- Box: Quota & LRU Eviction Check -->
+  <g filter="url(#cardShadow)">
+    <rect x="80" y="380" width="240" height="110" rx="12" fill="#1e293b" stroke="#f59e0b" stroke-width="2" />
+    <text x="200" y="410" text-anchor="middle" font-size="13" font-weight="700" fill="#fde68a">Quota Limit Check</text>
+    <text x="200" y="432" text-anchor="middle" font-size="11" fill="#cbd5e1">Active sandboxes &gt;= MAX (3)?</text>
+    <text x="200" y="452" text-anchor="middle" font-size="11" fill="#ef4444">Yes: Blocks &amp; alerts (3/3 Full)</text>
+    <text x="200" y="470" text-anchor="middle" font-size="11" fill="#10b981">No: Spawns new microVM</text>
+  </g>
+
+  <!-- Box: Auto-Resume Flow -->
+  <g filter="url(#cardShadow)">
+    <rect x="610" y="380" width="240" height="110" rx="12" fill="#1e293b" stroke="#10b981" stroke-width="2" />
+    <text x="730" y="410" text-anchor="middle" font-size="13" font-weight="700" fill="#6ee7b7">Reconnect &amp; Auto-Resume</text>
+    <text x="730" y="432" text-anchor="middle" font-size="11" fill="#cbd5e1">Sandbox.connect(sandboxId)</text>
+    <text x="730" y="452" text-anchor="middle" font-size="11" fill="#94a3b8">Wakes paused VM in seconds</text>
+    <text x="730" y="470" text-anchor="middle" font-size="11" fill="#34d399">RAM + Files preserved intact</text>
+  </g>
+
+  <!-- Path down to MicroVM Provision / Execution -->
+  <line x1="200" y1="490" x2="200" y2="530" stroke="#f59e0b" stroke-width="2" />
+  <path d="M 200 530 L 465 530 L 465 550" fill="none" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)" />
+
+  <line x1="730" y1="490" x2="730" y2="530" stroke="#10b981" stroke-width="2" />
+  <path d="M 730 530 L 465 530" fill="none" stroke="#10b981" stroke-width="2" />
+
+  <!-- Central Cloud Node: E2B MicroVM Active -->
+  <g filter="url(#cardShadow)">
+    <rect x="310" y="550" width="310" height="120" rx="14" fill="#064e3b" stroke="#10b981" stroke-width="2.5" />
+    <rect x="325" y="565" width="40" height="40" rx="8" fill="url(#gradE2B)" />
+    <path d="M 335 585 L 345 575 L 355 585 L 345 595 Z" fill="#fff" />
+    <text x="380" y="583" font-size="15" font-weight="700" fill="#ffffff">E2B Firecracker MicroVM</text>
+    <text x="380" y="602" font-size="12" fill="#a7f3d0">Runs in isolated cloud microVM</text>
+    <text x="380" y="620" font-size="11" fill="#6ee7b7">Workspace: /home/user/workspace</text>
+    <text x="380" y="638" font-size="11" font-weight="600" fill="#fde68a">Active Billed Rate: ~$0.165/hour</text>
+  </g>
+
+  <!-- Arrow down to Outputs & Idle Timer -->
+  <line x1="380" y1="670" x2="260" y2="720" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <line x1="550" y1="670" x2="680" y2="720" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowAmber)" />
+
+  <!-- Bottom Left: Telemetry & Files -->
+  <g filter="url(#cardShadow)">
+    <rect x="140" y="720" width="240" height="75" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5" />
+    <text x="260" y="745" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">Live Telemetry &amp; Files</text>
+    <text x="260" y="763" text-anchor="middle" font-size="11" fill="#94a3b8">Streams stdout/stderr in real-time</text>
+    <text x="260" y="780" text-anchor="middle" font-size="10" fill="#38bdf8">Powers Cloud Inspector tree</text>
+  </g>
+
+  <!-- Bottom Right: Auto-Pause Hibernate -->
+  <g filter="url(#cardShadow)">
+    <rect x="580" y="720" width="280" height="75" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5" />
+    <text x="720" y="745" text-anchor="middle" font-size="12" font-weight="700" fill="#fef08a">15-Min Inactivity Auto-Pause</text>
+    <text x="720" y="763" text-anchor="middle" font-size="11" fill="#cbd5e1">Snapshots memory &amp; disk to storage</text>
+    <text x="720" y="780" text-anchor="middle" font-size="11" font-weight="700" fill="#34d399">Compute cost drops to $0.00 / hr</text>
+  </g>
+
+  <!-- Loop back from Auto-Pause to Reconnect -->
+  <path d="M 860 755 L 940 755 L 940 435 L 850 435" fill="none" stroke="#10b981" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrowGreen)" />
+  <text x="948" y="600" font-size="11" font-weight="600" fill="#34d399" transform="rotate(90 948 600)">Wakes up on next visit</text>
+
+  <!-- Legend at top right -->
+  <rect x="830" y="120" width="230" height="110" rx="8" fill="#131d2e" stroke="#334155" />
+  <text x="845" y="142" font-size="12" font-weight="700" fill="#cbd5e1">Economics &amp; Safeguards</text>
+  <circle cx="852" cy="162" r="5" fill="#38bdf8" />
+  <text x="865" y="166" font-size="11" fill="#94a3b8">Lazy Boot: Zero idle launch fee</text>
+  <circle cx="852" cy="182" r="5" fill="#34d399" />
+  <text x="865" y="186" font-size="11" fill="#94a3b8">Paused State: 100% Free ($0/mo)</text>
+  <circle cx="852" cy="202" r="5" fill="#f59e0b" />
+  <text x="865" y="206" font-size="11" fill="#94a3b8">Max 3 Sandboxes / user (LRU)</text>
+</svg>
