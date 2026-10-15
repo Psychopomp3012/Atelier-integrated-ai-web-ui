@@ -1377,9 +1377,9 @@ export const App: React.FC = () => {
         modelBadge: modelDisplayName,
         latency: 'Latency: 198ms',
         avatarUrl: '',
-        content: `⚠️ **Connection Error**\n\nFailed to reach the cloud orchestration backend. Please ensure the Fastify API server is running on port 4000 and try again.`,
+        content: `⚠️ **Connection Error**\n\nFailed to reach the cloud orchestration backend (${import.meta.env.VITE_API_URL || 'http://localhost:4000'}). Please ensure the API server is active and try again.`,
         steps: [
-          { id: 's1', text: `Attempted connection to localhost:4000`, duration: '0ms', completed: false },
+          { id: 's1', text: `Attempted connection to ${import.meta.env.VITE_API_URL || 'localhost:4000'}`, duration: '0ms', completed: false },
           { id: 's2', text: 'Network request failed', duration: '0ms', completed: false },
         ],
         executionResult: {

@@ -2,8 +2,8 @@
  * Centralized API utility with seamless same-origin proxy and fallback.
  */
 
-const BASE_URL = ''; // Relative path leverages Vite dev server proxy
-const FALLBACK_URL = 'http://localhost:4000';
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const FALLBACK_URL = API_BASE_URL || 'http://localhost:4000';
 
 export async function apiFetch(
   endpoint: string,
@@ -17,9 +17,9 @@ export async function apiFetch(
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  // First attempt via relative URL (Vite proxy)
+  // First attempt via configured API base URL (or relative proxy if unset)
   try {
-    const res = await fetch(`${BASE_URL}${cleanEndpoint}`, {
+    const res = await fetch(`${API_BASE_URL}${cleanEndpoint}`, {
       ...options,
       headers,
     });
