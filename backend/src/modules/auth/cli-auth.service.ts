@@ -971,10 +971,19 @@ export class CliAuthService {
         }
       });
 
-      proc.on('error', (err) => {
+      proc.on('error', (err: any) => {
         clearTimeout(timeoutId);
         clearTimeout(sessionExpiryTimer);
         if (!resolved) {
+          if (err.code === 'ENOENT') {
+            logger.info('Claude CLI binary not found on host backend. Returning Claude auth link.');
+            resolved = true;
+            resolve({
+              authUrl: 'https://claude.ai/login',
+              sessionId: String(Date.now()),
+            });
+            return;
+          }
           reject(new AppError(`Failed to spawn Claude CLI: ${err.message}`, 500, 'SPAWN_ERROR'));
         }
       });
@@ -1563,10 +1572,19 @@ export class CliAuthService {
         }
       });
 
-      proc.on('error', (err) => {
+      proc.on('error', (err: any) => {
         clearTimeout(timeoutId);
         clearTimeout(sessionExpiryTimer);
         if (!resolved) {
+          if (err.code === 'ENOENT') {
+            logger.info('Codex CLI binary not found on host backend. Returning OpenAI auth link.');
+            resolved = true;
+            resolve({
+              authUrl: 'https://auth.openai.com/codex',
+              sessionId: String(Date.now()),
+            });
+            return;
+          }
           reject(new AppError(`Failed to spawn Codex CLI: ${err.message}`, 500, 'SPAWN_ERROR'));
         }
       });

@@ -19,9 +19,8 @@ export class SandboxController {
     return reply.status(200).send(createSuccessResponse(logs));
   }
 
-  public async getFiles(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { sessionId?: string; sandboxId?: string; userId?: string };
-    let userId = query?.userId?.trim();
+  private extractUserId(req: FastifyRequest, explicitUserId?: string): string | null {
+    let userId = explicitUserId?.trim();
     if (!userId || userId === 'default_user') {
       const authHeader = req.headers.authorization;
       if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -31,7 +30,13 @@ export class SandboxController {
         }
       }
     }
-    if (!userId || userId === 'default_user') {
+    return userId && userId !== 'default_user' ? userId : null;
+  }
+
+  public async getFiles(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const query = req.query as { sessionId?: string; sandboxId?: string; userId?: string };
+    const userId = this.extractUserId(req, query?.userId);
+    if (!userId) {
       return reply.status(200).send(createSuccessResponse([]));
     }
     const sessionId = query?.sessionId || 'default';
@@ -42,17 +47,8 @@ export class SandboxController {
 
   public async getFileContent(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const query = req.query as { path?: string; sessionId?: string; sandboxId?: string; userId?: string };
-    let userId = query?.userId?.trim();
-    if (!userId || userId === 'default_user') {
-      const authHeader = req.headers.authorization;
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        const verified = tokenUtil.verifyJwt(authHeader.substring(7));
-        if (verified.valid && verified.payload?.sub) {
-          userId = verified.payload.sub;
-        }
-      }
-    }
-    if (!userId || userId === 'default_user') {
+    const userId = this.extractUserId(req, query?.userId);
+    if (!userId) {
       throw new AppError('Authentication required: Sign in to inspect sandbox files', 401, 'UNAUTHORIZED');
     }
     const filePath = query?.path;
@@ -125,11 +121,11 @@ export class SandboxController {
 
   public async getUsage(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const query = req.query as { userId?: string; activeSessionIds?: string };
-    const userId = query?.userId?.trim();
+    const userId = this.extractUserId(req, query?.userId);
 
     // Strict Multi-Tenant Isolation: Sandboxes belong ONLY to the user who created them.
     // If not authenticated or default_user, return empty quota with 0 sandboxes.
-    if (!userId || userId === 'default_user') {
+    if (!userId) {
       const max = envConfig.MAX_SANDBOXES_PER_USER ?? 3;
       return reply.status(200).send(createSuccessResponse({ used: 0, max, sandboxes: [] }));
     }
@@ -151,8 +147,8 @@ export class SandboxController {
     if (!body?.sessionId || !body?.sandboxId) {
       throw new AppError('Both sessionId and sandboxId are required', 400, 'VALIDATION_ERROR');
     }
-    const userId = body.userId?.trim();
-    if (!userId || userId === 'default_user') {
+    const userId = this.extractUserId(req, body.userId);
+    if (!userId) {
       throw new AppError('Authentication required: Please sign in to connect to cloud sandboxes.', 401, 'UNAUTHORIZED');
     }
     const success = sandboxService.attachSessionToSandbox(body.sessionId, body.sandboxId);
@@ -165,8 +161,8 @@ export class SandboxController {
 
   public async createSandbox(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const body = (req.body as { sessionId?: string; userId?: string; replaceOldest?: boolean }) || {};
-    const userId = body.userId?.trim();
-    if (!userId || userId === 'default_user') {
+    const userId = this.extractUserId(req, body.userId);
+    if (!userId) {
       throw new AppError('Authentication required: Please sign in to create a personal cloud sandbox.', 401, 'UNAUTHORIZED');
     }
     const sessionId = body.sessionId || 'default';
@@ -184,7 +180,7 @@ export class SandboxController {
     const query = req.query as { sessionId?: string; userId?: string };
     const body = (req.body as { sessionId?: string; userId?: string }) || {};
     const sessionId = query?.sessionId || body.sessionId;
-    const userId = query?.userId?.trim() || body.userId?.trim();
+    const userId = this.extractUserId(req, query?.userId || body.userId) || undefined;
     if (!sessionId) {
       throw new AppError('sessionId is required to detach session', 400, 'VALIDATION_ERROR');
     }
@@ -198,9 +194,9 @@ export class SandboxController {
     const body = (req.body as { sessionId?: string; sandboxId?: string; clearAllSessions?: boolean; userId?: string }) || {};
     const sandboxId = query?.sandboxId || body.sandboxId;
     const sessionId = query?.sessionId || body.sessionId;
-    const userId = query?.userId?.trim() || body.userId?.trim();
+    const userId = this.extractUserId(req, query?.userId || body.userId);
 
-    if (!userId || userId === 'default_user') {
+    if (!userId) {
       throw new AppError('Authentication required: Sign in to delete or manage sandboxes.', 401, 'UNAUTHORIZED');
     }
 

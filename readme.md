@@ -51,3 +51,7 @@ Mistral free models:
 google-chrome backend/visualizations/index.html
 # or
 xdg-open backend/visualizations/index.html
+
+# Hosting
+## Deploy the backend folder to Heroku
+git subtree push --prefix backend heroku main

@@ -1081,7 +1081,13 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     if (clean.startsWith('/')) {
       clean = clean.replace(/^\/+/, '');
     }
-    return path.posix.join(this.workspaceRoot, clean);
+    // Sanitize path against directory traversal
+    const normalized = path.posix.normalize(clean).replace(/^(\.\.[\/\\])+/, '');
+    const resolved = path.posix.join(this.workspaceRoot, normalized);
+    if (!resolved.startsWith(this.workspaceRoot)) {
+      throw new Error(`Security Exception: Path traversal outside workspace boundary is forbidden (${filePath})`);
+    }
+    return resolved;
   }
 
   private touchSandbox(sandboxId: string): void {

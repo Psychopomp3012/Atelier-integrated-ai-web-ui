@@ -113,3 +113,7 @@ ehthumbs.db
 .netlify
 .serverless/
 .dynamodb/
+
+
+test_suite/
+sandbox/

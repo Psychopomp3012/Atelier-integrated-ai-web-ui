@@ -9,6 +9,7 @@ import { AuthModal } from './components/AuthModal';
 import { MarkdownContent } from './components/MarkdownContent';
 import { signOutFirebase } from './services/firebaseAuth.service';
 import { firestoreService } from './services/firestore.service';
+import { sessionSyncService } from './services/sessionSync.service';
 import { fetchCliStatus, refreshAuthToken, type CliStatus } from './services/cliAuth.service';
 import { apiFetch } from './utils/api.util';
 import type { ModelType, ChatMessage, UserProfile, AIPlatform, ChatSession, RateLimitState, GeminiQuotaStats, CodexQuotaStats, StepItem, ModelOption } from './types';
@@ -711,42 +712,31 @@ export const App: React.FC = () => {
       });
   }, [performUserCleanup]);
 
-  // Sync and merge chat sessions from Firestore when logged-in user changes
+  // Sync and merge chat sessions across Cloud Backend, Firestore, and LocalStorage
   useEffect(() => {
     if (!currentUser) return;
-    firestoreService.loadUserSessions(currentUser.id).then((remoteSessions) => {
-      setSessions((localSessions) => {
-        const remoteList = remoteSessions || [];
-        const remoteIds = new Set(remoteList.map((s) => s.id));
-        const missingFromRemote = (localSessions || []).filter((s) => !remoteIds.has(s.id));
+    sessionSyncService.loadAndReconcileSessions(currentUser.id).then((merged) => {
+      setSessions(merged);
 
-        // Upload any local-only sessions to Firestore for this account
-        for (const localSess of missingFromRemote) {
-          firestoreService.saveSession(currentUser.id, localSess).catch(() => {});
-        }
-
-        const merged = [...remoteList, ...missingFromRemote];
-        merged.sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
-        try {
-          localStorage.setItem('harness_chat_sessions', JSON.stringify(merged));
-        } catch {}
-
-        // If watching a session, keep messages and model up to date with remote state
-        try {
-          const activeId = localStorage.getItem('harness_current_session_id');
-          if (activeId) {
-            const matched = merged.find((s) => s.id === activeId);
-            if (matched && matched.messages) {
-              setMessages(matched.messages);
-              if (matched.model && matched.model !== 'none') {
-                setSelectedModel(matched.model);
-              }
+      try {
+        const activeId = localStorage.getItem('harness_current_session_id');
+        if (activeId) {
+          const matched = merged.find((s) => s.id === activeId);
+          if (matched && matched.messages) {
+            setMessages(matched.messages);
+            if (matched.model && matched.model !== 'none') {
+              setSelectedModel(matched.model);
             }
           }
-        } catch {}
-
-        return merged;
-      });
+        } else if (merged.length > 0 && merged[0]) {
+          // If no active session, restore the most recent conversation from the cloud
+          setCurrentSessionId(merged[0].id);
+          setMessages(merged[0].messages || []);
+          if (merged[0].model && merged[0].model !== 'none') {
+            setSelectedModel(merged[0].model);
+          }
+        }
+      } catch {}
     });
   }, [currentUser?.id]);
 
@@ -777,10 +767,7 @@ export const App: React.FC = () => {
   const handleDeleteSession = async (sessionId: string) => {
     const updated = sessions.filter((s) => s.id !== sessionId);
     setSessions(updated);
-    localStorage.setItem('harness_chat_sessions', JSON.stringify(updated));
-    if (currentUser) {
-      firestoreService.deleteSession(currentUser.id, sessionId);
-    }
+    sessionSyncService.deleteSession(sessionId, currentUser?.id).catch(() => {});
 
     if (currentSessionId === sessionId) {
       setCurrentSessionId(null);
@@ -1082,9 +1069,7 @@ export const App: React.FC = () => {
           updated = [targetSession, ...prev];
         }
         localStorage.setItem('harness_chat_sessions', JSON.stringify(updated));
-        if (currentUser) {
-          firestoreService.saveSession(currentUser.id, targetSession);
-        }
+        sessionSyncService.saveSession(targetSession, currentUser?.id).catch(() => {});
         return updated;
       });
     };
@@ -1451,9 +1436,7 @@ export const App: React.FC = () => {
               const u = [...sPrev];
               u[idx] = { ...u[idx], messages: updated, updatedAt: new Date().toISOString() };
               localStorage.setItem('harness_chat_sessions', JSON.stringify(u));
-              if (currentUser) {
-                firestoreService.saveSession(currentUser.id, u[idx]);
-              }
+              sessionSyncService.saveSession(u[idx], currentUser?.id).catch(() => {});
               return u;
             }
             return sPrev;

@@ -14,6 +14,29 @@ import {
 import { db } from '../config/firebase.config';
 import type { UserProfile, LinkedAIPlatformAccount, ChatMessage, ChatSession } from '../types';
 
+/**
+ * Strips all undefined properties recursively because Firestore throws
+ * "Function setDoc() called with invalid data. Unsupported field value: undefined"
+ */
+function cleanForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) {
+    return null as unknown as T;
+  }
+  if (Array.isArray(data)) {
+    return data.map((item) => cleanForFirestore(item)) as unknown as T;
+  }
+  if (typeof data === 'object') {
+    const cleaned: Record<string, any> = {};
+    for (const [key, val] of Object.entries(data as Record<string, any>)) {
+      if (val !== undefined) {
+        cleaned[key] = cleanForFirestore(val);
+      }
+    }
+    return cleaned as T;
+  }
+  return data;
+}
+
 export const firestoreService = {
   /**
    * Saves or merges the user profile into the Firestore `users` collection.
@@ -23,21 +46,19 @@ export const firestoreService = {
       const docId = fbUid || user.id;
       const userRef = doc(db, 'users', docId);
 
-      await setDoc(
-        userRef,
-        {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          avatarUrl: user.avatarUrl,
-          primaryPlatform: user.primaryPlatform,
-          linkedPlatforms: user.linkedPlatforms,
-          updatedAt: serverTimestamp(),
-          lastLoginAt: new Date().toISOString(),
-          ...(user.createdAt ? { createdAt: user.createdAt } : { createdAt: new Date().toISOString() }),
-        },
-        { merge: true }
-      );
+      const payload = cleanForFirestore({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatarUrl: user.avatarUrl,
+        primaryPlatform: user.primaryPlatform,
+        linkedPlatforms: user.linkedPlatforms,
+        updatedAt: serverTimestamp(),
+        lastLoginAt: new Date().toISOString(),
+        ...(user.createdAt ? { createdAt: user.createdAt } : { createdAt: new Date().toISOString() }),
+      });
+
+      await setDoc(userRef, payload, { merge: true });
       console.log(`[Firestore] Synchronized user profile for ${user.email} (${docId})`);
     } catch (error) {
       console.warn('[Firestore] Failed to sync user profile:', error);
@@ -87,18 +108,15 @@ export const firestoreService = {
   async saveSession(userId: string, session: ChatSession): Promise<void> {
     try {
       const sessionRef = doc(db, 'users', userId, 'sessions', session.id);
-      await setDoc(
-        sessionRef,
-        {
-          id: session.id,
-          title: session.title,
-          createdAt: session.createdAt,
-          updatedAt: serverTimestamp(),
-          model: session.model,
-          messages: session.messages,
-        },
-        { merge: true }
-      );
+      const payload = cleanForFirestore({
+        id: session.id,
+        title: session.title,
+        createdAt: session.createdAt,
+        updatedAt: serverTimestamp(),
+        model: session.model,
+        messages: session.messages,
+      });
+      await setDoc(sessionRef, payload, { merge: true });
       console.log(`[Firestore] Successfully persisted session ${session.id} for user ${userId}`);
     } catch (error) {
       console.warn('[Firestore] Failed to save session:', error);
@@ -111,8 +129,14 @@ export const firestoreService = {
   async loadUserSessions(userId: string): Promise<ChatSession[]> {
     try {
       const sessionsRef = collection(db, 'users', userId, 'sessions');
-      const q = query(sessionsRef, orderBy('updatedAt', 'desc'), limit(50));
-      const snapshot = await getDocs(q);
+      let snapshot;
+      try {
+        const q = query(sessionsRef, orderBy('updatedAt', 'desc'), limit(50));
+        snapshot = await getDocs(q);
+      } catch (queryErr) {
+        // Fallback without orderBy if Firestore index is missing
+        snapshot = await getDocs(sessionsRef);
+      }
 
       const sessions: ChatSession[] = [];
       snapshot.forEach((d) => {
@@ -156,25 +180,22 @@ export const firestoreService = {
   async saveChatMessage(userId: string, sessionId: string, message: ChatMessage): Promise<void> {
     try {
       const msgRef = doc(db, 'users', userId, 'sessions', sessionId, 'messages', message.id);
-      await setDoc(
-        msgRef,
-        {
-          id: message.id,
-          role: message.role,
-          author: message.author,
-          authorBadge: message.authorBadge || null,
-          time: message.time,
-          avatarUrl: message.avatarUrl,
-          content: message.content,
-          modelBadge: message.modelBadge || null,
-          latency: message.latency || null,
-          steps: message.steps || [],
-          executionResult: message.executionResult || null,
-          explanationPoints: message.explanationPoints || [],
-          timestamp: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      const payload = cleanForFirestore({
+        id: message.id,
+        role: message.role,
+        author: message.author,
+        authorBadge: message.authorBadge || null,
+        time: message.time,
+        avatarUrl: message.avatarUrl,
+        content: message.content,
+        modelBadge: message.modelBadge || null,
+        latency: message.latency || null,
+        steps: message.steps || [],
+        executionResult: message.executionResult || null,
+        explanationPoints: message.explanationPoints || [],
+        timestamp: serverTimestamp(),
+      });
+      await setDoc(msgRef, payload, { merge: true });
     } catch (error) {
       console.warn('[Firestore] Failed to save chat message in subcollection:', error);
     }
