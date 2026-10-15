@@ -82,10 +82,14 @@ export const Header: React.FC<HeaderProps> = ({
 
   const fetchSandboxUsage = async () => {
     try {
+      if (!user?.id) {
+        setInternalSandboxUsage({ used: 0, max: 3, sandboxes: [] });
+        return;
+      }
       onRefreshSandboxUsage?.();
       const activeIds = (validSessionIds || []).join(',');
       const params = new URLSearchParams();
-      if (user?.id) params.set('userId', user.id);
+      params.set('userId', user.id);
       params.set('activeSessionIds', activeIds);
       const url = `/api/v1/sandbox/usage?${params.toString()}`;
       const res = await apiFetch(url);
@@ -131,7 +135,7 @@ export const Header: React.FC<HeaderProps> = ({
       const res = await apiFetch('/api/v1/sandbox/attach', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: cleanSession, sandboxId: targetSandboxId }),
+        body: JSON.stringify({ sessionId: cleanSession, sandboxId: targetSandboxId, userId: user?.id }),
       });
       const data = await res.json();
       if (data.success) {
@@ -151,6 +155,11 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   const handleCreateSandbox = async () => {
+    if (!user) {
+      setShowSandboxDropdown(false);
+      onOpenAuthModal();
+      return;
+    }
     if (isCreatingSandbox) return;
 
     if (sandboxUsage && sandboxUsage.used >= sandboxUsage.max) {
@@ -415,9 +424,9 @@ export const Header: React.FC<HeaderProps> = ({
               {activeSandbox ? 'deployed_code' : 'cloud_off'}
             </span>
             <span className={`font-medium text-xs truncate max-w-[80px] sm:max-w-[140px] ${activeSandbox ? 'text-on-surface' : 'text-on-surface-variant'}`}>
-              {activeSandbox ? activeSandbox.name : 'No Sandbox'}
+              {activeSandbox ? activeSandbox.name : user ? 'No Sandbox' : 'Sign in for Sandbox'}
             </span>
-            {sandboxUsage && (
+            {user && sandboxUsage && (
               <span
                 className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-medium ${
                   activeSandbox
@@ -470,7 +479,28 @@ export const Header: React.FC<HeaderProps> = ({
 
               {/* Sandboxes List or Empty Standby State */}
               <div className="space-y-2 max-h-56 overflow-y-auto pr-0.5 mb-3 custom-scrollbar">
-                {(!sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) ? (
+                {!user ? (
+                  <div className="p-3.5 bg-surface-container-low rounded-xl border border-outline-variant/25 text-center">
+                    <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2 shadow-xs">
+                      <span className="material-symbols-outlined text-[22px]">lock</span>
+                    </div>
+                    <h4 className="text-xs font-bold text-on-surface mb-1">Sign In Required</h4>
+                    <p className="text-[11px] text-outline leading-relaxed mb-3">
+                      Cloud sandboxes and workspaces are private. Sign in to boot, attach, and access your isolated microVMs.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSandboxDropdown(false);
+                        onOpenAuthModal();
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[15px]">login</span>
+                      <span>Sign in with Google</span>
+                    </button>
+                  </div>
+                ) : (!sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) ? (
                   <div className="p-3.5 bg-surface-container-low rounded-xl border border-outline-variant/25 text-center">
                     <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2 shadow-xs">
                       <span className="material-symbols-outlined text-[22px]">rocket_launch</span>

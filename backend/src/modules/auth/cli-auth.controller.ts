@@ -3,6 +3,7 @@ import { cliAuthService } from './cli-auth.service.js';
 import { authService } from './auth.service.js';
 import { createSuccessResponse } from '../../utils/response.util.js';
 import { logger } from '../../utils/logger.util.js';
+import { sandboxService } from '../sandbox/sandbox.service.js';
 
 export class CliAuthController {
   public async getStatus(req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -33,6 +34,16 @@ export class CliAuthController {
     ]);
     const status = cliAuthService.getCliStatus();
     return reply.status(200).send(createSuccessResponse(status));
+  }
+
+  private async getUserIdFromReq(req: FastifyRequest): Promise<string | undefined> {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      const session = await authService.getSession(token);
+      if (session) return session.user.id;
+    }
+    return undefined;
   }
 
   public async getAntigravityAuthUrl(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -71,6 +82,10 @@ export class CliAuthController {
       return reply.status(400).send({ success: false, error: { message: 'Authorization code is required' } });
     }
     const success = await cliAuthService.submitAntigravityCliCode(body.code);
+    if (success) {
+      const userId = await this.getUserIdFromReq(req);
+      sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+    }
     return reply.status(200).send(createSuccessResponse({ success }));
   }
 
@@ -140,6 +155,8 @@ export class CliAuthController {
 
     try {
       const { email } = await cliAuthService.handleGeminiCallback(query.code);
+      const userId = await this.getUserIdFromReq(req);
+      sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
 
       const html = `<!DOCTYPE html>
 <html lang="en">
@@ -309,6 +326,10 @@ export class CliAuthController {
       return reply.status(400).send({ success: false, error: { message: 'Authorization code is required' } });
     }
     const success = await cliAuthService.submitClaudeCliCode(body.code);
+    if (success) {
+      const userId = await this.getUserIdFromReq(req);
+      sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+    }
     return reply.status(200).send(createSuccessResponse({ success }));
   }
 

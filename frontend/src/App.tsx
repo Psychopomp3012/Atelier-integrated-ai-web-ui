@@ -212,9 +212,14 @@ export const App: React.FC = () => {
 
   const fetchSandboxUsage = useCallback(async () => {
     try {
+      if (!currentUser?.id) {
+        setSandboxUsage({ used: 0, max: 3, sandboxes: [] });
+        setSelectedSandboxId(null);
+        return;
+      }
       const activeIds = sessions.map((s) => s.id).join(',');
       const params = new URLSearchParams();
-      if (currentUser?.id) params.set('userId', currentUser.id);
+      params.set('userId', currentUser.id);
       params.set('activeSessionIds', activeIds);
       const url = `/api/v1/sandbox/usage?${params.toString()}`;
       const res = await apiFetch(url);
@@ -224,6 +229,17 @@ export const App: React.FC = () => {
       }
     } catch {}
   }, [currentUser, sessions]);
+
+  // Clean up sandbox state and stored preferences when logged out
+  useEffect(() => {
+    if (!currentUser) {
+      setSelectedSandboxId(null);
+      setSandboxUsage({ used: 0, max: 3, sandboxes: [] });
+      try {
+        localStorage.removeItem('harness_selected_sandbox_id');
+      } catch {}
+    }
+  }, [currentUser]);
 
   useEffect(() => {
     fetchSandboxUsage();
@@ -255,7 +271,7 @@ export const App: React.FC = () => {
   }, [sandboxUsage, selectedSandboxId, currentSessionId]);
 
   const activeSandbox = useMemo(() => {
-    if (!sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) return null;
+    if (!currentUser || !sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) return null;
     if (currentSessionId) {
       const cleanSession = currentSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
       const attached = sandboxUsage.sandboxes.find((s) => s.attachedSessionIds?.includes(cleanSession));
@@ -266,7 +282,7 @@ export const App: React.FC = () => {
       if (selected) return selected;
     }
     return null;
-  }, [sandboxUsage, currentSessionId, selectedSandboxId]);
+  }, [currentUser, sandboxUsage, currentSessionId, selectedSandboxId]);
 
   const handleStartSandboxVM = async () => {
     if (!currentUser) {
@@ -1113,6 +1129,7 @@ export const App: React.FC = () => {
         body: JSON.stringify({
           sessionId: activeSessionId,
           sandboxId: activeSandbox?.sandboxId,
+          userId: currentUser?.id,
           prompt: promptText,
           selectedModel: selectedModel,
           files: attachedFiles?.map((f) => ({
@@ -1566,7 +1583,19 @@ export const App: React.FC = () => {
                 </p>
 
                 {/* Sandbox Status & Action in Hero */}
-                {activeSandbox ? (
+                {!currentUser ? (
+                  <div className="mt-6 flex items-center gap-2.5 px-4 py-2 rounded-xl bg-surface-container-high border border-outline-variant/30 text-xs text-on-surface-variant animate-in fade-in duration-200">
+                    <span className="w-2 h-2 rounded-full bg-slate-400"></span>
+                    <span>Sign in with Google to access and launch your personal cloud sandboxes</span>
+                    <button
+                      type="button"
+                      onClick={() => setIsAuthModalOpen(true)}
+                      className="ml-2 text-primary hover:underline font-semibold cursor-pointer"
+                    >
+                      Sign In →
+                    </button>
+                  </div>
+                ) : activeSandbox ? (
                   <div className="mt-6 flex items-center gap-2.5 px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium animate-in fade-in duration-200">
                     <span className="relative flex h-2 w-2">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -1915,6 +1944,8 @@ export const App: React.FC = () => {
         onClose={() => setIsInspectorOpen(false)}
         sessionId={currentSessionId || undefined}
         sandboxId={activeSandbox?.sandboxId}
+        userId={currentUser?.id}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
         refreshTrigger={messages.length}
       />
     </div>

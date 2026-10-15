@@ -18,6 +18,7 @@ export type AttachedFileInput = z.infer<typeof AttachedFileSchema>;
 export const PromptExecutionInputSchema = z.object({
   sessionId: z.string().optional(),
   sandboxId: z.string().optional(),
+  userId: z.string().optional(),
   prompt: z.string().min(1, 'Prompt cannot be empty'),
   selectedModel: z.string().min(1).default('auto'),
   model: z.string().optional(),

@@ -52,6 +52,7 @@ import type { AttachedFileInput } from '../modules/agent/agent.schema.js';
 export interface PromptExecutionRequest {
   sessionId?: string;
   sandboxId?: string;
+  userId?: string;
   prompt: string;
   selectedModel: ModelEngine;
   model?: ModelEngine;

@@ -1,0 +1,56 @@
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'darkMode': true,
+    'lineColor': '#ffffff',
+    'arrowheadColor': '#ffffff',
+    'mainBkg': '#1e293b',
+    'nodeBorder': '#38bdf8',
+    'primaryColor': '#1e293b',
+    'primaryTextColor': '#ffffff',
+    'primaryBorderColor': '#38bdf8',
+    'secondaryColor': '#0f172a',
+    'tertiaryColor': '#1e1b4b',
+    'edgeLabelBackground': '#0b0f19',
+    'clusterBkg': 'rgba(15, 23, 42, 0.75)',
+    'clusterBorder': '#334155'
+  }
+}}%%
+flowchart TD
+    subgraph Client["🖥️ User & Client Browser (React 19)"]
+        A([fa:fa-globe Open Atelier Web App]) --> B[fa:fa-adjust Auto-Detect Theme]
+        B --> C{fa:fa-key Valid 7-Day JWT?}
+        D[fa:fa-google Google OAuth Login] --> E[fa:fa-id-card Receive 7-Day JWT]
+        E --> F[fa:fa-th-large Load Chat Dashboard]
+        C -->|Yes / Active| F
+        F --> G{fa:fa-link Subscription Linked?}
+        H(fa:fa-shield Subscriptions Menu) --> I[fa:fa-user-check Authorize Provider]
+        I --> J[fa:fa-save Profile Token Saved]
+        G -->|No| H
+        G -->|Yes| K[fa:fa-cube Select / Create VM]
+        J --> K
+        S[fa:fa-sliders Choose Model & Effort] --> T[fa:fa-paper-plane Dispatch Prompt]
+        Z[fa:fa-stream Stream SSE Tokens & Badges] --> AB([fa:fa-desktop Cloud Inspector Explorer])
+    end
+
+    subgraph Cloud["☁️ Backend Orchestrator & E2B MicroVM"]
+        C -->|No / Expired| D
+        K --> L{fa:fa-server Sandbox Active?}
+        L -->|No / New| M[fa:fa-cloud Launch Firecracker VM]
+        M --> N[fa:fa-microchip Allocate 1GB Swap]
+        N --> O[fa:fa-lock Set agent-runner DAC Boundary]
+        O --> P[fa:fa-download Pre-Install CLIs: agy/codex/claude]
+        P --> Q[fa:fa-key Pre-Seed Linked Credentials]
+        L -->|Yes / Reconnect| R[fa:fa-play Resume MicroVM]
+        Q --> S
+        R --> S
+        T --> U{fa:fa-sync Linked Post-Boot?}
+        U -->|Yes / Hot-Swap| V[fa:fa-bolt Dynamic Live Credential Injection]
+        U -->|No / Pre-Warmed| W[fa:fa-check-circle Pre-Flight Credential Verification]
+        V --> X[fa:fa-terminal Run Native CLI inside MicroVM]
+        W --> X
+        X --> Y{fa:fa-question-circle CLI Exit Code == 0?}
+        Y -->|Yes| Z
+        Y -->|No / Auth Err| AA[fa:fa-exclamation-triangle Prompt Auth Relink or Diagnostic]
+        AA --> Z
+    end

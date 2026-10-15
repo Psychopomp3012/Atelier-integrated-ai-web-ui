@@ -239,6 +239,12 @@ export class SandboxService {
     }
   }
 
+  public async syncCredentialsToUserSandboxes(userId?: string): Promise<void> {
+    if (this.e2bProvider.syncCredentialsToUserSandboxes) {
+      await this.e2bProvider.syncCredentialsToUserSandboxes(userId).catch(() => {});
+    }
+  }
+
   public getSandboxUsage(userId?: string): {
     used: number;
     max: number;

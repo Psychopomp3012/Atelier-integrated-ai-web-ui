@@ -118,6 +118,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
   public async syncWithCloud(userId?: string): Promise<void> {
     const apiKey = this.getApiKey();
     if (!apiKey) return;
+    if (!userId || userId === 'default_user') return;
 
     try {
       const paginator = await Sandbox.list({ apiKey });
@@ -140,14 +141,11 @@ export class E2BSandboxProvider implements ISandboxProvider {
           if (startedTime > existing.lastActiveAt) {
             existing.lastActiveAt = startedTime;
           }
-          if (userId && userId !== 'default_user') {
-            existing.userId = userId;
-          }
         } else {
           this.sandboxRecords.set(sbId, {
             sandboxId: sbId,
             name: `Sandbox #${index} (${sbId.substring(0, 6)})`,
-            userId: userId || 'default_user',
+            userId: userId,
             attachedSessionIds: new Set(),
             createdAt: startedTime,
             lastActiveAt: startedTime,
@@ -334,7 +332,9 @@ export class E2BSandboxProvider implements ISandboxProvider {
     targetSandboxId?: string,
     replaceOldest?: boolean
   ): Promise<string> {
-    const effectiveUserId = userId || 'default_user';
+    if (!userId || userId === 'default_user') {
+      throw new Error('Authentication required: You must be signed in to create or access cloud sandboxes.');
+    }
     const cleanId = this.sanitizeSessionId(sessionId);
     const apiKey = this.getApiKey();
 
@@ -342,10 +342,13 @@ export class E2BSandboxProvider implements ISandboxProvider {
       throw new Error('E2B_API_KEY is not configured in environment.');
     }
 
-    // 1. If explicit existing sandboxId requested, attach session directly
+    // 1. If explicit existing sandboxId requested, attach session directly (verifying ownership)
     if (targetSandboxId && targetSandboxId !== 'new') {
       const targetRecord = this.sandboxRecords.get(targetSandboxId);
       if (targetRecord) {
+        if (targetRecord.userId && targetRecord.userId !== userId) {
+          throw new Error('Access denied: You do not own this sandbox.');
+        }
         this.attachSessionToSandbox(cleanId, targetSandboxId);
         await this.resumeIfPaused(targetSandboxId, apiKey);
         return targetSandboxId;
@@ -364,20 +367,24 @@ export class E2BSandboxProvider implements ISandboxProvider {
       if (existingSandboxId) {
         const record = this.sandboxRecords.get(existingSandboxId);
         if (record) {
-          record.lastActiveAt = Date.now();
-        }
-        try {
-          await this.resumeIfPaused(existingSandboxId, apiKey);
-          return existingSandboxId;
-        } catch (err) {
-          logger.warn('Failed to reconnect to existing E2B sandbox, will allocate another', {
-            sessionId: cleanId,
-            sandboxId: existingSandboxId,
-            error: String(err),
-          });
-          this.activeSandboxes.delete(existingSandboxId);
-          this.sessionToSandboxId.delete(cleanId);
-          this.sandboxRecords.delete(existingSandboxId);
+          if (record.userId && record.userId !== userId) {
+            this.sessionToSandboxId.delete(cleanId);
+          } else {
+            record.lastActiveAt = Date.now();
+            try {
+              await this.resumeIfPaused(existingSandboxId, apiKey);
+              return existingSandboxId;
+            } catch (err) {
+              logger.warn('Failed to reconnect to existing E2B sandbox, will allocate another', {
+                sessionId: cleanId,
+                sandboxId: existingSandboxId,
+                error: String(err),
+              });
+              this.activeSandboxes.delete(existingSandboxId);
+              this.sessionToSandboxId.delete(cleanId);
+              this.sandboxRecords.delete(existingSandboxId);
+            }
+          }
         }
       }
     }
@@ -387,9 +394,9 @@ export class E2BSandboxProvider implements ISandboxProvider {
       this.detachSession(cleanId);
     }
 
-    // 3. User sandboxes lookup
+    // 3. User sandboxes lookup - strictly for THIS user
     const userSandboxes = Array.from(this.sandboxRecords.values())
-      .filter((r) => !userId || userId === 'default_user' || r.userId === userId || r.userId === 'default_user' || !r.userId)
+      .filter((r) => r.userId === userId)
       .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 
     // 4. If targetSandboxId is NOT explicitly 'new', explicit attachment is required
@@ -428,7 +435,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
       this.sandboxRecords.set(sbId, {
         sandboxId: sbId,
         name: `Sandbox (${sbId.substring(0, 6)})`,
-        userId: effectiveUserId,
+        userId: userId,
         attachedSessionIds: new Set([cleanId]),
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
@@ -455,7 +462,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
       }
 
       // Initialize dual-user permission boundary and secure credentials
-      await this.ensureSecurityBoundaryAndCredentials(sandbox, effectiveUserId);
+      await this.ensureSecurityBoundaryAndCredentials(sandbox, userId);
 
       this.addLog('READY', `E2B MicroVM ${sbId.substring(0, 8)} online (${this.lastPingMs}ms launch time). Security boundary active.`);
       return sbId;
@@ -472,93 +479,17 @@ export class E2BSandboxProvider implements ISandboxProvider {
    * 1. 'agent-runner' (UID system): owns credentials in /home/agent-runner with 0700/0600.
    * 2. 'user' (developer): owns /home/user/workspace (rw), but CANNOT read /home/agent-runner.
    */
-  public async ensureSecurityBoundaryAndCredentials(sandbox: Sandbox, userId?: string): Promise<void> {
-    if (this.initializedSandboxes.has(sandbox.sandboxId)) {
-      return;
-    }
+  public async syncCredentialsToSandbox(sandbox: Sandbox, userId?: string): Promise<void> {
     const homedir = os.homedir();
     try {
-      const setupScript = `
-        id -u agent-runner >/dev/null 2>&1 || sudo useradd -m -s /bin/bash agent-runner
-        sudo usermod -a -G user agent-runner 2>/dev/null || true
-        sudo usermod -a -G agent-runner user 2>/dev/null || true
-        sudo mkdir -p /home/agent-runner/.gemini/antigravity-cli /home/agent-runner/.claude /home/agent-runner/.codex /home/agent-runner/.local/bin
-        sudo chmod 700 /home/agent-runner
-        sudo chmod 700 /home/agent-runner/.gemini /home/agent-runner/.claude /home/agent-runner/.codex
-        sudo chmod 755 /home/user 2>/dev/null || true
-        sudo mkdir -p ${this.workspaceRoot}
-        sudo chown -R user:user ${this.workspaceRoot} 2>/dev/null || true
-        sudo chmod -R 777 ${this.workspaceRoot} 2>/dev/null || true
-        # Remove any circular workspace symlinks inside workspaceRoot
-        sudo rm -f ${this.workspaceRoot}/workspace 2>/dev/null || true
-        if [ ! -L /workspace ] && [ ! -d /workspace ]; then
-          sudo ln -s ${this.workspaceRoot} /workspace 2>/dev/null || true
-        fi
-        sudo chmod -h 777 /workspace 2>/dev/null || true
-        # Migrate any user-created non-hidden files from /home/agent-runner into the workspace root
-        for f in /home/agent-runner/*; do
-          if [ -f "$f" ]; then
-            sudo mv "$f" ${this.workspaceRoot}/ 2>/dev/null || true
-          fi
-        done
-        sudo chown -R user:user ${this.workspaceRoot} 2>/dev/null || true
-        sudo chmod -R 777 ${this.workspaceRoot} 2>/dev/null || true
-      `;
-      await sandbox.commands.run(setupScript).catch(() => {});
-
-      // Ensure agy CLI binary is provisioned into /usr/local/bin/agy
-      const checkAgy = await sandbox.commands.run('which agy || test -f /usr/local/bin/agy').catch(() => null);
-      if (checkAgy?.exitCode !== 0) {
-        const snapAgy = fs.existsSync('/snap/antigravity-cli/current/bin/agy')
-          ? '/snap/antigravity-cli/current/bin/agy'
-          : fs.existsSync('/usr/local/bin/agy')
-          ? '/usr/local/bin/agy'
-          : null;
-        if (snapAgy && fs.existsSync(snapAgy)) {
-          this.addLog('INFO', 'Provisioning agy CLI binary into cloud sandbox microVM...');
-          const rawBuf = fs.readFileSync(snapAgy);
-          const gzipped = zlib.gzipSync(rawBuf);
-          await sandbox.files.write('/tmp/agy.gz', gzipped.buffer as ArrayBuffer);
-          await sandbox.commands.run('gunzip -f /tmp/agy.gz && sudo mv /tmp/agy /usr/local/bin/agy && sudo chmod +x /usr/local/bin/agy');
-          this.addLog('READY', 'agy CLI binary successfully installed in /usr/local/bin/agy');
-        }
-      }
-
-      // Ensure codex CLI and code-mode runner binaries are provisioned into /usr/local/bin
-      const checkCodex = await sandbox.commands.run('which codex || test -f /usr/local/bin/codex').catch(() => null);
-      if (checkCodex?.exitCode !== 0) {
-        const currentCodex = path.join(homedir, '.codex', 'packages', 'app-server-daemon', 'current', 'bin', 'codex');
-        const localCodex = path.join(homedir, '.local', 'bin', 'codex');
-        const hostCodex = fs.existsSync(currentCodex) ? currentCodex : fs.existsSync(localCodex) ? localCodex : null;
-        if (hostCodex && fs.existsSync(hostCodex)) {
-          this.addLog('INFO', 'Provisioning codex CLI binary into cloud sandbox microVM...');
-          const rawBuf = fs.readFileSync(hostCodex);
-          const gzipped = zlib.gzipSync(rawBuf);
-          await sandbox.files.write('/tmp/codex.gz', gzipped.buffer as ArrayBuffer);
-          await sandbox.commands.run('gunzip -f /tmp/codex.gz && sudo mv /tmp/codex /usr/local/bin/codex && sudo chmod +x /usr/local/bin/codex');
-          this.addLog('READY', 'codex CLI binary successfully installed in /usr/local/bin/codex');
-        }
-      }
-
-      const checkCodeMode = await sandbox.commands.run('which codex-code-mode-host || test -f /usr/local/bin/codex-code-mode-host').catch(() => null);
-      if (checkCodeMode?.exitCode !== 0) {
-        const currentCodeMode = path.join(homedir, '.codex', 'packages', 'app-server-daemon', 'current', 'bin', 'codex-code-mode-host');
-        if (fs.existsSync(currentCodeMode)) {
-          const rawBuf = fs.readFileSync(currentCodeMode);
-          const gzipped = zlib.gzipSync(rawBuf);
-          await sandbox.files.write('/tmp/codex-code-mode-host.gz', gzipped.buffer as ArrayBuffer);
-          await sandbox.commands.run('gunzip -f /tmp/codex-code-mode-host.gz && sudo mv /tmp/codex-code-mode-host /usr/local/bin/codex-code-mode-host && sudo chmod +x /usr/local/bin/codex-code-mode-host');
-          this.addLog('READY', 'codex-code-mode-host successfully installed in /usr/local/bin/codex-code-mode-host');
-        }
-      }
-
-      // Ensure /workspace is symlinked to /home/user/workspace for path compatibility
-      await sandbox.commands.run('sudo ln -s /home/user/workspace /workspace 2>/dev/null || true');
-
       // Determine user-specific profile directory if multi-tenant profile exists
       const userProfileDir = userId && userId !== 'default' && userId !== 'default_user'
         ? path.join(homedir, '.agent-user-profiles', userId)
         : homedir;
+
+      await sandbox.commands.run(
+        'sudo mkdir -p /home/agent-runner/.gemini/antigravity-cli/cache /home/agent-runner/.antigravity/cache /home/agent-runner/.claude /home/agent-runner/.codex'
+      ).catch(() => {});
 
       // Seed Antigravity / Gemini OAuth credentials securely to /home/agent-runner
       const candidateAgyCreds = [
@@ -588,7 +519,6 @@ export class E2BSandboxProvider implements ISandboxProvider {
 
       if (agyCredsContent) {
         await sandbox.files.write('/home/agent-runner/.gemini/oauth_creds.json', agyCredsContent).catch(() => {});
-        // Do not write old gemini oauth_creds to antigravity-cli dir as agy uses dedicated keyring-unavailable tokens
       }
 
       // Seed dedicated Antigravity CLI token files (used by agy when keyring is unavailable)
@@ -619,13 +549,11 @@ export class E2BSandboxProvider implements ISandboxProvider {
       }
 
       if (agyTokenContent) {
-        await sandbox.commands.run('sudo mkdir -p /home/agent-runner/.gemini/antigravity-cli/cache /home/agent-runner/.antigravity/cache').catch(() => {});
         await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-keyring-unavailable-oauth-token', agyTokenContent).catch(() => {});
         await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/antigravity-oauth-token', agyTokenContent).catch(() => {});
         await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-oauth-token', agyTokenContent).catch(() => {});
         await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/cache/jetski-keyring-unavailable-oauth-token', agyTokenContent).catch(() => {});
         await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/jetski-oauth-token', agyTokenContent).catch(() => {});
-        // Remove stale/incompatible oauth_creds.json from antigravity-cli if present so agy doesn't try to use it
         await sandbox.commands.run('sudo rm -f /home/agent-runner/.gemini/antigravity-cli/oauth_creds.json').catch(() => {});
       }
 
@@ -712,7 +640,131 @@ export class E2BSandboxProvider implements ISandboxProvider {
         sudo chmod -R 700 /home/agent-runner 2>/dev/null || true
       `;
       await sandbox.commands.run(lockScript).catch(() => {});
-      this.initializedSandboxes.add(sandbox.sandboxId);
+    } catch (err) {
+      logger.warn('Failed to sync credentials into sandbox microVM', { error: String(err) });
+    }
+  }
+
+  public async syncCredentialsToUserSandboxes(userId?: string): Promise<void> {
+    if (!userId || userId === 'default_user') return;
+    const targets: Sandbox[] = [];
+    for (const [sbId, rec] of this.sandboxRecords.entries()) {
+      if (rec.userId === userId) {
+        const inst = this.activeSandboxes.get(sbId);
+        if (inst) targets.push(inst);
+      }
+    }
+    await Promise.all(targets.map((sb) => this.syncCredentialsToSandbox(sb, userId).catch(() => {})));
+  }
+
+  /**
+   * Enforces strict Linux DAC Dual-User Privilege Separation:
+   * 1. 'agent-runner' (UID system): owns credentials in /home/agent-runner with 0700/0600.
+   * 2. 'user' (developer): owns /home/user/workspace (rw), but CANNOT read /home/agent-runner.
+   */
+  public async ensureSecurityBoundaryAndCredentials(sandbox: Sandbox, userId?: string): Promise<void> {
+    const homedir = os.homedir();
+    try {
+      if (!this.initializedSandboxes.has(sandbox.sandboxId)) {
+        const setupScript = `
+          # Ensure swap space is active so microVM never hits OOM killer
+          if [ ! -f /swapfile ]; then
+            sudo fallocate -l 1G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=1024 2>/dev/null || true
+            sudo chmod 600 /swapfile 2>/dev/null || true
+            sudo mkswap /swapfile 2>/dev/null || true
+            sudo swapon /swapfile 2>/dev/null || true
+          else
+            sudo swapon /swapfile 2>/dev/null || true
+          fi
+          id -u agent-runner >/dev/null 2>&1 || sudo useradd -m -s /bin/bash agent-runner
+          sudo usermod -a -G user agent-runner 2>/dev/null || true
+          sudo usermod -a -G agent-runner user 2>/dev/null || true
+          sudo mkdir -p /home/agent-runner/.gemini/antigravity-cli /home/agent-runner/.claude /home/agent-runner/.codex /home/agent-runner/.local/bin
+          sudo chmod 700 /home/agent-runner
+          sudo chmod 700 /home/agent-runner/.gemini /home/agent-runner/.claude /home/agent-runner/.codex
+          sudo chmod 755 /home/user 2>/dev/null || true
+          sudo mkdir -p ${this.workspaceRoot}
+          sudo chown -R user:user ${this.workspaceRoot} 2>/dev/null || true
+          sudo chmod -R 777 ${this.workspaceRoot} 2>/dev/null || true
+          # Remove any circular workspace symlinks inside workspaceRoot
+          sudo rm -f ${this.workspaceRoot}/workspace 2>/dev/null || true
+          if [ ! -L /workspace ] && [ ! -d /workspace ]; then
+            sudo ln -s ${this.workspaceRoot} /workspace 2>/dev/null || true
+          fi
+          sudo chmod -h 777 /workspace 2>/dev/null || true
+          # Migrate any user-created non-hidden files from /home/agent-runner into the workspace root
+          for f in /home/agent-runner/*; do
+            if [ -f "$f" ]; then
+              sudo mv "$f" ${this.workspaceRoot}/ 2>/dev/null || true
+            fi
+          done
+          sudo chown -R user:user ${this.workspaceRoot} 2>/dev/null || true
+          sudo chmod -R 777 ${this.workspaceRoot} 2>/dev/null || true
+        `;
+        await sandbox.commands.run(setupScript).catch(() => {});
+
+        // Ensure agy CLI binary is provisioned into /usr/local/bin/agy
+        const checkAgy = await sandbox.commands.run('which agy || test -f /usr/local/bin/agy').catch(() => null);
+        if (checkAgy?.exitCode !== 0) {
+          this.addLog('INFO', 'Provisioning agy CLI binary into cloud sandbox microVM via release download...');
+          const installAgyCmd = `curl -sSL "https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.6/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz && sudo tar -xzf /tmp/agy.tar.gz -C /usr/local/bin && sudo ln -sf /usr/local/bin/antigravity /usr/local/bin/agy && sudo chmod +x /usr/local/bin/antigravity /usr/local/bin/agy && rm -f /tmp/agy.tar.gz`;
+          const installRes = await sandbox.commands.run(installAgyCmd, { timeoutMs: 60000 }).catch(() => null);
+          if (installRes?.exitCode === 0) {
+            this.addLog('READY', 'agy CLI binary successfully installed in /usr/local/bin/agy');
+          } else {
+            logger.warn('Failed to install agy CLI in microVM via release download', { exitCode: installRes?.exitCode });
+          }
+        }
+
+        // Ensure codex CLI binary is provisioned into /usr/local/bin
+        const checkCodex = await sandbox.commands.run('which codex || test -f /usr/local/bin/codex').catch(() => null);
+        if (checkCodex?.exitCode !== 0) {
+          this.addLog('INFO', 'Provisioning codex CLI binary into cloud sandbox microVM via npm...');
+          const npmRes = await sandbox.commands
+            .run('sudo npm install -g @openai/codex', { timeoutMs: 120000 })
+            .catch(() => null);
+          if (npmRes?.exitCode === 0) {
+            this.addLog('READY', 'codex CLI binary successfully installed in /usr/local/bin/codex');
+          } else {
+            const currentCodex = path.join(homedir, '.codex', 'packages', 'app-server-daemon', 'current', 'bin', 'codex');
+            const localCodex = path.join(homedir, '.local', 'bin', 'codex');
+            const hostCodex = fs.existsSync(currentCodex) ? currentCodex : fs.existsSync(localCodex) ? localCodex : null;
+            if (hostCodex && fs.existsSync(hostCodex)) {
+              const rawBuf = fs.readFileSync(hostCodex);
+              const gzipped = zlib.gzipSync(rawBuf);
+              await sandbox.files.write('/tmp/codex.gz', gzipped.buffer as ArrayBuffer).catch(() => {});
+              await sandbox.commands.run('gunzip -f /tmp/codex.gz && sudo mv /tmp/codex /usr/local/bin/codex && sudo chmod +x /usr/local/bin/codex').catch(() => {});
+            }
+          }
+        }
+
+        // Ensure claude CLI binary is provisioned into /usr/local/bin
+        const checkClaude = await sandbox.commands.run('which claude || test -f /usr/local/bin/claude').catch(() => null);
+        if (checkClaude?.exitCode !== 0) {
+          this.addLog('INFO', 'Provisioning claude CLI binary into cloud sandbox microVM via npm...');
+          await sandbox.commands.run('sudo npm install -g @anthropic-ai/claude-code', { timeoutMs: 120000 }).catch(() => {});
+        }
+
+        const checkCodeMode = await sandbox.commands.run('which codex-code-mode-host || test -f /usr/local/bin/codex-code-mode-host').catch(() => null);
+        if (checkCodeMode?.exitCode !== 0) {
+          const currentCodeMode = path.join(homedir, '.codex', 'packages', 'app-server-daemon', 'current', 'bin', 'codex-code-mode-host');
+          if (fs.existsSync(currentCodeMode)) {
+            const rawBuf = fs.readFileSync(currentCodeMode);
+            const gzipped = zlib.gzipSync(rawBuf);
+            await sandbox.files.write('/tmp/codex-code-mode-host.gz', gzipped.buffer as ArrayBuffer).catch(() => {});
+            await sandbox.commands.run('gunzip -f /tmp/codex-code-mode-host.gz && sudo mv /tmp/codex-code-mode-host /usr/local/bin/codex-code-mode-host && sudo chmod +x /usr/local/bin/codex-code-mode-host').catch(() => {});
+            this.addLog('READY', 'codex-code-mode-host successfully installed in /usr/local/bin/codex-code-mode-host');
+          }
+        }
+
+        // Ensure /workspace is symlinked to /home/user/workspace for path compatibility (prevent duplicate circular symlink)
+        await sandbox.commands.run('if [ ! -L /workspace ] && [ ! -d /workspace ]; then sudo ln -s /home/user/workspace /workspace 2>/dev/null || true; fi; sudo rm -f /home/user/workspace/workspace /workspace/workspace 2>/dev/null || true');
+
+        this.initializedSandboxes.add(sandbox.sandboxId);
+      }
+
+      // Always synchronize latest user credentials into /home/agent-runner
+      await this.syncCredentialsToSandbox(sandbox, userId);
     } catch (err) {
       logger.warn('Failed to fully establish security boundary in E2B sandbox', { error: String(err) });
     }
@@ -730,11 +782,32 @@ export class E2BSandboxProvider implements ISandboxProvider {
 
     await this.ensureSecurityBoundaryAndCredentials(sandbox, req.userId);
 
+    // Verify requested CLI binary exists inside microVM; if not, re-provision
+    const checkCliBinary = await sandbox.commands.run(
+      req.cli === 'codex' ? 'which codex' : req.cli === 'claude' ? 'which claude' : 'which agy'
+    ).catch(() => null);
+    if (checkCliBinary?.exitCode !== 0) {
+      this.initializedSandboxes.delete(sandbox.sandboxId);
+      await this.ensureSecurityBoundaryAndCredentials(sandbox, req.userId);
+    }
+
     const safePrompt = req.prompt.replace(/'/g, "'\\''");
     let cliCmd = '';
 
     if (req.cli === 'agy') {
-      const modelFlag = req.model && req.model !== 'auto' && req.model !== 'default' ? `--model "${req.model}"` : '';
+      let modelFlag = '';
+      let effortFlag = '';
+      if (req.model && req.model !== 'auto' && req.model !== 'default') {
+        const effortMatch = req.model.match(/^(.*)-(high|medium|low|max)$/i);
+        if (effortMatch) {
+          const baseModel = effortMatch[1];
+          const effort = effortMatch[2].toLowerCase();
+          modelFlag = `--model "${baseModel}"`;
+          effortFlag = `--effort "${effort}"`;
+        } else {
+          modelFlag = `--model "${req.model}"`;
+        }
+      }
       const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
       const keyEnv = geminiKey ? `GEMINI_API_KEY='${geminiKey}'` : '';
       
@@ -747,11 +820,11 @@ export class E2BSandboxProvider implements ISandboxProvider {
 PROMPT=$(cat "${promptFile}")
 rm -f "${promptFile}" "${scriptFile}"
 cd /workspace 2>/dev/null || cd /home/user/workspace || true
-exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" DBUS_SESSION_BUS_ADDRESS="" ${keyEnv} agy -p "$PROMPT" --dangerously-skip-permissions --output-format stream-json ${modelFlag}
+exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" DBUS_SESSION_BUS_ADDRESS="" ${keyEnv} agy -p "$PROMPT" --dangerously-skip-permissions --output-format stream-json ${modelFlag} ${effortFlag}
 `).catch(() => {});
       await sandbox.commands.run(`sudo chown agent-runner:agent-runner ${promptFile} ${scriptFile} && sudo chmod 700 ${promptFile} ${scriptFile}`).catch(() => {});
 
-      cliCmd = `sudo su - agent-runner -c 'script -q -c "${scriptFile}" /dev/null'`;
+      cliCmd = `sudo -u agent-runner -H script -q -c "bash ${scriptFile}" /dev/null`;
     } else if (req.cli === 'claude') {
       const modelFlag = req.model && req.model !== 'auto' && req.model !== 'default' ? `--model "${req.model}"` : '';
       cliCmd = `cd /workspace && sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" claude -p '${safePrompt}' --output-format=stream-json ${modelFlag} < /dev/null`;
@@ -872,8 +945,16 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
                 }
               }
             } catch {
-              accumulatedText += line + '\n';
-              req.onToken?.(line + '\n');
+              if (
+                !line.includes('Authentication required') &&
+                !line.includes('Waiting for authentication') &&
+                !line.includes('visit the URL to log in') &&
+                !line.includes('No such file or directory') &&
+                !line.includes('command not found')
+              ) {
+                accumulatedText += line + '\n';
+                req.onToken?.(line + '\n');
+              }
             }
           }
         },
@@ -886,10 +967,38 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       });
 
       if (lineBuffer.trim() && !accumulatedText) {
-        accumulatedText = lineBuffer.trim();
+        const trimmed = lineBuffer.trim();
+        if (
+          !trimmed.includes('Authentication required') &&
+          !trimmed.includes('Waiting for authentication') &&
+          !trimmed.includes('visit the URL to log in') &&
+          !trimmed.includes('No such file or directory') &&
+          !trimmed.includes('command not found')
+        ) {
+          accumulatedText = trimmed;
+        }
       }
-      if (!accumulatedText.trim() && rawStdout.trim()) {
-        accumulatedText = rawStdout.trim();
+
+      const allOutput = (rawStdout + '\n' + accumulatedText).trim();
+      if (
+        allOutput.includes('Authentication required') ||
+        allOutput.includes('Waiting for authentication') ||
+        allOutput.includes('visit the URL to log in') ||
+        allOutput.includes('Please sign in')
+      ) {
+        throw new Error(
+          `CLI ${req.cli} requires authentication in cloud microVM. Please link your Antigravity account in the top-right subscriptions menu.`
+        );
+      }
+
+      if (result.exitCode !== 0) {
+        const errDetails = rawStdout.trim() || accumulatedText.trim();
+        if (errDetails.includes('No such file or directory') || errDetails.includes('command not found')) {
+          throw new Error(`CLI ${req.cli} not found or failed to execute in sandbox microVM (exit code ${result.exitCode}): ${errDetails}`);
+        }
+        if (!accumulatedText.trim()) {
+          throw new Error(`[Sandbox-Native] ${req.cli.toUpperCase()} exited with code ${result.exitCode}: ${errDetails}`);
+        }
       }
 
       const durationMs = Date.now() - start;
@@ -967,10 +1076,12 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
   }
 
   private resolveSandboxPath(filePath: string): string {
-    if (filePath.startsWith('/')) {
-      return filePath;
+    // Strip leading /workspace or /home/user/workspace prefixes
+    let clean = filePath.replace(/^\/workspace\/?/, '').replace(/^\/home\/user\/workspace\/?/, '');
+    if (clean.startsWith('/')) {
+      clean = clean.replace(/^\/+/, '');
     }
-    return path.posix.join(this.workspaceRoot, filePath);
+    return path.posix.join(this.workspaceRoot, clean);
   }
 
   private touchSandbox(sandboxId: string): void {
@@ -1005,16 +1116,25 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
   }
 
   public getActiveSandboxId(sessionId: string, userId?: string): string | null {
+    if (!userId || userId === 'default_user') {
+      return null;
+    }
     const cleanId = this.sanitizeSessionId(sessionId);
     if (this.sandboxRecords.has(cleanId)) {
-      return cleanId;
+      const rec = this.sandboxRecords.get(cleanId);
+      if (rec && rec.userId === userId) {
+        return cleanId;
+      }
     }
     const directId = this.sessionToSandboxId.get(cleanId);
     if (directId && this.sandboxRecords.has(directId)) {
-      return directId;
+      const rec = this.sandboxRecords.get(directId);
+      if (rec && rec.userId === userId) {
+        return directId;
+      }
     }
     for (const record of this.sandboxRecords.values()) {
-      if (record.attachedSessionIds.has(cleanId)) {
+      if (record.userId === userId && record.attachedSessionIds.has(cleanId)) {
         return record.sandboxId;
       }
     }
@@ -1038,6 +1158,16 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       }
       return await sandbox.files.read(targetPath, { format: 'text' });
     } catch (err) {
+      logger.warn('Initial sandbox.files.read failed, attempting microVM cat fallback', { filePath, error: String(err) });
+      try {
+        const sandbox = await this.getSandboxInstance(sandboxId);
+        const targetPath = this.resolveSandboxPath(filePath);
+        const cleanName = filePath.replace(/^\/+/, '').replace(/^workspace\/?/, '');
+        const cmdRes = await sandbox.commands.run(`cat "${targetPath}" 2>/dev/null || cat "/workspace/${cleanName}" 2>/dev/null || cat "/home/user/workspace/${cleanName}" 2>/dev/null`);
+        if (cmdRes.exitCode === 0) {
+          return cmdRes.stdout;
+        }
+      } catch {}
       logger.error('Failed to read file from E2B sandbox', { filePath, error: err });
       throw new Error(`File ${filePath} not found in E2B sandbox`);
     }
@@ -1047,6 +1177,9 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     try {
       const sandbox = await this.getSandboxInstance(sandboxId);
 
+      // Clean up any stale circular symlinks inside workspace directory
+      await sandbox.commands.run('sudo rm -f /home/user/workspace/workspace /workspace/workspace 2>/dev/null || true').catch(() => {});
+
       const getTree = async (currentDir: string, depth = 0): Promise<SandboxFileNode[]> => {
         if (depth > 4) return [];
         try {
@@ -1055,6 +1188,10 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
 
           for (const entry of entries) {
             if (entry.name.startsWith('.git') || entry.name === 'node_modules') {
+              continue;
+            }
+            // Exclude accidental circular symlink to workspace
+            if (entry.name === 'workspace') {
               continue;
             }
 
@@ -1122,7 +1259,7 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     this.saveRecordsToDisk();
   }
 
-  public getSandboxUsage(userId: string = 'default_user'): {
+  public getSandboxUsage(userId?: string): {
     used: number;
     max: number;
     sandboxes: Array<{
@@ -1135,33 +1272,30 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       attachedSessionIds: string[];
     }>;
   } {
+    const max = envConfig.MAX_SANDBOXES_PER_USER ?? 3;
+
+    // Strict multi-tenant isolation: Unauthenticated or empty userId returns 0 sandboxes.
+    if (!userId || userId === 'default_user' || userId.trim() === '') {
+      return {
+        used: 0,
+        max,
+        sandboxes: [],
+      };
+    }
+
     if (this.sandboxRecords.size === 0) {
       this.loadRecordsFromDisk();
     }
     this.renumberSandboxes();
-    const max = envConfig.MAX_SANDBOXES_PER_USER ?? 3;
     const allSandboxes = Array.from(this.sandboxRecords.values()).sort(
       (a, b) => (a.createdAt || 0) - (b.createdAt || 0) || a.sandboxId.localeCompare(b.sandboxId)
     );
 
-    // Match sandboxes for this user, or shared/unassigned sandboxes.
-    // Primary filter: sandboxes belonging to this user.
-    const userSandboxes = allSandboxes.filter(
-      (r) =>
-        !userId ||
-        userId === 'default_user' ||
-        r.userId === userId ||
-        r.userId === 'default_user' ||
-        !r.userId
-    );
-
-    // Single-tenant fallback: if there are sandboxes in the account but none match this
-    // user ID (e.g., after a re-authentication with a new session), show all sandboxes.
-    // This prevents sandboxes from vanishing when the userId changes between sessions.
-    const effectiveSandboxes = userSandboxes.length > 0 ? userSandboxes : allSandboxes;
+    // Strict owner filter: Sandboxes belonging strictly to THIS user
+    const userSandboxes = allSandboxes.filter((r) => r.userId === userId);
 
     // Limit returned sandboxes to quota slots
-    const visibleSandboxes = effectiveSandboxes.slice(0, max);
+    const visibleSandboxes = userSandboxes.slice(0, max);
 
     return {
       used: visibleSandboxes.length,

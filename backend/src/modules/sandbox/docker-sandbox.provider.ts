@@ -531,7 +531,7 @@ console.log(JSON.stringify(getTree('/workspace')));
     }
   }
 
-  public getSandboxUsage(_userId?: string): {
+  public getSandboxUsage(userId?: string): {
     used: number;
     max: number;
     sandboxes: Array<{
@@ -544,6 +544,13 @@ console.log(JSON.stringify(getTree('/workspace')));
       attachedSessionIds: string[];
     }>;
   } {
+    if (!userId || userId === 'default_user' || userId.trim() === '') {
+      return {
+        used: 0,
+        max: 3,
+        sandboxes: [],
+      };
+    }
     const containerMap = new Map<string, string[]>();
     for (const [sessId, contName] of this.activeContainers.entries()) {
       const list = containerMap.get(contName) || [];

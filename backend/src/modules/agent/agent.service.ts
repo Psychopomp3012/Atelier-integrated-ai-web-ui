@@ -572,7 +572,7 @@ export class AgentService {
             return null;
           });
 
-        if (sandboxResult?.text) {
+        if (sandboxResult?.text && (sandboxResult.exitCode === 0 || sandboxResult.exitCode === undefined)) {
           return sandboxResult;
         }
       } catch (err: any) {
@@ -591,9 +591,12 @@ export class AgentService {
           const geminiKey = customKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
           if (oauthAccessToken || geminiKey) {
             try {
+              const geminiModelId = modelUsed && (modelUsed.includes('gemini') || modelUsed.includes('flash') || modelUsed.includes('pro'))
+                ? (modelUsed.match(/gemini-[\d.]+-[\w]+/i)?.[0] || 'gemini-2.0-flash')
+                : 'gemini-2.0-flash';
               const url = geminiKey
-                ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`
-                : `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent`;
+                ? `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent?key=${geminiKey}`
+                : `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent`;
               const headers: Record<string, string> = { 'Content-Type': 'application/json' };
               if (oauthAccessToken && !geminiKey) {
                 headers['Authorization'] = `Bearer ${oauthAccessToken}`;
@@ -726,7 +729,7 @@ export class AgentService {
             })
             .catch(() => null);
 
-          if (sandboxResult?.text) {
+          if (sandboxResult?.text && (sandboxResult.exitCode === 0 || sandboxResult.exitCode === undefined)) {
             return sandboxResult;
           }
         } catch (err: any) {
@@ -741,15 +744,12 @@ export class AgentService {
 
       if (oauthAccessToken || geminiKey) {
         try {
-          const targetGeminiModel =
-            modelUsed === 'gemini-2-0-flash'
-              ? 'gemini-2.0-flash'
-              : modelUsed === 'gemini-1-5-pro' || modelUsed === 'gemini-2.5-pro'
-              ? 'gemini-1.5-pro'
-              : 'gemini-1.5-flash';
+          const geminiModelId = modelUsed && (modelUsed.includes('gemini') || modelUsed.includes('flash') || modelUsed.includes('pro'))
+            ? (modelUsed.match(/gemini-[\d.]+-[\w]+/i)?.[0] || 'gemini-2.0-flash')
+            : 'gemini-2.0-flash';
           const url = geminiKey
-            ? `https://generativelanguage.googleapis.com/v1beta/models/${targetGeminiModel}:generateContent?key=${geminiKey}`
-            : `https://generativelanguage.googleapis.com/v1beta/models/${targetGeminiModel}:generateContent`;
+            ? `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent?key=${geminiKey}`
+            : `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent`;
 
           const headers: Record<string, string> = { 'Content-Type': 'application/json' };
           if (oauthAccessToken && !geminiKey) {
@@ -816,7 +816,7 @@ export class AgentService {
             })
             .catch(() => null);
 
-          if (sandboxResult?.text) {
+          if (sandboxResult?.text && (sandboxResult.exitCode === 0 || sandboxResult.exitCode === undefined)) {
             return sandboxResult;
           }
         } catch (err: any) {
@@ -870,7 +870,7 @@ export class AgentService {
             })
             .catch(() => null);
 
-          if (sandboxResult?.text) {
+          if (sandboxResult?.text && (sandboxResult.exitCode === 0 || sandboxResult.exitCode === undefined)) {
             return sandboxResult;
           }
         } catch (err) {
@@ -1008,12 +1008,12 @@ export class AgentService {
       promptPreview: input.prompt.slice(0, 40),
     });
 
+    const userId = user?.id || input.userId;
     // Ensure cloud sandbox is explicitly attached before executing any prompt or command
     if (input.sandboxId && sessionId) {
       sandboxService.attachSessionToSandbox(sessionId, input.sandboxId);
     }
-    const userId = user?.id;
-    const isSandboxActive = sandboxService.hasActiveSandbox(sessionId, userId);
+    const isSandboxActive = sandboxService.hasActiveSandbox(sessionId, userId) || Boolean(input.sandboxId);
     if (!isSandboxActive) {
       throw new AppError(
         'No cloud sandbox is attached to this session. Please select an active sandbox from the top bar before executing prompts.',
@@ -1021,7 +1021,7 @@ export class AgentService {
         'NO_ACTIVE_SANDBOX'
       );
     }
-    const activeSbId = sandboxService.getActiveSandboxId(sessionId, userId);
+    const activeSbId = sandboxService.getActiveSandboxId(sessionId, userId) || input.sandboxId;
 
     // 1. Explicit Shell Command Bypass (e.g. `$ ls`, `$ pwd`, `$ npm test`)
     const directCmd = this.extractDirectCommand(input.prompt);

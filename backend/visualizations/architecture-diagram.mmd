@@ -1,0 +1,38 @@
+---
+config:
+  theme: base
+  themeVariables:
+    darkMode: true
+    archEdgeColor: "#ffffff"
+    archEdgeArrowColor: "#ffffff"
+    archGroupBorderColor: "#38bdf8"
+    lineColor: "#ffffff"
+---
+architecture-beta
+    group client(cloud)[Client Frontend (Vercel)]
+    service ui(server)[React 19 UI] in client
+    service inspector(server)[Cloud Inspector] in client
+
+    group backend(server)[Fastify Backend Orchestrator (Heroku)]
+    service auth(server)[7-Day JWT Auth] in backend
+    service api(server)[Fastify API Core] in backend
+    service firestore(database)[Google Cloud Firestore] in backend
+
+    group sandbox(cloud)[E2B MicroVM Sandbox]
+    junction entry in sandbox
+    service agy(cloud)[Google Antigravity] in sandbox
+    service codex(cloud)[OpenAI Codex] in sandbox
+    service claude(cloud)[Anthropic Claude] in sandbox
+
+    ui:R -- L:inspector
+    ui:B -- T:auth
+    inspector:B -- T:api
+
+    auth:R -- L:api
+    auth:B -- T:firestore
+    api:B -- T:firestore
+
+    api:R -- L:entry
+    entry:T -- L:codex
+    entry:R -- L:claude
+    entry:B -- L:agy

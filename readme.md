@@ -48,7 +48,6 @@ Mistral free models:
 ---
 
 ## Visual Architecture & Plan
-- **Interactive Plan Dashboard (HTML):** [`plan_visual.html`](./plan_visual.html)
-- **Architecture Vector Diagram (SVG):** [`system_architecture_diagram.svg`](./system_architecture_diagram.svg)
-
-Open `plan_visual.html` in any browser to inspect interactive hardware allocation gauges (8vCPU / 12GB host vs 2vCPU / 4GB sandbox), Antigravity settings decision tree, Scenario 1 quota invalidation simulator, and multi-provider dynamic routing.
+google-chrome backend/visualizations/index.html
+# or
+xdg-open backend/visualizations/index.html

@@ -5,6 +5,8 @@ import { SandboxExecuteInputSchema } from './sandbox.schema.js';
 import { sandboxService } from './sandbox.service.js';
 import { createSuccessResponse } from '../../utils/response.util.js';
 import { AppError } from '../../utils/error.util.js';
+import { envConfig } from '../../config/env.config.js';
+import { tokenUtil } from '../../utils/token.util.js';
 
 export class SandboxController {
   public async getMetrics(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -18,15 +20,41 @@ export class SandboxController {
   }
 
   public async getFiles(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { sessionId?: string; sandboxId?: string };
+    const query = req.query as { sessionId?: string; sandboxId?: string; userId?: string };
+    let userId = query?.userId?.trim();
+    if (!userId || userId === 'default_user') {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const verified = tokenUtil.verifyJwt(authHeader.substring(7));
+        if (verified.valid && verified.payload?.sub) {
+          userId = verified.payload.sub;
+        }
+      }
+    }
+    if (!userId || userId === 'default_user') {
+      return reply.status(200).send(createSuccessResponse([]));
+    }
     const sessionId = query?.sessionId || 'default';
     const sandboxId = query?.sandboxId;
-    const files = await sandboxService.listFiles(sessionId, undefined, sandboxId);
+    const files = await sandboxService.listFiles(sessionId, userId, sandboxId);
     return reply.status(200).send(createSuccessResponse(files));
   }
 
   public async getFileContent(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { path?: string; sessionId?: string; sandboxId?: string };
+    const query = req.query as { path?: string; sessionId?: string; sandboxId?: string; userId?: string };
+    let userId = query?.userId?.trim();
+    if (!userId || userId === 'default_user') {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const verified = tokenUtil.verifyJwt(authHeader.substring(7));
+        if (verified.valid && verified.payload?.sub) {
+          userId = verified.payload.sub;
+        }
+      }
+    }
+    if (!userId || userId === 'default_user') {
+      throw new AppError('Authentication required: Sign in to inspect sandbox files', 401, 'UNAUTHORIZED');
+    }
     const filePath = query?.path;
     if (!filePath) {
       throw new AppError('File path is required', 400, 'VALIDATION_ERROR');
@@ -34,8 +62,8 @@ export class SandboxController {
     const sessionId = query?.sessionId || 'default';
     const sandboxId = query?.sandboxId;
     try {
-      const activeSb = sandboxId || sandboxService.getActiveSandboxId(sessionId);
-      if (!activeSb && !sandboxService.hasActiveSandbox(sessionId)) {
+      const activeSb = sandboxId || sandboxService.getActiveSandboxId(sessionId, userId);
+      if (!activeSb && !sandboxService.hasActiveSandbox(sessionId, userId)) {
         throw new AppError('No active sandbox VM is running for this session. Please click "Start Sandbox VM".', 404, 'NO_SANDBOX_RUNNING');
       }
 
@@ -97,37 +125,54 @@ export class SandboxController {
 
   public async getUsage(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const query = req.query as { userId?: string; activeSessionIds?: string };
-    await sandboxService.syncWithCloud(query?.userId).catch(() => {});
+    const userId = query?.userId?.trim();
+
+    // Strict Multi-Tenant Isolation: Sandboxes belong ONLY to the user who created them.
+    // If not authenticated or default_user, return empty quota with 0 sandboxes.
+    if (!userId || userId === 'default_user') {
+      const max = envConfig.MAX_SANDBOXES_PER_USER ?? 3;
+      return reply.status(200).send(createSuccessResponse({ used: 0, max, sandboxes: [] }));
+    }
+
+    await sandboxService.syncWithCloud(userId).catch(() => {});
     if (typeof query?.activeSessionIds === 'string') {
       const ids = query.activeSessionIds
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
-      sandboxService.syncActiveSessions(ids, query.userId);
+      sandboxService.syncActiveSessions(ids, userId);
     }
-    const usage = sandboxService.getSandboxUsage(query?.userId);
+    const usage = sandboxService.getSandboxUsage(userId);
     return reply.status(200).send(createSuccessResponse(usage));
   }
 
   public async attachSession(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const body = req.body as { sessionId?: string; sandboxId?: string };
+    const body = req.body as { sessionId?: string; sandboxId?: string; userId?: string };
     if (!body?.sessionId || !body?.sandboxId) {
       throw new AppError('Both sessionId and sandboxId are required', 400, 'VALIDATION_ERROR');
+    }
+    const userId = body.userId?.trim();
+    if (!userId || userId === 'default_user') {
+      throw new AppError('Authentication required: Please sign in to connect to cloud sandboxes.', 401, 'UNAUTHORIZED');
     }
     const success = sandboxService.attachSessionToSandbox(body.sessionId, body.sandboxId);
     if (!success) {
       throw new AppError(`Sandbox ${body.sandboxId} not found to attach session`, 404, 'NOT_FOUND');
     }
-    const usage = sandboxService.getSandboxUsage();
+    const usage = sandboxService.getSandboxUsage(userId);
     return reply.status(200).send(createSuccessResponse({ success: true, sandboxId: body.sandboxId, usage }));
   }
 
   public async createSandbox(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const body = (req.body as { sessionId?: string; userId?: string; replaceOldest?: boolean }) || {};
+    const userId = body.userId?.trim();
+    if (!userId || userId === 'default_user') {
+      throw new AppError('Authentication required: Please sign in to create a personal cloud sandbox.', 401, 'UNAUTHORIZED');
+    }
     const sessionId = body.sessionId || 'default';
     try {
-      const sandboxId = await sandboxService.getOrCreateSandbox(sessionId, body.userId, 'new', body.replaceOldest);
-      const usage = sandboxService.getSandboxUsage(body.userId);
+      const sandboxId = await sandboxService.getOrCreateSandbox(sessionId, userId, 'new', body.replaceOldest);
+      const usage = sandboxService.getSandboxUsage(userId);
       return reply.status(201).send(createSuccessResponse({ sandboxId, usage }));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -136,28 +181,34 @@ export class SandboxController {
   }
 
   public async detachSession(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { sessionId?: string };
-    const body = (req.body as { sessionId?: string }) || {};
+    const query = req.query as { sessionId?: string; userId?: string };
+    const body = (req.body as { sessionId?: string; userId?: string }) || {};
     const sessionId = query?.sessionId || body.sessionId;
+    const userId = query?.userId?.trim() || body.userId?.trim();
     if (!sessionId) {
       throw new AppError('sessionId is required to detach session', 400, 'VALIDATION_ERROR');
     }
     const detached = sandboxService.detachSession(sessionId);
-    const usage = sandboxService.getSandboxUsage();
+    const usage = sandboxService.getSandboxUsage(userId);
     return reply.status(200).send(createSuccessResponse({ success: detached, sessionId, usage }));
   }
 
   public async deleteSandbox(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { sessionId?: string; sandboxId?: string; clearAllSessions?: string };
-    const body = (req.body as { sessionId?: string; sandboxId?: string; clearAllSessions?: boolean }) || {};
+    const query = req.query as { sessionId?: string; sandboxId?: string; clearAllSessions?: string; userId?: string };
+    const body = (req.body as { sessionId?: string; sandboxId?: string; clearAllSessions?: boolean; userId?: string }) || {};
     const sandboxId = query?.sandboxId || body.sandboxId;
     const sessionId = query?.sessionId || body.sessionId;
+    const userId = query?.userId?.trim() || body.userId?.trim();
+
+    if (!userId || userId === 'default_user') {
+      throw new AppError('Authentication required: Sign in to delete or manage sandboxes.', 401, 'UNAUTHORIZED');
+    }
 
     const clearAll = query?.clearAllSessions === 'true' || body.clearAllSessions === true || sessionId === 'all';
 
     if (sandboxId) {
       await sandboxService.destroySandbox(sandboxId);
-      const usage = sandboxService.getSandboxUsage();
+      const usage = sandboxService.getSandboxUsage(userId);
       return reply.status(200).send(
         createSuccessResponse({
           message: `Sandbox ${sandboxId} deleted successfully. Quota slot released.`,
@@ -171,7 +222,7 @@ export class SandboxController {
       if (sessionId && sessionId !== 'all') {
         sandboxService.detachSession(sessionId);
       }
-      const usage = sandboxService.getSandboxUsage();
+      const usage = sandboxService.getSandboxUsage(userId);
       return reply.status(200).send(
         createSuccessResponse({
           message: 'All sessions detached from sandboxes.',
@@ -183,7 +234,7 @@ export class SandboxController {
 
     if (sessionId) {
       const detached = sandboxService.detachSession(sessionId);
-      const usage = sandboxService.getSandboxUsage();
+      const usage = sandboxService.getSandboxUsage(userId);
       return reply.status(200).send(
         createSuccessResponse({
           message: `Session ${sessionId} detached from sandbox. Workspace preserved.`,

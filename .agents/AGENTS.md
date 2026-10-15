@@ -10,13 +10,13 @@ Objectives(What to do):
 - Do appropriate error handling to ensure smoother degugging later.
 
 Objectives(What not to do):
-1. DO NOT PUT any secret keys/private keys in a file that will be pushed.
-2. DO NOT ever read files containing secrets 
-3. DO NOT hardcode models listed for any provider
-4. DO NOT hardcode agent response
-5. DO NOT add system prompt as to what to do no matter what.
-6. DO NOT use a fallback service for ai agents.
-7. DO NOT try testing that takes too long, just relay me what to do, i will test myself o save tokens.
+- DO NOT PUT any secret keys/private keys in a file that will be pushed.
+- DO NOT ever read files containing secrets 
+- DO NOT hardcode models listed for any provider
+- DO NOT hardcode agent response
+- DO NOT add system prompt as to what to do no matter what.
+- DO NOT use a fallback service for ai agents.
+- DO NOT download CLIs in backend. Users will run CLIs in Sanndboxes only.
 
 Frontend Instructions:
 - Tech Stack: React + typescript + tailwind(v3)
@@ -34,3 +34,4 @@ Login Instruction:
 
 Testing Instruction:
 - When asked for testing, perform testing in a separate folder, so clean up will be easy.
+- DO NOT try testing that takes too long, just relay me what to do, i will test myself o save tokens.

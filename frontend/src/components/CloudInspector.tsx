@@ -15,6 +15,8 @@ interface CloudInspectorProps {
   onClose?: () => void;
   sessionId?: string;
   sandboxId?: string;
+  userId?: string;
+  onOpenAuthModal?: () => void;
   refreshTrigger?: number | string;
 }
 
@@ -23,6 +25,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
   onClose,
   sessionId,
   sandboxId: propSandboxId,
+  userId,
+  onOpenAuthModal,
   refreshTrigger,
 }) => {
   const [files, setFiles] = useState<SandboxFileNode[]>([]);
@@ -60,17 +64,21 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
   } | null>(null);
 
   const fetchUsage = useCallback(async () => {
+    if (!userId) {
+      setQuotaUsage({ used: 0, max: 3, sandboxes: [] });
+      return;
+    }
     try {
-      const res = await apiFetch('/api/v1/sandbox/usage');
+      const res = await apiFetch(`/api/v1/sandbox/usage?userId=${encodeURIComponent(userId)}`);
       const data = await res.json();
       if (data.success && data.data) {
         setQuotaUsage(data.data);
       }
     } catch {}
-  }, []);
+  }, [userId]);
 
   const currentSandbox = useMemo(() => {
-    if (!quotaUsage?.sandboxes || quotaUsage.sandboxes.length === 0) return null;
+    if (!userId || !quotaUsage?.sandboxes || quotaUsage.sandboxes.length === 0) return null;
     if (propSandboxId) {
       const found = quotaUsage.sandboxes.find((sb) => sb.sandboxId === propSandboxId);
       if (found) return found;
@@ -80,9 +88,13 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       quotaUsage.sandboxes.find((sb) => sb.attachedSessionIds?.includes(cleanSession)) ||
       quotaUsage.sandboxes[0]
     );
-  }, [quotaUsage, sessionId, propSandboxId]);
+  }, [userId, quotaUsage, sessionId, propSandboxId]);
 
   const fetchFiles = useCallback(async (quiet = false) => {
+    if (!userId) {
+      setFiles([]);
+      return;
+    }
     if (!quiet) setIsLoading(true);
     else setIsRefreshing(true);
     setErrorMessage(null);
@@ -90,9 +102,11 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
     try {
       const activeSession = sessionId || 'default';
       const targetSb = propSandboxId || currentSandbox?.sandboxId;
-      const url = targetSb
-        ? `/api/v1/sandbox/files?sandboxId=${encodeURIComponent(targetSb)}&sessionId=${encodeURIComponent(activeSession)}`
-        : `/api/v1/sandbox/files?sessionId=${encodeURIComponent(activeSession)}`;
+      const params = new URLSearchParams();
+      if (targetSb) params.set('sandboxId', targetSb);
+      params.set('sessionId', activeSession);
+      params.set('userId', userId);
+      const url = `/api/v1/sandbox/files?${params.toString()}`;
       const res = await apiFetch(url);
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
@@ -109,18 +123,22 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       setIsRefreshing(false);
       fetchUsage();
     }
-  }, [sessionId, propSandboxId, currentSandbox?.sandboxId, fetchUsage]);
+  }, [userId, sessionId, propSandboxId, currentSandbox?.sandboxId, fetchUsage]);
 
   const [isStartingSandbox, setIsStartingSandbox] = useState(false);
 
   const handleStartSandbox = async () => {
+    if (!userId) {
+      onOpenAuthModal?.();
+      return;
+    }
     setIsStartingSandbox(true);
     try {
       const activeSession = (sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
       const res = await apiFetch('/api/v1/sandbox/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: activeSession }),
+        body: JSON.stringify({ sessionId: activeSession, userId }),
       });
       const data = await res.json();
       if (data.success) {
@@ -158,9 +176,13 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
     try {
       const activeSession = sessionId || 'default';
       const targetSb = propSandboxId || currentSandbox?.sandboxId;
-      const url = targetSb
-        ? `/api/v1/sandbox/file?path=${encodeURIComponent(file.path)}&sandboxId=${encodeURIComponent(targetSb)}&sessionId=${encodeURIComponent(activeSession)}`
-        : `/api/v1/sandbox/file?path=${encodeURIComponent(file.path)}&sessionId=${encodeURIComponent(activeSession)}`;
+      const params = new URLSearchParams();
+      params.set('path', file.path);
+      if (targetSb) params.set('sandboxId', targetSb);
+      params.set('sessionId', activeSession);
+      if (userId) params.set('userId', userId);
+      const url = `/api/v1/sandbox/file?${params.toString()}`;
+
       const res = await apiFetch(url);
       const data = await res.json();
       const ext = (file.name.split('.').pop() || '').toLowerCase();
@@ -171,7 +193,7 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
         setSelectedFile({
           path: file.path,
           name: file.name,
-          content: data.data.content,
+          content: data.data.content ?? '',
           dataUrl: data.data.dataUrl,
           isImage: data.data.isImage !== undefined ? Boolean(data.data.isImage) : isImg,
           isSvg: data.data.isSvg !== undefined ? Boolean(data.data.isSvg) : isSvg,
@@ -179,12 +201,19 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
         });
         setActivePreviewTab('preview');
         setZoomLevel(100);
+      } else {
+        setSelectedFile({
+          path: file.path,
+          name: file.name,
+          content: data.error?.message || '// Unable to load file content from sandbox.',
+          size: file.size,
+        });
       }
-    } catch {
+    } catch (err: unknown) {
       setSelectedFile({
         path: file.path,
         name: file.name,
-        content: '// Unable to load file content from sandbox.',
+        content: err instanceof Error ? err.message : '// Unable to load file content from sandbox.',
         size: file.size,
       });
     } finally {
@@ -613,9 +642,16 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
                 </div>
               ) : (
                 <div className="flex-1 overflow-auto p-space-md font-mono text-xs">
-                  <pre className="whitespace-pre font-mono text-xs leading-relaxed select-text">
-                    <code>{selectedFile.content}</code>
-                  </pre>
+                  {selectedFile.content ? (
+                    <pre className="whitespace-pre font-mono text-xs leading-relaxed select-text">
+                      <code>{selectedFile.content}</code>
+                    </pre>
+                  ) : (
+                    <div className="text-outline text-xs italic py-12 text-center flex flex-col items-center justify-center gap-2">
+                      <span className="material-symbols-outlined text-[26px] opacity-40">description</span>
+                      <span>This file is empty (0 bytes).</span>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -646,6 +682,24 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
                   className="mt-3 px-3 py-1 rounded-md bg-surface-container hover:bg-surface-container-high border border-outline-variant/30 text-xs text-primary font-medium cursor-pointer"
                 >
                   Retry
+                </button>
+              </div>
+            ) : !userId ? (
+              <div className="py-12 px-4 text-center text-outline space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-surface-container mx-auto flex items-center justify-center text-primary mb-1 shadow-inner">
+                  <span className="material-symbols-outlined text-[28px]">lock</span>
+                </div>
+                <p className="font-semibold text-xs text-on-surface">Sign In Required</p>
+                <p className="text-[11px] text-outline max-w-xs mx-auto leading-relaxed">
+                  Cloud sandboxes and file workspaces are strictly private to each user. Sign in to boot, access, and inspect your microVMs.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onOpenAuthModal?.()}
+                  className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary text-xs font-semibold shadow-xs transition-all cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[15px]">login</span>
+                  <span>Sign in with Google</span>
                 </button>
               </div>
             ) : !currentSandbox ? (
