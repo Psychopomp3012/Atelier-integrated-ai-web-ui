@@ -2,6 +2,14 @@ import { buildApp } from './app.js';
 import { envConfig } from './config/env.config.js';
 import { logger } from './utils/logger.util.js';
 
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled Rejection detected', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught Exception detected', error);
+});
+
 async function startServer(): Promise<void> {
   try {
     const app = await buildApp();

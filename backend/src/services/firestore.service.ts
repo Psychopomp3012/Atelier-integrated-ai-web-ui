@@ -1,6 +1,8 @@
 import { initializeApp, getApps, cert, applicationDefault } from 'firebase-admin/app';
 import { getFirestore, FieldValue, type Firestore, type QueryDocumentSnapshot } from 'firebase-admin/firestore';
 import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { logger } from '../utils/logger.util.js';
 import type {
   ChatMessage,
@@ -36,29 +38,49 @@ export class FirestoreBackendService {
         const googleAppCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
         const projectId = process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || 'integrated-ai-cli';
 
+        const gcloudAdc = path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
+
+        let certObj: any = null;
         if (serviceAccountEnv) {
-          let certObj: any;
-          if (serviceAccountEnv.trim().startsWith('{')) {
-            certObj = JSON.parse(serviceAccountEnv);
-          } else if (fs.existsSync(serviceAccountEnv)) {
-            certObj = JSON.parse(fs.readFileSync(serviceAccountEnv, 'utf8'));
+          try {
+            const trimmed = serviceAccountEnv.trim();
+            if (trimmed.startsWith('{')) {
+              certObj = JSON.parse(trimmed);
+            } else if (fs.existsSync(trimmed)) {
+              certObj = JSON.parse(fs.readFileSync(trimmed, 'utf8'));
+            } else {
+              const decoded = Buffer.from(trimmed, 'base64').toString('utf8');
+              if (decoded.trim().startsWith('{')) {
+                certObj = JSON.parse(decoded);
+              }
+            }
+          } catch (e) {
+            logger.warn('Failed to parse FIREBASE_SERVICE_ACCOUNT environment variable', { error: String(e) });
           }
-          if (certObj) {
-            initializeApp({
-              credential: cert(certObj),
-              projectId: certObj.project_id || projectId,
-            });
-          }
+        }
+
+        if (certObj) {
+          initializeApp({
+            credential: cert(certObj),
+            projectId: certObj.project_id || projectId,
+          });
         } else if (googleAppCreds && fs.existsSync(googleAppCreds)) {
           initializeApp({
             credential: applicationDefault(),
             projectId,
           });
-        } else {
-          // Initialize with default project ID
+        } else if (fs.existsSync(gcloudAdc)) {
           initializeApp({
+            credential: applicationDefault(),
             projectId,
           });
+        } else {
+          this.isAvailable = false;
+          this.db = null;
+          logger.info(
+            'Firebase Firestore credentials not found (set FIREBASE_SERVICE_ACCOUNT or GOOGLE_APPLICATION_CREDENTIALS for persistent cloud storage). Operating with in-memory fallback.'
+          );
+          return;
         }
       }
 
@@ -71,7 +93,7 @@ export class FirestoreBackendService {
     } catch (err) {
       this.isAvailable = false;
       this.db = null;
-      logger.warn('Firebase Firestore not available', {
+      logger.warn('Firebase Firestore initialization skipped or failed', {
         error: String(err),
       });
     }
