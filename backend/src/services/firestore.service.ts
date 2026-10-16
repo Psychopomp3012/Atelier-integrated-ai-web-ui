@@ -479,6 +479,90 @@ export class FirestoreBackendService {
       }
     }
   }
+
+  // --- Persistent Cross-Platform CLI Links in Firebase Firestore ---
+
+  public async getUserCliLinks(userId?: string, userEmail?: string): Promise<Record<string, any> | null> {
+    if (!this.isAvailable || !this.db) return null;
+    try {
+      if (userId) {
+        const snap = await this.db.collection('users').doc(userId).get();
+        if (snap.exists) {
+          const data = snap.data();
+          const links = data?.cliLinks || data?.linkedPlatforms;
+          if (links && typeof links === 'object' && Object.keys(links).length > 0) return links;
+        }
+      }
+      if (userEmail) {
+        const cleanEmail = userEmail.toLowerCase().trim();
+        // 1. Direct lookup by email doc id in case email was used as doc key
+        const emailDocSnap = await this.db.collection('users').doc(cleanEmail).get();
+        if (emailDocSnap.exists) {
+          const data = emailDocSnap.data();
+          const links = data?.cliLinks || data?.linkedPlatforms;
+          if (links && typeof links === 'object' && Object.keys(links).length > 0) return links;
+        }
+
+        // 2. Query lookup by email field across all users
+        const querySnap = await this.db.collection('users').where('email', '==', cleanEmail).get();
+        for (const doc of querySnap.docs) {
+          const data = doc.data();
+          const links = data?.cliLinks || data?.linkedPlatforms;
+          if (links && typeof links === 'object' && Object.keys(links).length > 0) return links;
+        }
+      }
+    } catch (err) {
+      logger.warn('Failed to fetch user CLI links from Firestore', { error: String(err) });
+    }
+    return null;
+  }
+
+  public async saveUserCliLinks(userId: string, cliLinks: Record<string, any>, userEmail?: string): Promise<void> {
+    if (!this.isAvailable || !this.db || !userId) return;
+    try {
+      const cleanEmail = (userEmail || cliLinks.email || '').toLowerCase().trim();
+      let targetDocId = userId;
+
+      // If userId looks like an email, check if a canonical user ID doc exists
+      if (userId.includes('@') && cleanEmail) {
+        const querySnap = await this.db.collection('users').where('email', '==', cleanEmail).limit(1).get();
+        if (!querySnap.empty && querySnap.docs[0].id) {
+          targetDocId = querySnap.docs[0].id;
+        }
+      }
+
+      const payload = {
+        id: targetDocId,
+        ...(cleanEmail ? { email: cleanEmail } : {}),
+        cliLinks,
+        linkedPlatforms: cliLinks,
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+
+      await this.db.collection('users').doc(targetDocId).set(payload, { merge: true });
+
+      // If targetDocId is different from userId, keep both synchronized for seamless lookup
+      if (targetDocId !== userId) {
+        await this.db.collection('users').doc(userId).set(
+          {
+            ...(cleanEmail ? { email: cleanEmail } : {}),
+            cliLinks,
+            linkedPlatforms: cliLinks,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+
+      logger.info(`Persisted CLI links to Firebase Firestore for user ${targetDocId}`, {
+        antigravity: cliLinks?.antigravity?.linked,
+        codex: cliLinks?.codex?.linked,
+        claude: cliLinks?.claude?.linked,
+      });
+    } catch (err) {
+      logger.warn('Failed to save user CLI links to Firestore', { error: String(err) });
+    }
+  }
 }
 
 export const firestoreBackendService = new FirestoreBackendService();

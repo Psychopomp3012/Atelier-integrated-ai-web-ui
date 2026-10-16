@@ -314,7 +314,7 @@ export class CodexQuotaService {
       (effectiveUserId && cliAuthService.isUserCliLinked(effectiveUserId, 'codex')) ||
       (userEmail && cliAuthService.isUserCliLinkedByEmail(userEmail, 'codex'))
     );
-    const cliStatus = cliAuthService.getCliStatus(effectiveUserId, userEmail);
+    const cliStatus = await cliAuthService.getCliStatus(effectiveUserId, userEmail);
 
     logger.debug('[Codex Quota] Evaluated Codex link status', {
       userId,

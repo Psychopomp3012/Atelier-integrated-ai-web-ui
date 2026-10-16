@@ -10,7 +10,7 @@ export class CliAuthController {
   public async getStatus(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const userId = await this.getUserIdFromReq(req);
     const userEmail = await this.getUserEmailFromReq(req);
-    const status = cliAuthService.getCliStatus(userId, userEmail);
+    const status = await cliAuthService.getCliStatus(userId, userEmail);
     return reply.status(200).send(createSuccessResponse(status));
   }
 

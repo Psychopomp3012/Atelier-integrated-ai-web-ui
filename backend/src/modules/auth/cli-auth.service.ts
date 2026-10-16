@@ -4,6 +4,7 @@ import os from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { logger } from '../../utils/logger.util.js';
 import { AppError } from '../../utils/error.util.js';
+import { firestoreBackendService } from '../../services/firestore.service.js';
 import type { CliUsageTelemetry } from '../quota/quota.types.js';
 import type { AgentStep } from '../../types/agent.types.js';
 
@@ -256,6 +257,106 @@ export class CliAuthService {
     return directRec || null;
   }
 
+  public async syncUserFromFirestore(userId?: string, userEmail?: string): Promise<void> {
+    try {
+      const remote = await firestoreBackendService.getUserCliLinks(userId, userEmail);
+      if (remote && typeof remote === 'object') {
+        const links = this.loadUserCliLinks();
+        const cleanEmail = (userEmail || remote.email || '').toLowerCase().trim();
+        const effectiveId = userId || (cleanEmail ? this.getUserIdByEmail(cleanEmail) : '') || userId || 'synced_user';
+
+        if (!links[effectiveId]) links[effectiveId] = {};
+
+        for (const c of ['antigravity', 'gemini', 'claude', 'codex'] as const) {
+          if (remote[c] && typeof remote[c] === 'object') {
+            const localState = links[effectiveId][c];
+            const localTime = localState?.unlinkedAt
+              ? new Date(localState.unlinkedAt).getTime()
+              : localState?.linkedAt
+              ? new Date(localState.linkedAt).getTime()
+              : 0;
+            const remoteTime = remote[c]?.unlinkedAt
+              ? new Date(remote[c].unlinkedAt).getTime()
+              : remote[c]?.linkedAt
+              ? new Date(remote[c].linkedAt).getTime()
+              : 0;
+
+            if (!localState || remoteTime >= localTime) {
+              links[effectiveId][c] = remote[c];
+            }
+          }
+        }
+        if (cleanEmail && !links[effectiveId].email) {
+          links[effectiveId].email = cleanEmail;
+        }
+        this.saveUserCliLinks(links);
+      }
+    } catch (e) {
+      logger.debug('Failed to sync user CLI links from Firestore', { error: String(e) });
+    }
+  }
+
+  public async syncLocalLinksToFirestore(): Promise<void> {
+    try {
+      const links = this.loadUserCliLinks();
+
+      // Check host credentials on local dev machine and associate them with the user record
+      const hostAgy = this.getWorkspaceAntigravityUserInfo();
+      const hostCodex = this.getCodexAuthInfo();
+
+      if (hostAgy?.email || hostCodex?.email) {
+        const hostEmail = (hostAgy?.email || hostCodex?.email || '').toLowerCase().trim();
+        if (hostEmail) {
+          const targetUser = Object.keys(links).find((k) => {
+            const entry = links[k];
+            return (
+              entry?.email?.toLowerCase().trim() === hostEmail ||
+              entry?.antigravity?.email?.toLowerCase().trim() === hostEmail ||
+              entry?.gemini?.email?.toLowerCase().trim() === hostEmail ||
+              entry?.codex?.email?.toLowerCase().trim() === hostEmail
+            );
+          }) || hostEmail;
+
+          if (!links[targetUser]) links[targetUser] = { email: hostEmail };
+
+          if (hostAgy?.email && links[targetUser]?.antigravity?.linked !== false) {
+            links[targetUser].antigravity = {
+              linked: true,
+              email: hostAgy.email,
+              name: hostAgy.name,
+              linkedAt: links[targetUser].antigravity?.linkedAt || new Date().toISOString(),
+            };
+            links[targetUser].gemini = {
+              linked: true,
+              email: hostAgy.email,
+              name: hostAgy.name,
+              linkedAt: links[targetUser].gemini?.linkedAt || new Date().toISOString(),
+            };
+          }
+
+          if (hostCodex.linked && links[targetUser]?.codex?.linked !== false) {
+            links[targetUser].codex = {
+              linked: true,
+              email: hostCodex.email || hostEmail || 'ChatGPT Account',
+              linkedAt: links[targetUser].codex?.linkedAt || new Date().toISOString(),
+            };
+          }
+
+          this.saveUserCliLinks(links);
+        }
+      }
+
+      for (const [userId, rec] of Object.entries(links)) {
+        if (rec && typeof rec === 'object' && Object.keys(rec).length > 0) {
+          const email = rec.email || rec.antigravity?.email || rec.gemini?.email || rec.codex?.email;
+          await firestoreBackendService.saveUserCliLinks(userId, rec, email).catch(() => {});
+        }
+      }
+    } catch (err) {
+      logger.debug('Failed to sync local links to Firestore', { error: String(err) });
+    }
+  }
+
   public linkUserCli(
     userId: string,
     cli: 'antigravity' | 'gemini' | 'claude' | 'codex',
@@ -273,6 +374,7 @@ export class CliAuthService {
       ...metadata,
     };
     this.saveUserCliLinks(links);
+    firestoreBackendService.saveUserCliLinks(userId, links[userId], email).catch(() => {});
     logger.info(`Linked ${cli} CLI for user ${userId}`, { email });
   }
 
@@ -319,6 +421,9 @@ export class CliAuthService {
     }
 
     this.saveUserCliLinks(links);
+    if (userId && links[userId]) {
+      firestoreBackendService.saveUserCliLinks(userId, links[userId], targetEmail || cleanEmail).catch(() => {});
+    }
     logger.info(`Unlinked ${cli} CLI for user ${userId}`, { targetEmail });
   }
 
@@ -1175,7 +1280,10 @@ export class CliAuthService {
   /**
    * Gets current status of all CLI linkings scoped to a specific user.
    */
-  public getCliStatus(userId?: string, userEmail?: string): CliStatusResult {
+  public async getCliStatus(userId?: string, userEmail?: string): Promise<CliStatusResult> {
+    if (userId || userEmail) {
+      await this.syncUserFromFirestore(userId, userEmail);
+    }
     const effectiveUserId = userId || (userEmail ? this.getUserIdByEmail(userEmail) : undefined);
     const userRecord = effectiveUserId
       ? this.getUserCliRecord(effectiveUserId)

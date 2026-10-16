@@ -362,7 +362,11 @@ export class AntigravityQuotaService {
     sessionId?: string,
     userId?: string
   ): Promise<AntigravityQuotaStats> {
-    const effectiveUserId = userId || (userEmail ? cliAuthService.getUserIdByEmail(userEmail) : undefined);
+    const effectiveUserId = userId || (userEmail ? cliAuthService.getUserIdByEmail(userEmail) || undefined : undefined);
+
+    if (effectiveUserId || userEmail) {
+      await cliAuthService.syncUserFromFirestore(effectiveUserId || undefined, userEmail);
+    }
 
     // Multi-tenant check: Is Antigravity CLI linked for this specific user or email?
     const isLinked = Boolean(

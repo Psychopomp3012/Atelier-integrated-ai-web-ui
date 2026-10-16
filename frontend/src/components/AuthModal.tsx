@@ -312,6 +312,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const msg = err instanceof Error ? err.message : 'Google sign-in was cancelled';
       if (msg.includes('popup-closed-by-user')) {
         setAuthError('Sign-in cancelled: Popup window was closed.');
+      } else if (msg.includes('popup-blocked')) {
+        setAuthError('Pop-up was blocked by your browser. Please click "Preferences" on the notification bar at the top of Firefox (or the pop-up icon in your address bar) and select "Allow pop-ups", then click Continue with Google again.');
       } else {
         setAuthError(msg);
       }

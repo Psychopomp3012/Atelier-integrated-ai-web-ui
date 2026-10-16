@@ -10,6 +10,7 @@ import { sessionRoutes } from './modules/session/session.routes.js';
 import { createErrorResponse } from './utils/response.util.js';
 import { isAppError } from './utils/error.util.js';
 import { logger } from './utils/logger.util.js';
+import { cliAuthService } from './modules/auth/cli-auth.service.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -56,6 +57,11 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(authRoutes);
   await app.register(quotaRoutes);
   await app.register(sessionRoutes);
+
+  // Sync existing local CLI links to Firestore on startup if Firestore is available
+  app.addHook('onReady', async () => {
+    cliAuthService.syncLocalLinksToFirestore().catch(() => {});
+  });
 
   return app;
 }

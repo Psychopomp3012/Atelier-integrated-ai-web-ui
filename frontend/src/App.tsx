@@ -7,6 +7,7 @@ import { PromptBar, type AttachedFile } from './components/PromptBar';
 import { CloudInspector } from './components/CloudInspector';
 import { AuthModal } from './components/AuthModal';
 import { MarkdownContent } from './components/MarkdownContent';
+import { LoadingScreen } from './components/LoadingScreen';
 import { signOutFirebase } from './services/firebaseAuth.service';
 import { firestoreService } from './services/firestore.service';
 import { sessionSyncService } from './services/sessionSync.service';
@@ -122,6 +123,17 @@ export const App: React.FC = () => {
   // Mobile drawer states
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+
+  // Full-page initialization and post-sign-in loading screen
+  const [isPageLoading, setIsPageLoading] = useState<boolean>(() => {
+    try {
+      return Boolean(localStorage.getItem('auth_token'));
+    } catch {
+      return false;
+    }
+  });
+  const [loadingMessage, setLoadingMessage] = useState('Initializing Atelier Workspace');
+  const [loadingSubMessage, setLoadingSubMessage] = useState('Connecting to cloud microVMs & models...');
 
   // Paginated chat history state
   const [hasMoreEarlierMessages, setHasMoreEarlierMessages] = useState<boolean>(false);
@@ -757,8 +769,17 @@ export const App: React.FC = () => {
     const token = localStorage.getItem('auth_token');
     if (!token) {
       performUserCleanup();
+      setIsPageLoading(false);
       return;
     }
+
+    setLoadingMessage('Initializing Atelier Workspace');
+    setLoadingSubMessage('Connecting to cloud microVMs & models...');
+
+    // Safety timeout ensures loading screen never blocks the user indefinitely if backend takes longer
+    const safetyTimeout = setTimeout(() => {
+      setIsPageLoading(false);
+    }, 4000);
 
     apiFetch('/api/v1/auth/me')
       .then((res) => {
@@ -786,7 +807,15 @@ export const App: React.FC = () => {
         if (err?.message === 'Unauthenticated') {
           performUserCleanup();
         }
+      })
+      .finally(() => {
+        setTimeout(() => {
+          setIsPageLoading(false);
+          clearTimeout(safetyTimeout);
+        }, 350);
       });
+
+    return () => clearTimeout(safetyTimeout);
   }, [performUserCleanup]);
 
   // Sync and merge chat sessions across Cloud Backend, Firestore, and LocalStorage
@@ -1028,6 +1057,10 @@ export const App: React.FC = () => {
     name?: string,
     avatarUrl?: string
   ) => {
+    setLoadingMessage('Signing in to Atelier');
+    setLoadingSubMessage('Configuring cloud workspace & synchronizing profile...');
+    setIsPageLoading(true);
+
     try {
       // Clear previous user's messages, active session, and sandbox selection immediately
       setMessages([]);
@@ -1115,6 +1148,10 @@ export const App: React.FC = () => {
       const errorMsg = err instanceof Error ? err.message : 'Authentication failed';
       showToast(errorMsg);
       throw err;
+    } finally {
+      setTimeout(() => {
+        setIsPageLoading(false);
+      }, 350);
     }
   };
 
@@ -1741,6 +1778,14 @@ export const App: React.FC = () => {
 
   return (
     <div className="bg-background font-body-md text-body-md text-on-surface antialiased min-h-screen transition-colors duration-300">
+      {/* Full-Page Initial & Post-Sign-In Loading Screen with 3D Rotating Square */}
+      {isPageLoading && (
+        <LoadingScreen
+          message={loadingMessage}
+          subMessage={loadingSubMessage}
+        />
+      )}
+
       {/* Toast Alert */}
       {toastMessage && (
         <div className="fixed top-16 right-4 sm:right-10 lg:right-[380px] z-50 px-space-md py-space-xs rounded-lg bg-surface-container-high border border-primary/40 text-on-surface shadow-2xl text-body-sm flex items-center gap-2 animate-bounce">
