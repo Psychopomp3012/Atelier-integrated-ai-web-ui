@@ -80,13 +80,6 @@ function writeToFile(level: LogLevel, message: string, extra?: unknown) {
   if (!fileLoggingEnabled) return;
   // Never write high-frequency debug polling noise to file
   if (level === 'debug' && process.env.LOG_DEBUG_TO_FILE !== 'true') return;
-  if (
-    message.includes('Quota') ||
-    message.includes('Evaluated Antigravity link status') ||
-    message.includes('Evaluated Codex link status')
-  ) {
-    return;
-  }
   try {
     const dir = path.dirname(logFilePath);
     if (!fs.existsSync(dir)) {

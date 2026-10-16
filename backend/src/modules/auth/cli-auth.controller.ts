@@ -15,6 +15,9 @@ export class CliAuthController {
   }
 
   private async getUserIdFromReq(req: FastifyRequest): Promise<string | undefined> {
+    const query = req.query as { userId?: string; userEmail?: string; email?: string } | undefined;
+    if (query?.userId) return query.userId;
+
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
@@ -25,18 +28,28 @@ export class CliAuthController {
         return verified.payload.sub;
       }
     }
+
+    const email = query?.userEmail || query?.email;
+    if (email) {
+      return cliAuthService.getUserIdByEmail(email) || undefined;
+    }
+
     return undefined;
   }
 
   private async getUserEmailFromReq(req: FastifyRequest): Promise<string | undefined> {
+    const query = req.query as { userEmail?: string; email?: string } | undefined;
+    if (query?.userEmail) return query.userEmail;
+    if (query?.email) return query.email;
+
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
       const session = await authService.getSession(token);
       if (session?.user?.email) return session.user.email;
       const verified = tokenUtil.verifyJwt(token);
-      if (verified.valid && verified.payload?.email) {
-        return verified.payload.email;
+      if (verified.valid && (verified.payload as any)?.email) {
+        return (verified.payload as any).email;
       }
     }
     return undefined;

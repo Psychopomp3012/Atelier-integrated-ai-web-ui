@@ -374,7 +374,7 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
 
       <aside
         className={`fixed right-0 top-0 bottom-0 w-[340px] max-w-[90vw] xl:w-[380px] bg-surface-container-low border-l border-outline-variant/30 flex flex-col z-50 transition-transform duration-300 ease-in-out ${
-          isOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full xl:translate-x-0'
+          isOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'
         }`}
       >
         {/* Inspector Header */}

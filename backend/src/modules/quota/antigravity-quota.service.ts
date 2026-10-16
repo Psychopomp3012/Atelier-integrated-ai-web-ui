@@ -1,21 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import type { AntigravityQuotaStats, GeminiQuotaStats, RecordTurnInput, CliQuotaLimits } from './quota.types.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import type { AntigravityQuotaStats, GeminiQuotaStats, RecordTurnInput, CliQuotaLimits, QuotaGroup } from './quota.types.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
+import { firestoreBackendService } from '../../services/firestore.service.js';
 import { logger } from '../../utils/logger.util.js';
 
-interface AuthenticLimitsData {
-  gemini5hFraction: number;
-  gemini5hReset: string;
-  geminiWeeklyFraction: number;
-  geminiWeeklyReset: string;
-  thirdParty5hFraction: number;
-  thirdParty5hReset: string;
-  thirdPartyWeeklyFraction: number;
-  thirdPartyWeeklyReset: string;
-  fetchedAt?: string;
-}
+const execFileAsync = promisify(execFile);
 
 interface CliTelemetryPersistence {
   totalTurns: number;
@@ -36,7 +29,7 @@ interface CliTelemetryPersistence {
   geminiWeeklyTurns?: number;
   thirdPartyWeeklyTokens?: number;
   thirdPartyWeeklyTurns?: number;
-  lastAuthenticLimits?: AuthenticLimitsData;
+  lastQuotaLimits?: CliQuotaLimits;
 }
 
 interface SessionStats {
@@ -90,24 +83,31 @@ export class AntigravityQuotaService {
       geminiWeeklyTurns: Number(parsed?.geminiWeeklyTurns) || 0,
       thirdPartyWeeklyTokens: Number(parsed?.thirdPartyWeeklyTokens) || 0,
       thirdPartyWeeklyTurns: Number(parsed?.thirdPartyWeeklyTurns) || 0,
-      lastAuthenticLimits: parsed?.lastAuthenticLimits
+      lastQuotaLimits: parsed?.lastQuotaLimits && Array.isArray(parsed.lastQuotaLimits.groups)
         ? {
-            gemini5hFraction: Number(parsed.lastAuthenticLimits.gemini5hFraction) || 1,
-            gemini5hReset: String(parsed.lastAuthenticLimits.gemini5hReset || ''),
-            geminiWeeklyFraction: Number(parsed.lastAuthenticLimits.geminiWeeklyFraction) || 1,
-            geminiWeeklyReset: String(parsed.lastAuthenticLimits.geminiWeeklyReset || ''),
-            thirdParty5hFraction: Number(parsed.lastAuthenticLimits.thirdParty5hFraction) || 1,
-            thirdParty5hReset: String(parsed.lastAuthenticLimits.thirdParty5hReset || ''),
-            thirdPartyWeeklyFraction: Number(parsed.lastAuthenticLimits.thirdPartyWeeklyFraction) || 1,
-            thirdPartyWeeklyReset: String(parsed.lastAuthenticLimits.thirdPartyWeeklyReset || ''),
-            fetchedAt: String(parsed.lastAuthenticLimits.fetchedAt || ''),
+            description: String(parsed.lastQuotaLimits.description || ''),
+            fetchedAt: String(parsed.lastQuotaLimits.fetchedAt || ''),
+            groups: parsed.lastQuotaLimits.groups.map((g: any) => ({
+              name: String(g.name || ''),
+              description: String(g.description || ''),
+              buckets: Array.isArray(g.buckets)
+                ? g.buckets.map((b: any) => ({
+                    id: String(b.id || ''),
+                    name: String(b.name || ''),
+                    description: String(b.description || ''),
+                    window: String(b.window || ''),
+                    remaining_fraction: typeof b.remaining_fraction === 'number' ? b.remaining_fraction : 1.0,
+                    reset_time: String(b.reset_time || ''),
+                  }))
+                : [],
+            })),
           }
         : undefined,
     } as CliTelemetryPersistence;
   }
 
-  private loadPersistence(userKey?: string): CliTelemetryPersistence {
-    if (userKey) {
+  private loadPersistence(userKey?: string, userEmail?: string): CliTelemetryPersistence {
+    if (userKey && userKey !== 'default') {
       const userFilePath = this.getUserTelemetryPath(userKey);
       if (fs.existsSync(userFilePath)) {
         try {
@@ -116,6 +116,28 @@ export class AntigravityQuotaService {
           return this.sanitizePersistence(parsed);
         } catch {}
       }
+
+      // STRICT MULTI-TENANT ISOLATION:
+      // Never fall back to defaultStoragePath for named users!
+      // Return a clean initial state with 0 turns and 0 tokens.
+      return {
+        totalTurns: 0,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        thinkingTokens: 0,
+        cacheReadTokens: 0,
+        lastLatencyMs: 0,
+        totalLatencyMs: 0,
+        gemini5hTokens: 0,
+        gemini5hTurns: 0,
+        thirdParty5hTokens: 0,
+        thirdParty5hTurns: 0,
+        geminiWeeklyTokens: 0,
+        geminiWeeklyTurns: 0,
+        thirdPartyWeeklyTokens: 0,
+        thirdPartyWeeklyTurns: 0,
+      };
     }
 
     if (fs.existsSync(this.defaultStoragePath)) {
@@ -146,212 +168,163 @@ export class AntigravityQuotaService {
     };
   }
 
-  private savePersistence(data: CliTelemetryPersistence, userKey?: string): void {
+  private async loadPersistenceAsync(userKey?: string, userEmail?: string): Promise<CliTelemetryPersistence> {
+    if (userKey && userKey !== 'default') {
+      const userFilePath = this.getUserTelemetryPath(userKey);
+      if (fs.existsSync(userFilePath)) {
+        try {
+          const raw = fs.readFileSync(userFilePath, 'utf8');
+          const parsed = JSON.parse(raw);
+          return this.sanitizePersistence(parsed);
+        } catch {}
+      }
+
+      // Check persistent storage in Firebase Firestore
+      try {
+        const firestoreData = await firestoreBackendService.getUserTelemetry(userKey, userEmail, 'antigravity');
+        if (firestoreData) {
+          const sanitized = this.sanitizePersistence(firestoreData);
+          try {
+            fs.writeFileSync(userFilePath, JSON.stringify(sanitized, null, 2), 'utf8');
+          } catch {}
+          return sanitized;
+        }
+      } catch {}
+
+      // Fresh user initial state: 0 tokens, 0 turns
+      const freshUserTelemetry: CliTelemetryPersistence = {
+        totalTurns: 0,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        thinkingTokens: 0,
+        cacheReadTokens: 0,
+        lastLatencyMs: 0,
+        totalLatencyMs: 0,
+        gemini5hTokens: 0,
+        gemini5hTurns: 0,
+        thirdParty5hTokens: 0,
+        thirdParty5hTurns: 0,
+        geminiWeeklyTokens: 0,
+        geminiWeeklyTurns: 0,
+        thirdPartyWeeklyTokens: 0,
+        thirdPartyWeeklyTurns: 0,
+      };
+      try {
+        fs.writeFileSync(userFilePath, JSON.stringify(freshUserTelemetry, null, 2), 'utf8');
+      } catch {}
+
+      firestoreBackendService.saveUserTelemetry(userKey, freshUserTelemetry, 'antigravity', userEmail).catch(() => {});
+      return freshUserTelemetry;
+    }
+
+    return this.loadPersistence(userKey, userEmail);
+  }
+
+  private savePersistence(data: CliTelemetryPersistence, userKey?: string, userEmail?: string): void {
     const json = JSON.stringify(data, null, 2);
-    if (userKey) {
+    if (userKey && userKey !== 'default') {
       try {
         const userFilePath = this.getUserTelemetryPath(userKey);
         fs.writeFileSync(userFilePath, json, 'utf8');
       } catch {}
+      // Persist to Firebase Firestore
+      firestoreBackendService.saveUserTelemetry(userKey, data, 'antigravity', userEmail).catch(() => {});
+    } else {
+      try {
+        const dir = path.dirname(this.defaultStoragePath);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(this.defaultStoragePath, json, 'utf8');
+      } catch {}
     }
-    try {
-      const dir = path.dirname(this.defaultStoragePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(this.defaultStoragePath, json, 'utf8');
-    } catch {}
   }
 
   /**
-   * Reads authentic Antigravity quota from the official SQLite DB.
+   * Queries live authentic Antigravity quota from Google's Code Assist backend via CLI.
+   * Completely avoids any hardcoded values, fictitious databases, or synthetic token arithmetic.
    */
-  private readAuthenticDbLimits(): AuthenticLimitsData | null {
+  private async queryLiveGoogleQuota(): Promise<CliQuotaLimits | null> {
     try {
-      const dbPath = path.join(os.homedir(), '.gemini', 'antigravity.db');
-      if (!fs.existsSync(dbPath)) return null;
+      const bin = cliAuthService.getAntigravityBin();
+      const { stdout } = await execFileAsync(bin, ['-p', '/quota', '--output-format', 'json'], { timeout: 15000 });
+      if (!stdout || stdout.trim().length === 0) return null;
 
-      const raw = fs.readFileSync(dbPath);
-      const str = raw.toString('utf8', 0, Math.min(raw.length, 500000));
+      const parsed = JSON.parse(stdout);
+      if (parsed.status === 'SUCCESS' && parsed.command?.name === 'usage' && parsed.command?.data) {
+        const rawGroups = parsed.command.data.groups;
+        if (Array.isArray(rawGroups) && rawGroups.length > 0) {
+          const groups: QuotaGroup[] = rawGroups.map((g: any) => ({
+            name: String(g.name || ''),
+            description: String(g.description || ''),
+            buckets: Array.isArray(g.buckets)
+              ? g.buckets.map((b: any) => ({
+                  id: String(b.id || ''),
+                  name: String(b.name || ''),
+                  description: String(b.description || ''),
+                  window: String(b.window || ''),
+                  remaining_fraction: typeof b.remaining_fraction === 'number' ? b.remaining_fraction : 1.0,
+                  reset_time: String(b.reset_time || ''),
+                }))
+              : [],
+          }));
 
-      const extractWindow = (targetPrefix: string) => {
-        let remaining_fraction = 1.0;
-        let reset_time = '';
-        const idx = str.indexOf(targetPrefix);
-        if (idx !== -1) {
-          const chunk = str.substring(idx, idx + 1500);
-          const fracMatch = chunk.match(/"remaining_fraction":\s*([0-9.]+)/i);
-          if (fracMatch) remaining_fraction = parseFloat(fracMatch[1]);
-          const resetMatch = chunk.match(/"reset_time":\s*"([^"]+)"/i);
-          if (resetMatch) reset_time = resetMatch[1];
+          logger.info('[Antigravity Quota] Resolved live Google Code Assist quota', {
+            groupsCount: groups.length,
+            groups: groups.map((g) => g.name),
+          });
+
+          return {
+            description: parsed.command.data.description || 'Antigravity CLI native and third-party hosted limits',
+            fetchedAt: new Date().toISOString(),
+            groups,
+          };
         }
-        return { remaining_fraction, reset_time };
-      };
-
-      const gemini5h = extractWindow('models/gemini-2.5-flash');
-      const geminiWeekly = extractWindow('models/gemini-2.5-pro');
-      const tp5h = extractWindow('models/claude-3-7-sonnet');
-      const tpWeekly = extractWindow('models/gpt-4o');
-
-      const isDefault =
-        gemini5h.remaining_fraction === 1.0 &&
-        geminiWeekly.remaining_fraction === 1.0 &&
-        tp5h.remaining_fraction === 1.0 &&
-        tpWeekly.remaining_fraction === 1.0;
-
-      if (isDefault) return null;
-
-      return {
-        gemini5hFraction: gemini5h.remaining_fraction,
-        gemini5hReset: gemini5h.reset_time,
-        geminiWeeklyFraction: geminiWeekly.remaining_fraction,
-        geminiWeeklyReset: geminiWeekly.reset_time,
-        thirdParty5hFraction: tp5h.remaining_fraction,
-        thirdParty5hReset: tp5h.reset_time,
-        thirdPartyWeeklyFraction: tpWeekly.remaining_fraction,
-        thirdPartyWeeklyReset: tpWeekly.reset_time,
-        fetchedAt: new Date().toISOString(),
-      };
-    } catch {
+      }
+      return null;
+    } catch (err) {
+      logger.warn('[Antigravity Quota] Failed to query live Google Code Assist quota', {
+        error: String(err),
+      });
       return null;
     }
   }
 
-  private async fetchCliQuotaLimits(userKey: string, persistence: CliTelemetryPersistence): Promise<CliQuotaLimits> {
+  private async fetchCliQuotaLimits(
+    userKey: string,
+    persistence: CliTelemetryPersistence,
+    userEmail?: string
+  ): Promise<CliQuotaLimits> {
     const cached = this.cachedQuotaLimitsMap.get(userKey);
     const now = Date.now();
-    if (cached && now - cached.timestamp < 10000) {
+    if (cached && now - cached.timestamp < 30000) {
       return cached.limits;
     }
 
-    const fiveHoursMs = 5 * 60 * 60 * 1000;
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-
-    let window5hStart = persistence.window5hStart || now;
-    if (now - window5hStart > fiveHoursMs) {
-      window5hStart = now;
-      persistence.window5hStart = now;
-      persistence.gemini5hTokens = 0;
-      persistence.gemini5hTurns = 0;
-      persistence.thirdParty5hTokens = 0;
-      persistence.thirdParty5hTurns = 0;
-      this.savePersistence(persistence, userKey);
+    // Live Google API integration
+    const liveLimits = await this.queryLiveGoogleQuota();
+    if (liveLimits && liveLimits.groups.length > 0) {
+      persistence.lastQuotaLimits = liveLimits;
+      this.savePersistence(persistence, userKey, userEmail);
+      this.cachedQuotaLimitsMap.set(userKey, { limits: liveLimits, timestamp: now });
+      return liveLimits;
     }
 
-    let weeklyStart = persistence.weeklyStart || now;
-    if (now - weeklyStart > sevenDaysMs) {
-      weeklyStart = now;
-      persistence.weeklyStart = now;
-      persistence.geminiWeeklyTokens = 0;
-      persistence.geminiWeeklyTurns = 0;
-      persistence.thirdPartyWeeklyTokens = 0;
-      persistence.thirdPartyWeeklyTurns = 0;
-      this.savePersistence(persistence, userKey);
+    // If live call returned null, use persistent authentic quota snapshot if available
+    if (persistence.lastQuotaLimits && persistence.lastQuotaLimits.groups.length > 0) {
+      this.cachedQuotaLimitsMap.set(userKey, { limits: persistence.lastQuotaLimits, timestamp: now });
+      return persistence.lastQuotaLimits;
     }
 
-    const dbLimits = this.readAuthenticDbLimits();
-    if (dbLimits) {
-      persistence.lastAuthenticLimits = dbLimits;
-      this.savePersistence(persistence, userKey);
-    }
-
-    const effectiveLimits = dbLimits || persistence.lastAuthenticLimits;
-
-    let gemini5hFraction: number;
-    let gemini5hReset: string;
-    let geminiWeeklyFraction: number;
-    let geminiWeeklyReset: string;
-
-    let tp5hFraction: number;
-    let tp5hReset: string;
-    let tpWeeklyFraction: number;
-    let tpWeeklyReset: string;
-
-    if (effectiveLimits) {
-      gemini5hFraction = effectiveLimits.gemini5hFraction;
-      gemini5hReset = effectiveLimits.gemini5hReset || new Date(window5hStart + fiveHoursMs).toISOString();
-      geminiWeeklyFraction = effectiveLimits.geminiWeeklyFraction;
-      geminiWeeklyReset = effectiveLimits.geminiWeeklyReset || new Date(weeklyStart + sevenDaysMs).toISOString();
-
-      tp5hFraction = effectiveLimits.thirdParty5hFraction;
-      tp5hReset = effectiveLimits.thirdParty5hReset || new Date(window5hStart + fiveHoursMs).toISOString();
-      tpWeeklyFraction = effectiveLimits.thirdPartyWeeklyFraction;
-      tpWeeklyReset = effectiveLimits.thirdPartyWeeklyReset || new Date(weeklyStart + sevenDaysMs).toISOString();
-    } else {
-      const GEMINI_5H_MAX_TOKENS = 800000;
-      const GEMINI_WEEKLY_MAX_TOKENS = 5000000;
-      const TP_5H_MAX_TOKENS = 250000;
-      const TP_WEEKLY_MAX_TOKENS = 1500000;
-
-      const g5hTokens = persistence.gemini5hTokens || 0;
-      const gWeeklyTokens = persistence.geminiWeeklyTokens || 0;
-      const tp5hTokens = persistence.thirdParty5hTokens || 0;
-      const tpWeeklyTokens = persistence.thirdPartyWeeklyTokens || 0;
-
-      gemini5hFraction = Math.max(0, Math.min(1, 1 - g5hTokens / GEMINI_5H_MAX_TOKENS));
-      geminiWeeklyFraction = Math.max(0, Math.min(1, 1 - gWeeklyTokens / GEMINI_WEEKLY_MAX_TOKENS));
-      gemini5hReset = new Date(window5hStart + fiveHoursMs).toISOString();
-      geminiWeeklyReset = new Date(weeklyStart + sevenDaysMs).toISOString();
-
-      tp5hFraction = Math.max(0, Math.min(1, 1 - tp5hTokens / TP_5H_MAX_TOKENS));
-      tpWeeklyFraction = Math.max(0, Math.min(1, 1 - tpWeeklyTokens / TP_WEEKLY_MAX_TOKENS));
-      tp5hReset = new Date(window5hStart + fiveHoursMs).toISOString();
-      tpWeeklyReset = new Date(weeklyStart + sevenDaysMs).toISOString();
-    }
-
-    const limits: CliQuotaLimits = {
+    // Clean initial fallback if no authentic snapshot exists yet (never fabricate or hardcode values)
+    const initialLimits: CliQuotaLimits = {
       description: 'Antigravity CLI native and third-party hosted limits',
       fetchedAt: new Date().toISOString(),
-      groups: [
-        {
-          name: 'Gemini Models',
-          description: 'Gemini 3.8 Flash, Pro, and Ultra reasoning models',
-          buckets: [
-            {
-              id: 'gemini-5h',
-              name: '5-Hour Rolling Limit',
-              description: 'Usage across Gemini models within a 5-hour rolling window',
-              window: '5h',
-              remaining_fraction: gemini5hFraction,
-              reset_time: gemini5hReset,
-            },
-            {
-              id: 'gemini-weekly',
-              name: 'Weekly Limit',
-              description: 'Usage across Gemini models within a 7-day rolling window',
-              window: '7d',
-              remaining_fraction: geminiWeeklyFraction,
-              reset_time: geminiWeeklyReset,
-            },
-          ],
-        },
-        {
-          name: 'Claude & GPT Models',
-          description: 'Anthropic Claude and OpenAI models hosted via Antigravity CLI',
-          buckets: [
-            {
-              id: '3p-5h',
-              name: '5-Hour Rolling Limit',
-              description: 'Usage across third-party models in 5-hour window',
-              window: '5h',
-              remaining_fraction: tp5hFraction,
-              reset_time: tp5hReset,
-            },
-            {
-              id: '3p-weekly',
-              name: 'Weekly Limit',
-              description: 'Usage across third-party models in 7-day window',
-              window: '7d',
-              remaining_fraction: tpWeeklyFraction,
-              reset_time: tpWeeklyReset,
-            },
-          ],
-        },
-      ],
+      groups: [],
     };
 
-    this.cachedQuotaLimitsMap.set(userKey, { limits, timestamp: now });
-    return limits;
+    return initialLimits;
   }
 
   /**
@@ -374,14 +347,14 @@ export class AntigravityQuotaService {
       (userEmail && cliAuthService.isUserCliLinkedByEmail(userEmail, 'antigravity'))
     );
 
-    logger.debug('[Antigravity Quota] Evaluated Antigravity link status', {
-      userId,
-      userEmail,
-      effectiveUserId,
-      isLinked,
-    });
-
     if (!isLinked) {
+      logger.info('[Antigravity Quota] Resolved user quota status: Not Linked', {
+        userId,
+        userEmail,
+        effectiveUserId,
+        isLinked: false,
+      });
+
       return {
         linked: false,
         userEmail: userEmail || undefined,
@@ -400,7 +373,7 @@ export class AntigravityQuotaService {
     }
 
     const userKey = effectiveUserId || userEmail || 'default';
-    const persistence = this.loadPersistence(userKey);
+    const persistence = await this.loadPersistenceAsync(userKey, userEmail);
     const userRecord = effectiveUserId ? cliAuthService.getUserCliRecord(effectiveUserId) : null;
     const email = userEmail || userRecord?.antigravity?.email || userRecord?.email;
     const name = userRecord?.name;
@@ -436,7 +409,17 @@ export class AntigravityQuotaService {
         ? Math.round(effectiveTotalLatency / totalTurnsCount)
         : 0;
 
-    const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence);
+    const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, email);
+
+    logger.info('[Antigravity Quota] Resolved user quota status', {
+      userId,
+      userEmail: email,
+      effectiveUserId,
+      userKey,
+      isLinked,
+      totalTurns: totalTurnsCount,
+      groupsDetected: quotaLimits.groups.map((g) => g.name),
+    });
 
     return {
       linked: true,
@@ -474,7 +457,7 @@ export class AntigravityQuotaService {
       ? (cliAuthService.getUserIdByEmail(input.userEmail) || input.userEmail)
       : 'anonymous';
 
-    const persistence = this.loadPersistence(userKey);
+    const persistence = await this.loadPersistenceAsync(userKey, input.userEmail);
 
     persistence.totalTurns += 1;
     persistence.totalTokens += input.totalTokens;
@@ -505,7 +488,7 @@ export class AntigravityQuotaService {
       persistence.geminiWeeklyTurns = (persistence.geminiWeeklyTurns || 0) + 1;
     }
 
-    this.savePersistence(persistence, userKey);
+    this.savePersistence(persistence, userKey, input.userEmail);
     this.cachedQuotaLimitsMap.delete(userKey);
 
     // Update session metrics if sessionId provided
@@ -533,7 +516,16 @@ export class AntigravityQuotaService {
       this.sessionStatsMap.set(input.sessionId, existing);
     }
 
-    const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence);
+    const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, input.userEmail);
+
+    logger.info('[Antigravity Quota] Recorded turn', {
+      userKey,
+      userEmail: input.userEmail,
+      model: input.model,
+      turnTokens: input.totalTokens,
+      userTotalTokens: persistence.totalTokens,
+      userTotalTurns: persistence.totalTurns,
+    });
 
     return {
       linked: true,

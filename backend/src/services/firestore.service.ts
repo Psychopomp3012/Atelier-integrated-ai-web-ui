@@ -563,6 +563,76 @@ export class FirestoreBackendService {
       logger.warn('Failed to save user CLI links to Firestore', { error: String(err) });
     }
   }
+
+  public async getUserTelemetry(
+    userId?: string,
+    userEmail?: string,
+    provider: 'antigravity' | 'codex' = 'antigravity'
+  ): Promise<any | null> {
+    if (!this.isAvailable || !this.db) return null;
+    try {
+      if (userId) {
+        const snap = await this.db.collection('users').doc(userId).get();
+        if (snap.exists) {
+          const data = snap.data();
+          const tel = data?.telemetry?.[provider];
+          if (tel && typeof tel === 'object') return tel;
+        }
+      }
+      if (userEmail) {
+        const cleanEmail = userEmail.toLowerCase().trim();
+        const emailDocSnap = await this.db.collection('users').doc(cleanEmail).get();
+        if (emailDocSnap.exists) {
+          const data = emailDocSnap.data();
+          const tel = data?.telemetry?.[provider];
+          if (tel && typeof tel === 'object') return tel;
+        }
+        const querySnap = await this.db.collection('users').where('email', '==', cleanEmail).limit(1).get();
+        if (!querySnap.empty) {
+          const data = querySnap.docs[0].data();
+          const tel = data?.telemetry?.[provider];
+          if (tel && typeof tel === 'object') return tel;
+        }
+      }
+    } catch (err) {
+      logger.warn(`Failed to fetch ${provider} telemetry from Firestore`, { error: String(err) });
+    }
+    return null;
+  }
+
+  public async saveUserTelemetry(
+    userId: string,
+    telemetryData: any,
+    provider: 'antigravity' | 'codex' = 'antigravity',
+    userEmail?: string
+  ): Promise<void> {
+    if (!this.isAvailable || !this.db || !userId) return;
+    try {
+      const cleanEmail = (userEmail || '').toLowerCase().trim();
+      let targetDocId = userId;
+      if (userId.includes('@') && cleanEmail) {
+        const querySnap = await this.db.collection('users').where('email', '==', cleanEmail).limit(1).get();
+        if (!querySnap.empty && querySnap.docs[0].id) {
+          targetDocId = querySnap.docs[0].id;
+        }
+      }
+      const payload: Record<string, any> = {
+        [`telemetry.${provider}`]: telemetryData,
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+      if (cleanEmail) {
+        payload.email = cleanEmail;
+      }
+      await this.db.collection('users').doc(targetDocId).set(payload, { merge: true });
+      logger.info(`Persisted ${provider} quota telemetry to Firebase for user ${targetDocId}`, {
+        userEmail: cleanEmail,
+        turns: telemetryData.totalTurns,
+        tokens: telemetryData.totalTokens,
+      });
+    } catch (err) {
+      logger.warn(`Failed to save ${provider} telemetry to Firestore`, { error: String(err) });
+    }
+  }
 }
 
 export const firestoreBackendService = new FirestoreBackendService();

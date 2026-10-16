@@ -32,6 +32,7 @@ interface HeaderProps {
   activeProvider?: string;
   onToggleSidebar?: () => void;
   onToggleInspector?: () => void;
+  isInspectorOpen?: boolean;
   user: UserProfile | null;
   onOpenAuthModal: () => void;
   onLogout: () => void;
@@ -57,6 +58,7 @@ export const Header: React.FC<HeaderProps> = ({
   activeProvider: propsActiveProvider,
   onToggleSidebar,
   onToggleInspector,
+  isInspectorOpen = false,
   user,
   onOpenAuthModal,
   onLogout,
@@ -313,7 +315,7 @@ export const Header: React.FC<HeaderProps> = ({
     ? (tokenUsage?.codexQuota?.userEmail || tokenUsage?.userEmail || user?.email)
     : (tokenUsage?.userEmail || user?.email);
   const quotaLimits = isCodex
-    ? (tokenUsage?.codexQuota?.quotaLimits || tokenUsage?.quotaLimits)
+    ? tokenUsage?.codexQuota?.quotaLimits
     : (tokenUsage?.geminiQuota?.quotaLimits || tokenUsage?.quotaLimits);
 
 
@@ -325,19 +327,16 @@ export const Header: React.FC<HeaderProps> = ({
       return quotaLimits.groups[0];
     }
 
-    // For Antigravity CLI:
-    // Group 0: "Gemini Models"
-    // Group 1: "Claude and GPT models"
     const modelLower = (modelName || '').toLowerCase();
     const idLower = (selectedModel || '').toLowerCase();
+
+    // Check if Claude or GPT-OSS model is selected
     const is3pModel =
       modelLower.includes('claude') ||
-      modelLower.includes('gpt') ||
       modelLower.includes('opus') ||
       modelLower.includes('sonnet') ||
       modelLower.includes('oss') ||
       idLower.includes('claude') ||
-      idLower.includes('gpt') ||
       idLower.includes('opus') ||
       idLower.includes('sonnet') ||
       idLower.includes('oss');
@@ -346,13 +345,29 @@ export const Header: React.FC<HeaderProps> = ({
       const g3p = quotaLimits.groups.find(
         (g) =>
           g.name.toLowerCase().includes('claude') ||
-          g.name.toLowerCase().includes('gpt') ||
+          (g.name.toLowerCase().includes('gpt') && !g.name.toLowerCase().includes('chatgpt')) ||
           g.name.toLowerCase().includes('3p')
       );
       if (g3p) return g3p;
     }
 
-    // Default to Gemini Models group
+    // Check if ChatGPT or Codex model is selected
+    const isChatGpt =
+      isCodex ||
+      modelLower.includes('chatgpt') ||
+      modelLower.includes('codex') ||
+      idLower.includes('codex') ||
+      idLower.includes('gpt-5') ||
+      idLower.includes('gpt-6');
+
+    if (isChatGpt) {
+      const gChat = quotaLimits.groups.find(
+        (g) => g.name.toLowerCase().includes('chatgpt') || g.name.toLowerCase().includes('codex')
+      );
+      if (gChat) return gChat;
+    }
+
+    // Default to Gemini Models group if present
     const geminiGroup = quotaLimits.groups.find(
       (g) =>
         g.name.toLowerCase().includes('gemini') ||
@@ -377,7 +392,7 @@ export const Header: React.FC<HeaderProps> = ({
     ((fraction5h !== undefined && fraction5h <= 0) ||
       (fractionWeekly !== undefined && fractionWeekly <= 0));
 
-  // Option C: Dual mini-indicator for Antigravity (5h and Weekly), single for Codex/others
+  // Dual mini-indicator for Antigravity (5h and Weekly), Single for Codex and other providers
   const quotaBadgeText = useMemo(() => {
     if (isAntigravity && (fraction5h !== undefined || fractionWeekly !== undefined)) {
       if (fraction5h !== undefined && fractionWeekly !== undefined) {
@@ -391,11 +406,11 @@ export const Header: React.FC<HeaderProps> = ({
       return `${Math.round(fractionWeekly! * 100)}% (W)`;
     }
 
-    // Single limit for Codex and other providers
+    // Single limit for providers with 1 meter (Codex has only 1 meter)
     const singleFraction =
-      fractionWeekly ??
+      relevantGroup?.buckets?.[0]?.remaining_fraction ??
       fraction5h ??
-      relevantGroup?.buckets?.[0]?.remaining_fraction;
+      fractionWeekly;
 
     if (singleFraction !== undefined) {
       return `${Math.round(singleFraction * 100)}% Quota`;
@@ -404,24 +419,25 @@ export const Header: React.FC<HeaderProps> = ({
     return used > 0 ? `${formatTokenMetric(used)} tokens` : 'Active';
   }, [isAntigravity, fraction5h, fractionWeekly, relevantGroup, used]);
 
-  const formatResetCountdown = (isoDate?: string): string => {
-    if (!isoDate) return 'Refreshed';
+  const formatResetCountdown = (isoDate?: string, remainingFraction?: number): string => {
+    if (remainingFraction !== undefined && remainingFraction >= 1.0) {
+      return 'Quota available';
+    }
+    if (!isoDate) return 'Quota available';
     const diffMs = new Date(isoDate).getTime() - Date.now();
-    if (diffMs <= 0) return 'Refreshed';
+    if (diffMs <= 0) return 'Quota available';
     const totalMinutes = Math.floor(diffMs / (1000 * 60));
     const minutes = totalMinutes % 60;
     const totalHours = Math.floor(totalMinutes / 60);
 
-    if (totalHours >= 24) {
-      const days = Math.floor(totalHours / 24);
-      const hours = totalHours % 24;
-      return `Refreshes in ${days}d ${hours}h ${minutes}m`;
+    if (totalHours === 0) {
+      return `Refreshes in ${minutes}m`;
     }
     return `Refreshes in ${totalHours}h ${minutes}m`;
   };
 
   return (
-    <header className="fixed top-0 left-0 right-0 lg:left-[260px] xl:right-[360px] h-14 bg-background/90 backdrop-blur-md border-b border-outline-variant/30 px-3 md:px-gutter-desktop flex items-center justify-between z-40 transition-all">
+    <header className={`fixed top-0 left-0 right-0 lg:left-[260px] ${isInspectorOpen ? 'xl:right-[380px]' : 'xl:right-0'} h-14 bg-background/90 backdrop-blur-md border-b border-outline-variant/30 px-3 md:px-gutter-desktop flex items-center justify-between z-40 transition-all duration-300`}>
       <div className="flex items-center gap-2 md:gap-space-md shrink-0">
         {/* Mobile Hamburger Toggle for Left Sidebar */}
         <button
@@ -1183,7 +1199,7 @@ export const Header: React.FC<HeaderProps> = ({
                                       </div>
 
                                       <div className="text-[11px] font-mono text-[#10b981]">
-                                        {formatResetCountdown(bucket.reset_time)}
+                                        {formatResetCountdown(bucket.reset_time, bucket.remaining_fraction)}
                                       </div>
                                     </div>
                                   );
@@ -1213,7 +1229,9 @@ export const Header: React.FC<HeaderProps> = ({
                             <div>
                               <div className="flex items-center justify-between gap-2">
                                 <div className="font-bold text-xs uppercase tracking-wider text-on-surface flex items-center gap-1.5">
-                                  {group.name.toLowerCase().includes('claude') ? (
+                                  {group.name.toLowerCase().includes('chatgpt') ? (
+                                    <img src="/provider-icons/codex.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
+                                  ) : group.name.toLowerCase().includes('claude') ? (
                                     <img src="/provider-icons/claude.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
                                   ) : group.name.toLowerCase().includes('gpt') ? (
                                     <img src="/model-icons/openai.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
@@ -1262,7 +1280,7 @@ export const Header: React.FC<HeaderProps> = ({
                                   </div>
 
                                   <div className="text-[11px] font-mono text-[#10b981]">
-                                    {formatResetCountdown(bucket.reset_time)}
+                                    {formatResetCountdown(bucket.reset_time, bucket.remaining_fraction)}
                                   </div>
                                 </div>
                               );
@@ -1421,14 +1439,18 @@ export const Header: React.FC<HeaderProps> = ({
           </span>
         </button>
 
-        {/* Mobile Inspector Toggle */}
+        {/* Cloud Inspector Toggle (Desktop & Mobile) */}
         <button
           onClick={onToggleInspector}
-          className="xl:hidden flex items-center gap-1 p-1.5 sm:px-2 sm:py-1 rounded bg-surface-container hover:bg-surface-container-high text-tertiary font-code-sm text-code-sm border border-outline-variant/30 cursor-pointer shrink-0"
-          title="Toggle Cloud Inspector"
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-code-sm text-code-sm border cursor-pointer shrink-0 transition-all active:scale-95 ${
+            isInspectorOpen
+              ? 'bg-primary/15 text-primary border-primary/35 shadow-xs'
+              : 'bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface border-outline-variant/30'
+          }`}
+          title={isInspectorOpen ? 'Hide Cloud Inspector' : 'Show Cloud Inspector'}
         >
           <span className="material-symbols-outlined text-[16px]">troubleshoot</span>
-          <span className="hidden sm:inline">Inspector</span>
+          <span className="hidden sm:inline font-medium">Inspector</span>
         </button>
 
         <div className="hidden sm:block h-4 w-px bg-outline-variant/30" />

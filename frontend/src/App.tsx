@@ -120,9 +120,15 @@ export const App: React.FC = () => {
   const [editMessageContent, setEditMessageContent] = useState<string>('');
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
-  // Mobile drawer states
+  // Mobile drawer & inspector states (starts open on desktop >= 1280px)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [isInspectorOpen, setIsInspectorOpen] = useState(() => {
+    try {
+      return typeof window !== 'undefined' && window.innerWidth >= 1280;
+    } catch {
+      return false;
+    }
+  });
 
   // Full-page initialization and post-sign-in loading screen
   const [isPageLoading, setIsPageLoading] = useState<boolean>(() => {
@@ -1788,7 +1794,7 @@ export const App: React.FC = () => {
 
       {/* Toast Alert */}
       {toastMessage && (
-        <div className="fixed top-16 right-4 sm:right-10 lg:right-[380px] z-50 px-space-md py-space-xs rounded-lg bg-surface-container-high border border-primary/40 text-on-surface shadow-2xl text-body-sm flex items-center gap-2 animate-bounce">
+        <div className={`fixed top-16 right-4 sm:right-10 ${isInspectorOpen ? 'xl:right-[400px]' : 'xl:right-10'} z-50 px-space-md py-space-xs rounded-lg bg-surface-container-high border border-primary/40 text-on-surface shadow-2xl text-body-sm flex items-center gap-2 animate-bounce transition-all duration-300`}>
           <span className="material-symbols-outlined text-[16px] text-primary">info</span>
           <span>{toastMessage}</span>
         </div>
@@ -1822,8 +1828,8 @@ export const App: React.FC = () => {
         onRefreshSessions={syncSessions}
       />
 
-      {/* Center Layout Container with Mobile Responsive Paddings */}
-      <div className="pl-0 pr-0 lg:pl-[260px] xl:pr-[360px] min-h-screen flex flex-col transition-all">
+      {/* Center Layout Container with Mobile & Desktop Dynamic Responsive Margins */}
+      <div className={`pl-0 pr-0 lg:pl-[260px] ${isInspectorOpen ? 'xl:pr-[380px]' : 'xl:pr-0'} min-h-screen flex flex-col transition-all duration-300`}>
         {/* Top Header */}
         <Header
           user={currentUser}
@@ -1850,6 +1856,7 @@ export const App: React.FC = () => {
           onOpenAuthModal={() => setIsAuthModalOpen(true)}
           onLogout={handleLogout}
           onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+          isInspectorOpen={isInspectorOpen}
           onToggleInspector={() => setIsInspectorOpen(!isInspectorOpen)}
           isDarkMode={isDarkMode}
           onToggleTheme={handleToggleTheme}
@@ -2266,7 +2273,7 @@ export const App: React.FC = () => {
             )}
 
             {/* Fixed Chat Input Prompt Bar regardless of scroll */}
-            <div className="fixed bottom-0 left-0 right-0 lg:left-[260px] xl:right-[360px] z-30 pointer-events-none bg-gradient-to-t from-background via-background/95 to-transparent pt-6 pb-2">
+            <div className={`fixed bottom-0 left-0 right-0 lg:left-[260px] ${isInspectorOpen ? 'xl:right-[380px]' : 'xl:right-0'} z-30 pointer-events-none bg-gradient-to-t from-background via-background/95 to-transparent pt-6 pb-2 transition-all duration-300`}>
               <div className="pointer-events-auto">
                 <PromptBar
                   onSendMessage={(prompt, files) => handleSendMessage(prompt, undefined, files)}

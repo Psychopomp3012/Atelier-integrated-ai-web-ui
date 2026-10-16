@@ -1351,9 +1351,16 @@ export class CliAuthService {
     if (codexAuthInfo.linked && (!userExplicitlyUnlinked || isNewLoginAfterUnlink)) {
       const diskEmail = codexAuthInfo.email?.toLowerCase().trim();
       const currentEmail = userEmail?.toLowerCase().trim();
-      if (!diskEmail || !currentEmail || diskEmail === currentEmail) {
+      // Only inherit host machine Codex credentials if disk explicitly belongs to this user with a matching verified email
+      const isGenuineUserMatch = Boolean(
+        diskEmail &&
+        diskEmail.includes('@') &&
+        currentEmail &&
+        diskEmail === currentEmail
+      );
+      if (isGenuineUserMatch) {
         codexLinked = true;
-        codexEmail = codexAuthInfo.email || codexEmail || userEmail || 'ChatGPT Account';
+        codexEmail = codexAuthInfo.email || codexEmail;
         if (effectiveUserId && !this.isUserCliLinked(effectiveUserId, 'codex')) {
           this.linkUserCli(effectiveUserId, 'codex', codexEmail);
         }

@@ -200,6 +200,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </div>
 
+        {/* App Version Box */}
+        <div className="p-3 border-t border-outline-variant/20 bg-surface-container-lowest/70 backdrop-blur-xs shrink-0">
+          <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-surface-container/50 hover:bg-surface-container border border-outline-variant/30 hover:border-primary/40 transition-all duration-300 group cursor-default shadow-xs">
+            <span className="text-[12px] font-medium text-on-surface tracking-tight group-hover:text-primary transition-colors">
+              Atelier Studio
+            </span>
+            <div className="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/25 text-primary text-[10px] font-mono font-semibold tracking-wider shadow-[0_0_8px_rgba(99,102,241,0.15)] group-hover:shadow-[0_0_12px_rgba(99,102,241,0.3)] transition-all">
+              v0.01
+            </div>
+          </div>
+        </div>
       </aside>
     </>
   );
