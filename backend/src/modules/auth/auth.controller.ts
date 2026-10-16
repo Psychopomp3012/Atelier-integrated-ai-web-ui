@@ -10,6 +10,8 @@ import { authService } from './auth.service.js';
 import { createSuccessResponse } from '../../utils/response.util.js';
 import { AppError } from '../../utils/error.util.js';
 import { envConfig } from '../../config/env.config.js';
+import { tokenUtil } from '../../utils/token.util.js';
+import { firestoreBackendService } from '../../services/firestore.service.js';
 
 export class AuthController {
   public async getConfig(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -116,6 +118,29 @@ export class AuthController {
 
     const updatedUser = await authService.connectPlatform(token, parseResult.data);
     return reply.status(200).send(createSuccessResponse(updatedUser));
+  }
+
+  public async syncProfile(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    if (!token) {
+      throw new AppError('Authentication required to sync profile', 401, 'UNAUTHORIZED');
+    }
+    const verified = tokenUtil.verifyJwt(token);
+    if (!verified.valid || !verified.payload?.sub) {
+      throw new AppError('Invalid authentication token', 401, 'UNAUTHORIZED');
+    }
+    const body = (req.body || {}) as any;
+    await firestoreBackendService.syncUserProfile({
+      id: verified.payload.sub,
+      name: body.name,
+      email: body.email,
+      avatarUrl: body.avatarUrl,
+      primaryPlatform: body.primaryPlatform,
+      linkedPlatforms: body.linkedPlatforms,
+      lastLoginAt: new Date().toISOString(),
+    });
+    return reply.status(200).send(createSuccessResponse({ synced: true }));
   }
 
   public async logout(req: FastifyRequest, reply: FastifyReply): Promise<void> {

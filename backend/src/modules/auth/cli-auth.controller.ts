@@ -4,35 +4,13 @@ import { authService } from './auth.service.js';
 import { createSuccessResponse } from '../../utils/response.util.js';
 import { logger } from '../../utils/logger.util.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
+import { tokenUtil } from '../../utils/token.util.js';
 
 export class CliAuthController {
   public async getStatus(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return reply.status(200).send(createSuccessResponse({
-        antigravity: { linked: false },
-        gemini: { linked: false },
-        claude: { linked: false },
-        codex: { linked: false },
-      }));
-    }
-
-    const token = authHeader.substring(7);
-    const session = await authService.getSession(token);
-    if (!session) {
-      return reply.status(200).send(createSuccessResponse({
-        antigravity: { linked: false },
-        gemini: { linked: false },
-        claude: { linked: false },
-        codex: { linked: false },
-      }));
-    }
-
-    await Promise.all([
-      cliAuthService.refreshClaudeStatus().catch(() => {}),
-      cliAuthService.refreshCodexStatus().catch(() => {}),
-    ]);
-    const status = cliAuthService.getCliStatus();
+    const userId = await this.getUserIdFromReq(req);
+    const userEmail = await this.getUserEmailFromReq(req);
+    const status = cliAuthService.getCliStatus(userId, userEmail);
     return reply.status(200).send(createSuccessResponse(status));
   }
 
@@ -42,6 +20,24 @@ export class CliAuthController {
       const token = authHeader.substring(7);
       const session = await authService.getSession(token);
       if (session) return session.user.id;
+      const verified = tokenUtil.verifyJwt(token);
+      if (verified.valid && verified.payload?.sub) {
+        return verified.payload.sub;
+      }
+    }
+    return undefined;
+  }
+
+  private async getUserEmailFromReq(req: FastifyRequest): Promise<string | undefined> {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      const session = await authService.getSession(token);
+      if (session?.user?.email) return session.user.email;
+      const verified = tokenUtil.verifyJwt(token);
+      if (verified.valid && verified.payload?.email) {
+        return verified.payload.email;
+      }
     }
     return undefined;
   }
@@ -79,14 +75,26 @@ export class CliAuthController {
   public async submitAntigravityCode(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const body = req.body as { code?: string };
     if (!body?.code) {
+      logger.warn('[Antigravity Auth] Code submission rejected: missing code in request payload');
       return reply.status(400).send({ success: false, error: { message: 'Authorization code is required' } });
     }
-    const success = await cliAuthService.submitAntigravityCliCode(body.code);
-    if (success) {
+    const result = await cliAuthService.submitAntigravityCliCode(body.code);
+    if (result.success) {
       const userId = await this.getUserIdFromReq(req);
-      sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      const email = await this.getUserEmailFromReq(req);
+      if (userId) {
+        cliAuthService.linkUserCli(userId, 'antigravity', email);
+        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      }
+      return reply.status(200).send(createSuccessResponse({ success: true }));
     }
-    return reply.status(200).send(createSuccessResponse({ success }));
+    return reply.status(400).send({
+      success: false,
+      error: {
+        message: result.error || 'Failed to verify Antigravity authorization code',
+        reason: result.reason,
+      },
+    });
   }
 
   public async getGeminiAuthUrl(req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -97,7 +105,16 @@ export class CliAuthController {
     return this.loginAntigravity(req, reply);
   }
 
-  public async unlinkGemini(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  public async unlinkGemini(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const userId = await this.getUserIdFromReq(req);
+    const userEmail = await this.getUserEmailFromReq(req);
+    if (userId || userEmail) {
+      cliAuthService.unlinkUserCli(userId || '', 'antigravity', userEmail);
+      cliAuthService.unlinkUserCli(userId || '', 'gemini', userEmail);
+      if (userId) {
+        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      }
+    }
     cliAuthService.unlinkGemini();
     return reply.status(200).send(createSuccessResponse({ success: true, message: 'Antigravity / Gemini CLI unlinked' }));
   }
@@ -328,19 +345,49 @@ export class CliAuthController {
     const success = await cliAuthService.submitClaudeCliCode(body.code);
     if (success) {
       const userId = await this.getUserIdFromReq(req);
-      sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      const email = await this.getUserEmailFromReq(req);
+      if (userId) {
+        cliAuthService.linkUserCli(userId, 'claude', email);
+        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      }
     }
     return reply.status(200).send(createSuccessResponse({ success }));
   }
 
-  public async unlinkClaude(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  public async unlinkClaude(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const userId = await this.getUserIdFromReq(req);
+    const userEmail = await this.getUserEmailFromReq(req);
+    if (userId || userEmail) {
+      cliAuthService.unlinkUserCli(userId || '', 'claude', userEmail);
+      if (userId) {
+        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      }
+    }
     await cliAuthService.unlinkClaude();
     return reply.status(200).send(createSuccessResponse({ success: true, message: 'Claude CLI unlinked' }));
   }
 
-  public async getCodexAuthUrl(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  public async getCodexAuthUrl(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     try {
-      const result = await cliAuthService.startCodexCliLogin();
+      const query = req.query as { token?: string };
+      let userId = await this.getUserIdFromReq(req);
+      let userEmail = await this.getUserEmailFromReq(req);
+
+      if (!userId && query?.token) {
+        const session = await authService.getSession(query.token);
+        if (session) {
+          userId = session.user.id;
+          userEmail = session.user.email;
+        } else {
+          const verified = tokenUtil.verifyJwt(query.token);
+          if (verified.valid && verified.payload) {
+            userId = (verified.payload as any).userId || verified.payload.sub;
+            userEmail = (verified.payload as any).email;
+          }
+        }
+      }
+
+      const result = await cliAuthService.startCodexCliLogin(userId, userEmail);
       return reply.status(200).send(createSuccessResponse(result));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to generate Codex CLI login URL';
@@ -348,9 +395,27 @@ export class CliAuthController {
     }
   }
 
-  public async loginCodex(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  public async loginCodex(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     try {
-      const { authUrl } = await cliAuthService.startCodexCliLogin();
+      const query = req.query as { token?: string };
+      let userId = await this.getUserIdFromReq(req);
+      let userEmail = await this.getUserEmailFromReq(req);
+
+      if (!userId && query?.token) {
+        const session = await authService.getSession(query.token);
+        if (session) {
+          userId = session.user.id;
+          userEmail = session.user.email;
+        } else {
+          const verified = tokenUtil.verifyJwt(query.token);
+          if (verified.valid && verified.payload) {
+            userId = (verified.payload as any).userId || verified.payload.sub;
+            userEmail = (verified.payload as any).email;
+          }
+        }
+      }
+
+      const { authUrl } = await cliAuthService.startCodexCliLogin(userId, userEmail);
       return reply.redirect(authUrl);
     } catch (err: unknown) {
       logger.error('Failed to initiate Codex CLI login redirect', err);
@@ -368,8 +433,16 @@ export class CliAuthController {
     }
   }
 
-  public async unlinkCodex(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    await cliAuthService.unlinkCodex();
+  public async unlinkCodex(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const userId = await this.getUserIdFromReq(req);
+    const userEmail = await this.getUserEmailFromReq(req);
+    if (userId || userEmail) {
+      cliAuthService.unlinkUserCli(userId || '', 'codex', userEmail);
+      if (userId) {
+        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      }
+    }
+    await cliAuthService.unlinkCodex(userId);
     return reply.status(200).send(createSuccessResponse({ success: true, message: 'Codex CLI unlinked' }));
   }
 }

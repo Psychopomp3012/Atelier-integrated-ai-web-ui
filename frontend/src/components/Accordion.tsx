@@ -101,7 +101,15 @@ export const Accordion: React.FC<AccordionProps> = ({
         </span>
       );
     }
-    if (t.includes('reasoning') || t.includes('analyzing') || t.includes('formulating') || t.includes('plan')) {
+    if (
+      t.includes('reasoning') ||
+      t.includes('analyzing') ||
+      t.includes('formulating') ||
+      t.includes('plan') ||
+      t.includes('thinking') ||
+      t.includes('thought') ||
+      t.includes('reasoned')
+    ) {
       return (
         <span className={`material-symbols-outlined text-[16px] ${step.completed ? 'text-secondary' : 'text-primary animate-pulse'}`}>
           psychology
@@ -269,8 +277,10 @@ export const Accordion: React.FC<AccordionProps> = ({
                       <div className="rounded-md border border-outline-variant/30 overflow-hidden shadow-2xs">
                         <div className="flex items-center justify-between px-2.5 py-1.5 bg-surface-container-high/70 dark:bg-surface-container-highest/70 text-[11px] font-mono text-on-surface-variant select-none border-b border-outline-variant/20">
                           <span className="flex items-center gap-1.5 font-medium">
-                            <span className="material-symbols-outlined text-[14px] text-secondary">terminal</span>
-                            Terminal Output (/workspace)
+                            <span className="material-symbols-outlined text-[14px] text-secondary">
+                              {step.command ? 'terminal' : 'psychology'}
+                            </span>
+                            {step.command ? 'Terminal Output (/workspace)' : 'Reasoning & Execution Trace'}
                           </span>
                           <div className="flex items-center gap-2">
                             {step.exitCode !== undefined && (

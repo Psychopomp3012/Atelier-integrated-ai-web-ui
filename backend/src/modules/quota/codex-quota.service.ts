@@ -308,9 +308,20 @@ export class CodexQuotaService {
   /**
    * Resolves authentic Codex CLI telemetry and quota.
    */
-  public async getCodexQuota(userEmail?: string, sessionId?: string): Promise<CodexQuotaStats> {
-    const isLinked = cliAuthService.isCodexLinked();
-    const cliStatus = cliAuthService.getCliStatus();
+  public async getCodexQuota(userEmail?: string, sessionId?: string, userId?: string): Promise<CodexQuotaStats> {
+    const effectiveUserId = userId || (userEmail ? cliAuthService.getUserIdByEmail(userEmail) : undefined) || undefined;
+    const isLinked = Boolean(
+      (effectiveUserId && cliAuthService.isUserCliLinked(effectiveUserId, 'codex')) ||
+      (userEmail && cliAuthService.isUserCliLinkedByEmail(userEmail, 'codex'))
+    );
+    const cliStatus = cliAuthService.getCliStatus(effectiveUserId, userEmail);
+
+    logger.debug('[Codex Quota] Evaluated Codex link status', {
+      userId,
+      userEmail,
+      effectiveUserId,
+      isLinked,
+    });
 
     if (!isLinked) {
       return {

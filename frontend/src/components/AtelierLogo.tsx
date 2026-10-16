@@ -23,29 +23,29 @@ export const AtelierLogo: React.FC<AtelierLogoProps> = ({
       <defs>
         {/* Crown Top Facet Gradient */}
         <linearGradient id="atelier-top-facet" x1="0%" y1="100%" x2="100%" y2="0%">
-          <stop offset="0%" stop-color="#818CF8" />
-          <stop offset="50%" stop-color="#A78BFA" />
-          <stop offset="100%" stop-color="#E0E7FF" />
+          <stop offset="0%" stopColor="#818CF8" />
+          <stop offset="50%" stopColor="#A78BFA" />
+          <stop offset="100%" stopColor="#E0E7FF" />
         </linearGradient>
 
         {/* Left Wing Facet Gradient */}
         <linearGradient id="atelier-left-facet" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#6366F1" />
-          <stop offset="100%" stop-color="#3730A3" />
+          <stop offset="0%" stopColor="#6366F1" />
+          <stop offset="100%" stopColor="#3730A3" />
         </linearGradient>
 
         {/* Right Wing Facet Gradient */}
         <linearGradient id="atelier-right-facet" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#8B5CF6" />
-          <stop offset="60%" stop-color="#6D28D9" />
-          <stop offset="100%" stop-color="#312E81" />
+          <stop offset="0%" stopColor="#8B5CF6" />
+          <stop offset="60%" stopColor="#6D28D9" />
+          <stop offset="100%" stopColor="#312E81" />
         </linearGradient>
 
         {/* Central Craftsman Core Shard (Emerald to Cyan Glow) */}
         <linearGradient id="atelier-core-shard" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#38BDF8" />
-          <stop offset="40%" stop-color="#10B981" />
-          <stop offset="100%" stop-color="#34D399" />
+          <stop offset="0%" stopColor="#38BDF8" />
+          <stop offset="40%" stopColor="#10B981" />
+          <stop offset="100%" stopColor="#34D399" />
         </linearGradient>
 
         {/* Optional Ambient Glow Filter */}

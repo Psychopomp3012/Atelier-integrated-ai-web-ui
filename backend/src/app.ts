@@ -21,6 +21,14 @@ export async function buildApp(): Promise<FastifyInstance> {
   await registerCorsPlugin(app);
   await registerSensiblePlugin(app);
 
+  // Rate limiting to prevent API abuse
+  const { default: rateLimit } = await import('@fastify/rate-limit');
+  await app.register(rateLimit, {
+    max: 500,
+    timeWindow: '1 minute',
+    allowList: ['127.0.0.1', '::1'],
+  });
+
   // Centralized scalable error handler registered before routes
   app.setErrorHandler((error: any, _request, reply) => {
     if (isAppError(error)) {

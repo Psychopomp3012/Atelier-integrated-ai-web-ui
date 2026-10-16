@@ -29,7 +29,7 @@ export interface CliQuotaLimits {
   fetchedAt: string;
 }
 
-export interface GeminiQuotaStats {
+export type AntigravityQuotaStats = {
   linked: boolean;
   userEmail?: string;
   userName?: string;
@@ -43,7 +43,9 @@ export interface GeminiQuotaStats {
   avgLatencyMs: number;
   quotaLimits?: CliQuotaLimits | null;
   lastUpdated: string;
-}
+};
+
+export type GeminiQuotaStats = AntigravityQuotaStats;
 
 export interface CodexQuotaStats {
   linked: boolean;

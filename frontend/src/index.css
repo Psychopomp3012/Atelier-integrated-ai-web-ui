@@ -94,10 +94,10 @@
   --tertiary-fixed-dim: 76 215 246;
   --on-tertiary-fixed: 0 31 38;
   --on-tertiary-fixed-variant: 0 78 92;
-  --error: 255 180 171;
-  --on-error: 105 0 5;
-  --error-container: 147 0 10;
-  --on-error-container: 255 218 214;
+  --error: 239 68 68;
+  --on-error: 255 255 255;
+  --error-container: 153 27 27;
+  --on-error-container: 254 226 226;
   --surface-tint: 192 193 255;
   --surface-variant: 49 53 62;
   --inverse-surface: 223 226 238;

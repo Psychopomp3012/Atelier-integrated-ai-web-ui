@@ -1,13 +1,11 @@
 import React from 'react';
 
 interface RibbonProps {
-  onResetSession: () => void;
   onShareSession: () => void;
   onExportLogs: () => void;
 }
 
 export const Ribbon: React.FC<RibbonProps> = ({
-  onResetSession,
   onShareSession,
   onExportLogs,
 }) => {
@@ -33,14 +31,6 @@ export const Ribbon: React.FC<RibbonProps> = ({
         >
           <span className="material-symbols-outlined text-[15px]">download</span>
           <span className="hidden sm:inline">Export</span>
-        </button>
-
-        <button
-          onClick={onResetSession}
-          className="flex items-center gap-space-xs p-1 sm:px-space-sm sm:py-1 rounded bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface font-label-md text-xs sm:text-label-md transition-colors cursor-pointer"
-          title="Reset Session Context"
-        >
-          <span className="material-symbols-outlined text-[15px]">restart_alt</span>
         </button>
       </div>
     </div>

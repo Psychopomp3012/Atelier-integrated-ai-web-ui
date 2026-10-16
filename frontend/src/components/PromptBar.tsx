@@ -36,6 +36,7 @@ interface PromptBarProps {
   codexQuota?: CodexQuotaStats | null;
   availableModels?: ModelOption[];
   activeSandbox?: { sandboxId: string; name: string } | null;
+  onOpenAuthModal?: () => void;
 }
 
 export const PromptBar: React.FC<PromptBarProps> = ({
@@ -53,6 +54,7 @@ export const PromptBar: React.FC<PromptBarProps> = ({
   codexQuota,
   availableModels,
   activeSandbox,
+  onOpenAuthModal,
 }) => {
   const [prompt, setPrompt] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
@@ -94,6 +96,17 @@ export const PromptBar: React.FC<PromptBarProps> = ({
       selectedModelInfo.baseName
     );
   }, [selectedModelInfo, selectedModel]);
+
+  const isAnyCliLinked = React.useMemo(() => {
+    return Boolean(
+      cliStatus?.antigravity?.linked ||
+      cliStatus?.gemini?.linked ||
+      cliStatus?.claude?.linked ||
+      cliStatus?.codex?.linked
+    );
+  }, [cliStatus]);
+
+  const isBlockedByNoCli = Boolean(currentUser && !isAnyCliLinked);
 
   // Detect slash command trigger at cursor / prompt
   const slashMatch = React.useMemo(() => {
@@ -528,6 +541,18 @@ export const PromptBar: React.FC<PromptBarProps> = ({
       setIsListening(false);
     }
 
+    if (isLoading) return;
+
+    if (!currentUser) {
+      onOpenAuthModal?.();
+      return;
+    }
+
+    if (!isAnyCliLinked) {
+      onOpenAuthModal?.();
+      return;
+    }
+
     const trimmed = prompt.trim();
 
     // Check for direct client action commands
@@ -547,7 +572,7 @@ export const PromptBar: React.FC<PromptBarProps> = ({
       return;
     }
 
-    if (!isModelSelected || isQuotaExhausted || isLoading) return;
+    if (!isModelSelected || isQuotaExhausted) return;
 
     const hasPrompt = Boolean(trimmed);
     const hasFiles = attachedFiles.length > 0;
@@ -616,12 +641,12 @@ export const PromptBar: React.FC<PromptBarProps> = ({
     // Normal Enter sends user message (Shift + Enter inserts newline)
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      if (!isLoading && (isModelSelected || prompt.trim().startsWith('/')) && !isQuotaExhausted) {
+      if (!isLoading && (isModelSelected || prompt.trim().startsWith('/') || isBlockedByNoCli) && !isQuotaExhausted) {
         handleSubmit();
       }
     } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
-      if (!isLoading && (isModelSelected || prompt.trim().startsWith('/')) && !isQuotaExhausted) {
+      if (!isLoading && (isModelSelected || prompt.trim().startsWith('/') || isBlockedByNoCli) && !isQuotaExhausted) {
         handleSubmit();
       }
     }
@@ -635,7 +660,8 @@ export const PromptBar: React.FC<PromptBarProps> = ({
     handleSubmit();
   };
 
-  const canSubmit = !isLoading && (isModelSelected || prompt.trim().startsWith('/')) && !isQuotaExhausted && (Boolean(prompt.trim()) || attachedFiles.length > 0);
+  const hasInput = Boolean(prompt.trim()) || attachedFiles.length > 0;
+  const canSubmit = !isLoading && (isModelSelected || prompt.trim().startsWith('/')) && !isQuotaExhausted && hasInput && !isBlockedByNoCli;
 
   return (
     <div className="w-full max-w-4xl mx-auto px-space-md sm:px-gutter-desktop pb-space-lg pt-space-xs relative">
@@ -702,21 +728,23 @@ export const PromptBar: React.FC<PromptBarProps> = ({
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={
-            !isModelSelected
-              ? "Select a model below or type / for commands..."
-              : "Ask anything, discuss ideas, or type / for provider commands..."
+            isBlockedByNoCli
+              ? 'Link an AI CLI to send messages...'
+              : !isModelSelected
+              ? 'Select a model or type / for commands...'
+              : 'Ask anything or type / for commands...'
           }
-          className="w-full bg-transparent resize-none border-none outline-none font-body-lg text-body-lg text-on-surface placeholder:text-outline/70 focus:ring-0 px-space-xs py-1.5 leading-relaxed overflow-y-hidden transition-[height] duration-75 scrollbar-thin"
+          className="w-full bg-transparent resize-none border-none outline-none font-body-lg text-body-lg text-on-surface placeholder:text-outline/70 placeholder:truncate focus:ring-0 px-space-xs py-1.5 leading-relaxed overflow-y-hidden transition-[height] duration-75 scrollbar-thin"
         />
 
         {/* Action Tray */}
-        <div className="flex items-center justify-between pt-space-sm border-t border-outline-variant/15 mt-space-xs gap-2">
+        <div className="flex items-center justify-between pt-space-sm border-t border-outline-variant/15 mt-space-xs gap-1 sm:gap-2 flex-nowrap w-full">
           {/* Quick Context, Attach Actions & Model Selector */}
-          <div className="flex items-center gap-1.5 flex-wrap">
+          <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 flex-1 shrink flex-nowrap">
             <button
               type="button"
               onClick={handleAttachClick}
-              className="p-1.5 rounded-md bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface border border-outline-variant/20 transition-colors cursor-pointer active:scale-95 flex items-center justify-center"
+              className="p-1.5 rounded-md bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface border border-outline-variant/20 transition-colors cursor-pointer active:scale-95 flex items-center justify-center shrink-0"
               title="Attach Code, File, or Document"
             >
               <span className="material-symbols-outlined text-[18px] text-primary">add</span>
@@ -732,13 +760,14 @@ export const PromptBar: React.FC<PromptBarProps> = ({
               geminiQuota={geminiQuota}
               codexQuota={codexQuota}
               availableModels={availableModels}
+              onOpenAuthModal={onOpenAuthModal}
             />
 
             {/* Dynamic Slash Commands Quick Button */}
             <button
               type="button"
               onClick={handleToggleSlashPalette}
-              className={`hidden xs:flex items-center gap-1 px-2.5 py-1 rounded-md text-xs border transition-all cursor-pointer font-mono ${
+              className={`hidden xs:flex items-center gap-1 px-2.5 py-1 rounded-md text-xs border transition-all cursor-pointer font-mono shrink-0 ${
                 slashMatch
                   ? 'bg-primary/20 text-primary border-primary/40 ring-1 ring-primary/30'
                   : 'bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface border-outline-variant/20'
@@ -755,7 +784,7 @@ export const PromptBar: React.FC<PromptBarProps> = ({
               <button
                 type="button"
                 onClick={() => document.getElementById('cloud-sandboxes-menu-button')?.click()}
-                className="hidden xs:flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono text-amber-400 bg-amber-500/10 border border-amber-500/25 hover:bg-amber-500/20 transition-all cursor-pointer"
+                className="hidden xs:flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono text-amber-400 bg-amber-500/10 border border-amber-500/25 hover:bg-amber-500/20 transition-all cursor-pointer shrink-0"
                 title="No cloud sandbox selected. Click to select a Sandbox microVM"
               >
                 <span className="material-symbols-outlined text-[14px]">cloud_off</span>
@@ -765,7 +794,7 @@ export const PromptBar: React.FC<PromptBarProps> = ({
               <button
                 type="button"
                 onClick={() => document.getElementById('cloud-sandboxes-menu-button')?.click()}
-                className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono text-on-surface-variant hover:text-on-surface bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 transition-all cursor-pointer"
+                className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono text-on-surface-variant hover:text-on-surface bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 transition-all cursor-pointer shrink-0"
                 title={`Target Sandbox: ${activeSandbox.name}. Click to switch.`}
               >
                 <span className="material-symbols-outlined text-[14px] text-primary">cloud</span>
@@ -775,11 +804,11 @@ export const PromptBar: React.FC<PromptBarProps> = ({
           </div>
 
           {/* Action & Submit/Stop Button */}
-          <div className="flex items-center gap-space-xs shrink-0 ml-auto">
+          <div className="flex items-center gap-1 sm:gap-space-xs shrink-0 ml-auto">
             <button
               type="button"
               onClick={toggleListening}
-              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all cursor-pointer ${
+              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all cursor-pointer shrink-0 ${
                 isListening
                   ? 'bg-red-500/20 text-red-500 hover:bg-red-500/30 animate-pulse ring-2 ring-red-500/50'
                   : 'hover:bg-surface-container text-outline hover:text-on-surface'
@@ -794,10 +823,12 @@ export const PromptBar: React.FC<PromptBarProps> = ({
             <button
               type="button"
               onClick={handleButtonClick}
-              disabled={!isLoading && !canSubmit}
+              disabled={!isLoading && !canSubmit && !isBlockedByNoCli}
               title={
                 isLoading
                   ? 'Stop response (Esc)'
+                  : isBlockedByNoCli
+                  ? 'Link an AI CLI to send messages (Antigravity, Claude, or Codex)'
                   : !isModelSelected && !prompt.trim().startsWith('/')
                   ? 'Select a model to send prompt'
                   : isQuotaExhausted
@@ -806,9 +837,11 @@ export const PromptBar: React.FC<PromptBarProps> = ({
                   ? 'Type a message to send'
                   : 'Send prompt (Enter)'
               }
-              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all ${
+              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shrink-0 ${
                 isLoading
                   ? 'bg-primary hover:bg-primary-fixed-dim text-on-primary shadow-md cursor-pointer active:scale-95 ring-2 ring-primary/20'
+                  : isBlockedByNoCli
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 cursor-pointer shadow-sm active:scale-95'
                   : (!isModelSelected && !prompt.trim().startsWith('/')) || isQuotaExhausted
                   ? 'bg-surface-container-high text-outline border border-outline-variant/30 cursor-not-allowed opacity-60 shadow-none'
                   : canSubmit
@@ -818,6 +851,8 @@ export const PromptBar: React.FC<PromptBarProps> = ({
             >
               {isLoading ? (
                 <span className="material-symbols-outlined text-[18px]">stop</span>
+              ) : isBlockedByNoCli ? (
+                <span className="material-symbols-outlined text-[16px]">link</span>
               ) : (!isModelSelected && !prompt.trim().startsWith('/')) || isQuotaExhausted ? (
                 <span className="material-symbols-outlined text-[16px]">lock</span>
               ) : (
@@ -830,11 +865,21 @@ export const PromptBar: React.FC<PromptBarProps> = ({
 
       <div className="text-center mt-space-xs hidden sm:block">
         <span className="font-label-sm text-label-sm text-outline">
-          {!isModelSelected
-            ? 'Select a model to execute in isolated cloud sandbox, or type / for commands'
-            : isQuotaExhausted
-            ? `Quota limit reached for ${selectedModelInfo.baseName}. Select another model or provider to continue.`
-            : 'Press Enter to send, Shift + Enter for new line • Type / for commands'}
+          {isBlockedByNoCli ? (
+            <button
+              type="button"
+              onClick={onOpenAuthModal}
+              className="text-amber-400 hover:text-amber-300 underline underline-offset-2 transition-colors cursor-pointer"
+            >
+              No AI CLI linked. Click here to link Antigravity, Claude, or Codex CLI to send messages.
+            </button>
+          ) : !isModelSelected ? (
+            'Select a model to execute in isolated cloud sandbox, or type / for commands'
+          ) : isQuotaExhausted ? (
+            `Quota limit reached for ${selectedModelInfo.baseName}. Select another model or provider to continue.`
+          ) : (
+            'Press Enter to send, Shift + Enter for new line • Type / for commands'
+          )}
         </span>
       </div>
 

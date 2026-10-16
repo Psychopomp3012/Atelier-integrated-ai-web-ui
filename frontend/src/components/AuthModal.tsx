@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { AIPlatform, UserProfile } from '../types';
 import { signInWithGoogle } from '../services/firebaseAuth.service';
 import {
   fetchCliStatus,
   openGeminiCliLoginPopup,
+  closeGeminiCliLoginPopup,
   unlinkGeminiCli,
   submitAntigravityAuthCode,
   openClaudeCliLoginPopup,
@@ -30,6 +31,8 @@ interface AuthModalProps {
   ) => Promise<void>;
   onLinkSubscription: (platform: 'claude_subscription' | 'codex_subscription') => Promise<void>;
   onConnectApiKey: (platform: AIPlatform, key: string) => Promise<void>;
+  initialCliStatus?: CliStatus | null;
+  onCliStatusChange?: (status: CliStatus) => void;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
@@ -39,19 +42,45 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onGoogleLogin,
   onLinkSubscription,
   onConnectApiKey,
+  initialCliStatus,
+  onCliStatusChange,
 }) => {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [selectedKeyPlatform, setSelectedKeyPlatform] = useState<AIPlatform>('anthropic');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [unlinkingCli, setUnlinkingCli] = useState<'antigravity' | 'claude' | 'codex' | null>(null);
   const [showByok, setShowByok] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
-  const [cliStatus, setCliStatus] = useState<CliStatus | null>(null);
+  const [cliStatus, setCliStatus] = useState<CliStatus | null>(initialCliStatus || null);
 
   useEffect(() => {
-    if (isOpen) {
-      fetchCliStatus().then(setCliStatus);
+    if (initialCliStatus) {
+      setCliStatus(initialCliStatus);
     }
+  }, [initialCliStatus]);
+
+  const onCliStatusChangeRef = useRef(onCliStatusChange);
+  onCliStatusChangeRef.current = onCliStatusChange;
+  const lastStatusJsonRef = useRef<string>('');
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const update = () => {
+      fetchCliStatus()
+        .then((status) => {
+          const json = JSON.stringify(status);
+          if (json !== lastStatusJsonRef.current) {
+            lastStatusJsonRef.current = json;
+            setCliStatus(status);
+            onCliStatusChangeRef.current?.(status);
+          }
+        })
+        .catch(() => {});
+    };
+    update();
+    const timer = setInterval(update, 3000);
+    return () => clearInterval(timer);
   }, [isOpen]);
 
   const handleCopyCode = (code: string) => {
@@ -65,17 +94,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [showAgyCodeInput, setShowAgyCodeInput] = useState(false);
 
   const handleLinkGeminiCli = async () => {
+    if (isSubmitting) return;
     setIsSubmitting(true);
     setAuthError(null);
     setShowAgyCodeInput(true);
     try {
-      const res = await openGeminiCliLoginPopup();
+      const res = openGeminiCliLoginPopup();
       if (res.success) {
         // Poll status in background in case user finishes
         const poll = setInterval(async () => {
           const updated = await fetchCliStatus();
           if (updated.antigravity?.linked) {
             clearInterval(poll);
+            closeGeminiCliLoginPopup();
+            setTimeout(() => closeGeminiCliLoginPopup(), 200);
             setCliStatus(updated);
             setShowAgyCodeInput(false);
           }
@@ -105,17 +137,36 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
     }
 
+    // Google OAuth codes begin with "4/". Detect if the user pasted the state parameter
+    if (!raw.startsWith('4/')) {
+      setAuthError(
+        'Invalid authorization code format: Google authorization codes always begin with "4/". You appear to have copied the state token from the browser address bar. Please switch to the opened Google authorization tab and click the "Copy to Clipboard" button (or copy the code in the box), then paste it here.'
+      );
+      return;
+    }
+
     setIsSubmitting(true);
     setAuthError(null);
     try {
-      const success = await submitAntigravityAuthCode(raw);
-      if (success) {
+      const res = await submitAntigravityAuthCode(raw);
+      if (res.success) {
+        closeGeminiCliLoginPopup();
+        setTimeout(() => closeGeminiCliLoginPopup(), 200);
+        setTimeout(() => closeGeminiCliLoginPopup(), 600);
         setAgyCodeInput('');
         setShowAgyCodeInput(false);
-        const updated = await fetchCliStatus();
+        let updated = await fetchCliStatus();
+        if (!updated.antigravity?.linked) {
+          await new Promise((r) => setTimeout(r, 600));
+          updated = await fetchCliStatus();
+        }
         setCliStatus(updated);
+        onCliStatusChange?.(updated);
       } else {
-        setAuthError('Could not verify Antigravity authorization code. Please click Link Antigravity CLI to get a fresh URL and try again.');
+        setAuthError(
+          res.error ||
+            'Could not verify Antigravity authorization code. Please click Link Antigravity CLI to get a fresh URL and try again.'
+        );
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to submit authorization code';
@@ -126,13 +177,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   const handleUnlinkGeminiCli = async () => {
-    setIsSubmitting(true);
+    closeGeminiCliLoginPopup();
+    setUnlinkingCli('antigravity');
+    setAuthError(null);
     try {
       await unlinkGeminiCli();
       const updated = await fetchCliStatus();
       setCliStatus(updated);
+      onCliStatusChange?.(updated);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to unlink Antigravity CLI';
+      setAuthError(msg);
     } finally {
-      setIsSubmitting(false);
+      setUnlinkingCli(null);
     }
   };
 
@@ -149,6 +206,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       if (res.success) {
         const updated = await fetchCliStatus();
         setCliStatus(updated);
+        onCliStatusChange?.(updated);
         try {
           await refreshAuthToken();
         } catch {}
@@ -162,13 +220,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   const handleUnlinkClaudeCli = async () => {
-    setIsSubmitting(true);
+    setUnlinkingCli('claude');
+    setAuthError(null);
     try {
       await unlinkClaudeCli();
       const updated = await fetchCliStatus();
       setCliStatus(updated);
+      onCliStatusChange?.(updated);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to unlink Claude CLI';
+      setAuthError(msg);
     } finally {
-      setIsSubmitting(false);
+      setUnlinkingCli(null);
     }
   };
 
@@ -182,6 +245,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setShowClaudeCodeInput(false);
         const updated = await fetchCliStatus();
         setCliStatus(updated);
+        onCliStatusChange?.(updated);
       } else {
         setAuthError('Invalid code or Claude process not waiting for code');
       }
@@ -198,6 +262,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       if (res.success) {
         const updated = await fetchCliStatus();
         setCliStatus(updated);
+        onCliStatusChange?.(updated);
         try {
           await refreshAuthToken();
         } catch {}
@@ -211,13 +276,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   const handleUnlinkCodexCli = async () => {
-    setIsSubmitting(true);
+    setUnlinkingCli('codex');
+    setAuthError(null);
     try {
       await unlinkCodexCli();
       const updated = await fetchCliStatus();
       setCliStatus(updated);
+      onCliStatusChange?.(updated);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to unlink Codex CLI';
+      setAuthError(msg);
     } finally {
-      setIsSubmitting(false);
+      setUnlinkingCli(null);
     }
   };
 
@@ -276,15 +346,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
-      <div className="w-full max-w-md rounded-2xl bg-surface-container-low border border-outline-variant/40 shadow-2xl p-space-lg text-on-surface relative">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
+      <div className="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl bg-surface-container-low border border-outline-variant/40 shadow-2xl p-4 sm:p-6 text-on-surface relative">
         {/* Close Button */}
         <button
-          onClick={onClose}
-          className="absolute top-4 right-4 w-8 h-8 rounded-lg bg-surface-container/70 hover:bg-surface-container-high border border-outline-variant/30 flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-all cursor-pointer shadow-sm active:scale-95"
+          onClick={() => {
+            closeGeminiCliLoginPopup();
+            onClose();
+          }}
+          className="absolute top-3.5 right-3.5 w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-surface-container/70 hover:bg-surface-container-high border border-outline-variant/30 flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-all cursor-pointer shadow-xs active:scale-95 z-10"
           title="Close modal"
         >
-          <span className="material-symbols-outlined text-[18px]">close</span>
+          <span className="material-symbols-outlined text-[16px] sm:text-[18px]">close</span>
         </button>
 
         {/* STEP 1: NOT LOGGED IN -> Platform Sign-In */}
@@ -358,14 +431,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           /* STEP 2: LOGGED IN -> Link Claude & ChatGPT Subscriptions */
           <div className="space-y-space-md">
             {/* Modal Header */}
-            <div className="flex items-center gap-space-sm pb-space-sm border-b border-outline-variant/20">
-              <UserAvatar name={currentUser.name} avatarUrl={currentUser.avatarUrl} size="lg" />
+            <div className="flex items-center gap-2.5 pb-3 pr-8 border-b border-outline-variant/20">
+              <UserAvatar name={currentUser.name} avatarUrl={currentUser.avatarUrl} size="md" />
               <div className="min-w-0">
-                <h3 className="font-headline-sm text-headline-sm font-semibold text-on-surface truncate">
+                <h3 className="font-semibold text-sm sm:text-base text-on-surface truncate">
                   Link AI Subscriptions
                 </h3>
-                <p className="font-body-sm text-xs text-on-surface-variant truncate">
-                  Connected as <strong className="text-on-surface">{currentUser.email}</strong>
+                <p className="text-[11px] sm:text-xs text-outline truncate" title={currentUser.email}>
+                  Connected as <strong className="text-on-surface font-medium">{currentUser.email}</strong>
                 </p>
               </div>
             </div>
@@ -449,26 +522,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               /* Subscriptions List */
               <div className="space-y-space-sm">
                 {/* Claude Code CLI (claude) Status Card */}
-                <div className="p-space-md rounded-xl bg-surface-container-lowest border border-outline-variant/20 flex flex-col gap-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-space-sm min-w-0">
+                <div className="p-3 sm:p-4 rounded-xl bg-surface-container-lowest border border-outline-variant/20 flex flex-col gap-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 sm:gap-3">
+                    <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
                       <div className="w-9 h-9 rounded-lg bg-[#D97706]/15 border border-[#D97706]/30 flex items-center justify-center p-2 shrink-0">
                         <img src="/provider-icons/claude.svg" alt="Claude" className="w-5 h-5 object-contain" />
                       </div>
-                      <div className="min-w-0">
-                        <div className="font-label-md text-label-md font-semibold text-on-surface flex items-center gap-1.5 flex-wrap">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-semibold text-xs sm:text-sm text-on-surface flex items-center gap-1.5 flex-wrap">
                           <span>Claude Code CLI (claude)</span>
                           {cliStatus?.claude?.linked ? (
-                            <span className="text-secondary font-code-sm text-[10px] bg-secondary/10 px-1.5 py-0.2 rounded border border-secondary/20">
+                            <span className="text-secondary font-mono text-[10px] bg-secondary/10 px-1.5 py-0.5 rounded border border-secondary/20 whitespace-nowrap">
                               LINKED
                             </span>
                           ) : (
-                            <span className="text-outline font-code-sm text-[10px] bg-surface-container-high px-1.5 py-0.2 rounded border border-outline-variant/30">
+                            <span className="text-outline font-mono text-[10px] bg-surface-container-high px-1.5 py-0.5 rounded border border-outline-variant/30 whitespace-nowrap">
                               NOT LINKED
                             </span>
                           )}
                         </div>
-                        <div className="font-body-sm text-xs text-outline truncate">
+                        <div className="text-[11px] sm:text-xs text-outline line-clamp-2 sm:line-clamp-1 mt-0.5">
                           {cliStatus?.claude?.linked
                             ? `Authorized via ${cliStatus.claude.authMethod || 'Claude CLI'} · Ready for model execution`
                             : 'Click Link Claude CLI to authorize in a browser popup'}
@@ -476,23 +549,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="shrink-0 ml-2">
+                    <div className="w-full sm:w-auto shrink-0 flex items-center justify-end sm:justify-start">
                       {cliStatus?.claude?.linked ? (
                         <button
                           type="button"
                           onClick={handleUnlinkClaudeCli}
-                          disabled={isSubmitting}
-                          className="px-2.5 py-1.5 rounded-lg border border-error/30 text-error hover:bg-error/10 font-label-md text-xs font-semibold transition-all cursor-pointer"
+                          disabled={isSubmitting || unlinkingCli === 'claude'}
+                          className="w-full sm:w-auto px-3 py-1.5 rounded-lg border border-error/30 text-error hover:bg-error/10 font-medium text-xs transition-all cursor-pointer text-center flex items-center justify-center gap-1.5 disabled:opacity-50"
                           title="Unlink Claude CLI"
                         >
-                          Unlink
+                          {unlinkingCli === 'claude' ? (
+                            <>
+                              <span className="material-symbols-outlined text-[13px] animate-spin">progress_activity</span>
+                              <span>Unlinking...</span>
+                            </>
+                          ) : (
+                            'Unlink'
+                          )}
                         </button>
                       ) : (
                         <button
                           type="button"
                           onClick={handleLinkClaudeCli}
                           disabled={isSubmitting}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#D97706] text-white hover:bg-[#B45309] font-label-md text-xs font-semibold transition-all cursor-pointer shadow-sm disabled:opacity-50"
+                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-3.5 py-2 sm:py-1.5 rounded-lg bg-[#D97706] text-white hover:bg-[#B45309] font-semibold text-xs transition-all cursor-pointer shadow-sm disabled:opacity-50"
                         >
                           <span className="material-symbols-outlined text-[14px]">open_in_new</span>
                           <span>Link Claude CLI</span>
@@ -502,9 +582,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </div>
 
                   {!cliStatus?.claude?.linked && (
-                    <div className="pt-1 flex items-center justify-between gap-2 border-t border-outline-variant/15 text-[11px]">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-outline">Mode:</span>
+                    <div className="pt-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-t border-outline-variant/15 text-[11px]">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-outline shrink-0">Mode:</span>
                         <div className="inline-flex rounded-md p-0.5 bg-surface-container border border-outline-variant/30">
                           <button
                             type="button"
@@ -536,7 +616,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       <button
                         type="button"
                         onClick={() => setShowClaudeCodeInput(!showClaudeCodeInput)}
-                        className="text-outline hover:text-on-surface transition-colors cursor-pointer"
+                        className="text-outline hover:text-on-surface transition-colors cursor-pointer text-left sm:text-right"
                       >
                         {showClaudeCodeInput ? 'Hide manual code' : 'Paste code manually?'}
                       </button>
@@ -544,19 +624,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   )}
 
                   {showClaudeCodeInput && !cliStatus?.claude?.linked && (
-                    <div className="flex items-center gap-1.5 pt-1.5">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 pt-1.5">
                       <input
                         type="text"
                         placeholder="Paste authorization code here if prompted..."
                         value={claudeCodeInput}
                         onChange={(e) => setClaudeCodeInput(e.target.value)}
-                        className="flex-1 bg-surface-container-lowest border border-outline-variant/30 rounded-md px-2.5 py-1 text-xs text-on-surface outline-none focus:border-primary font-mono"
+                        className="flex-1 bg-surface-container-lowest border border-outline-variant/30 rounded-md px-2.5 py-1.5 text-xs text-on-surface outline-none focus:border-primary font-mono"
                       />
                       <button
                         type="button"
                         onClick={handleSubmitClaudeCode}
                         disabled={!claudeCodeInput.trim() || isSubmitting}
-                        className="px-2.5 py-1 rounded-md bg-secondary text-on-secondary font-label-md text-xs font-semibold cursor-pointer disabled:opacity-40"
+                        className="px-3 py-1.5 rounded-md bg-secondary text-on-secondary font-medium text-xs cursor-pointer disabled:opacity-40 text-center"
                       >
                         Submit
                       </button>
@@ -565,80 +645,89 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
 
                 {/* OpenAI Codex CLI (codex) */}
-                <div className="p-space-md rounded-xl bg-surface-container-lowest border border-outline-variant/20 flex items-center justify-between">
-                  <div className="flex items-center gap-space-sm min-w-0">
-                    <div className="w-9 h-9 rounded-lg bg-[#10A37F]/15 border border-[#10A37F]/30 flex items-center justify-center p-2 shrink-0">
-                      <img src="/provider-icons/codex.svg" alt="OpenAI Codex CLI" className="w-5 h-5 object-contain" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="font-label-md text-label-md font-semibold text-on-surface flex items-center gap-1.5 flex-wrap">
-                        <span>OpenAI Codex CLI (codex)</span>
-                        {cliStatus?.codex?.linked ? (
-                          <span className="text-secondary font-code-sm text-[10px] bg-secondary/10 px-1.5 py-0.2 rounded border border-secondary/20">
-                            LINKED
-                          </span>
-                        ) : (
-                          <span className="text-outline font-code-sm text-[10px] bg-surface-container-high px-1.5 py-0.2 rounded border border-outline-variant/30">
-                            NOT LINKED
-                          </span>
-                        )}
+                <div className="p-3 sm:p-4 rounded-xl bg-surface-container-lowest border border-outline-variant/20 flex flex-col gap-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 sm:gap-3">
+                    <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
+                      <div className="w-9 h-9 rounded-lg bg-[#10A37F]/15 border border-[#10A37F]/30 flex items-center justify-center p-2 shrink-0">
+                        <img src="/provider-icons/codex.svg" alt="OpenAI Codex CLI" className="w-5 h-5 object-contain" />
                       </div>
-                      <div className="font-body-sm text-xs text-outline truncate">
-                        {cliStatus?.codex?.linked
-                          ? (cliStatus.codex.email
-                              ? `Authorized as ${cliStatus.codex.email} · Ready for model execution`
-                              : 'Authorized via ChatGPT Account · Ready for model execution')
-                          : 'Connect via one-click OAuth browser popup (ChatGPT Free or Plus)'}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="shrink-0 ml-2">
-                    {cliStatus?.codex?.linked ? (
-                      <button
-                        type="button"
-                        onClick={handleUnlinkCodexCli}
-                        disabled={isSubmitting}
-                        className="px-2.5 py-1.5 rounded-lg border border-error/30 text-error hover:bg-error/10 font-label-md text-xs font-semibold transition-all cursor-pointer"
-                        title="Unlink OpenAI Codex CLI"
-                      >
-                        Unlink
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={handleLinkCodexCli}
-                        disabled={isSubmitting}
-                        className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#10A37F] text-white hover:bg-[#0E8A6C] font-label-md text-xs font-semibold transition-all cursor-pointer shadow-sm disabled:opacity-50"
-                      >
-                        <span className="material-symbols-outlined text-[14px]">open_in_new</span>
-                        <span>Link Codex CLI</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Antigravity CLI Status Card */}
-                <div className="p-space-md rounded-xl bg-surface-container-lowest border border-outline-variant/20 flex flex-col gap-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-space-sm min-w-0">
-                      <div className="w-9 h-9 rounded-lg bg-[#4285F4]/15 border border-[#4285F4]/30 flex items-center justify-center p-2 shrink-0">
-                        <img src="/provider-icons/antigravity.svg" alt="Antigravity CLI" className="w-5 h-5 object-contain" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="font-label-md text-label-md font-semibold text-on-surface flex items-center gap-1.5 flex-wrap">
-                          <span>Antigravity CLI (agy)</span>
-                          {cliStatus?.antigravity?.linked ? (
-                            <span className="text-secondary font-code-sm text-[10px] bg-secondary/10 px-1.5 py-0.2 rounded border border-secondary/20">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-semibold text-xs sm:text-sm text-on-surface flex items-center gap-1.5 flex-wrap">
+                          <span>OpenAI Codex CLI (codex)</span>
+                          {cliStatus?.codex?.linked ? (
+                            <span className="text-secondary font-mono text-[10px] bg-secondary/10 px-1.5 py-0.5 rounded border border-secondary/20 whitespace-nowrap">
                               LINKED
                             </span>
                           ) : (
-                            <span className="text-outline font-code-sm text-[10px] bg-surface-container-high px-1.5 py-0.2 rounded border border-outline-variant/30">
+                            <span className="text-outline font-mono text-[10px] bg-surface-container-high px-1.5 py-0.5 rounded border border-outline-variant/30 whitespace-nowrap">
                               NOT LINKED
                             </span>
                           )}
                         </div>
-                        <div className="font-body-sm text-xs text-outline truncate">
+                        <div className="text-[11px] sm:text-xs text-outline line-clamp-2 sm:line-clamp-1 mt-0.5">
+                          {cliStatus?.codex?.linked
+                            ? (cliStatus.codex.email
+                                ? `Authorized as ${cliStatus.codex.email} · Ready for model execution`
+                                : 'Authorized via ChatGPT Account · Ready for model execution')
+                            : 'Connect via one-click OAuth browser popup (ChatGPT Free or Plus)'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="w-full sm:w-auto shrink-0 flex items-center justify-end sm:justify-start">
+                      {cliStatus?.codex?.linked ? (
+                        <button
+                          type="button"
+                          onClick={handleUnlinkCodexCli}
+                          disabled={isSubmitting || unlinkingCli === 'codex'}
+                          className="w-full sm:w-auto px-3 py-1.5 rounded-lg border border-error/30 text-error hover:bg-error/10 font-medium text-xs transition-all cursor-pointer text-center flex items-center justify-center gap-1.5 disabled:opacity-50"
+                          title="Unlink OpenAI Codex CLI"
+                        >
+                          {unlinkingCli === 'codex' ? (
+                            <>
+                              <span className="material-symbols-outlined text-[13px] animate-spin">progress_activity</span>
+                              <span>Unlinking...</span>
+                            </>
+                          ) : (
+                            'Unlink'
+                          )}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleLinkCodexCli}
+                          disabled={isSubmitting}
+                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-3.5 py-2 sm:py-1.5 rounded-lg bg-[#10A37F] text-white hover:bg-[#0E8A6C] font-semibold text-xs transition-all cursor-pointer shadow-sm disabled:opacity-50"
+                        >
+                          <span className="material-symbols-outlined text-[14px]">open_in_new</span>
+                          <span>Link Codex CLI</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Antigravity CLI Status Card */}
+                <div className="p-3 sm:p-4 rounded-xl bg-surface-container-lowest border border-outline-variant/20 flex flex-col gap-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 sm:gap-3">
+                    <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
+                      <div className="w-9 h-9 rounded-lg bg-[#4285F4]/15 border border-[#4285F4]/30 flex items-center justify-center p-2 shrink-0">
+                        <img src="/provider-icons/antigravity.svg" alt="Antigravity CLI" className="w-5 h-5 object-contain" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="font-semibold text-xs sm:text-sm text-on-surface flex items-center gap-1.5 flex-wrap">
+                          <span>Antigravity CLI (agy)</span>
+                          {cliStatus?.antigravity?.linked ? (
+                            <span className="text-secondary font-mono text-[10px] bg-secondary/10 px-1.5 py-0.5 rounded border border-secondary/20 whitespace-nowrap">
+                              LINKED
+                            </span>
+                          ) : (
+                            <span className="text-outline font-mono text-[10px] bg-surface-container-high px-1.5 py-0.5 rounded border border-outline-variant/30 whitespace-nowrap">
+                              NOT LINKED
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] sm:text-xs text-outline line-clamp-2 sm:line-clamp-1 mt-0.5">
                           {cliStatus?.antigravity?.linked
                             ? (cliStatus.antigravity?.details ||
                                 `Authorized as ${cliStatus.antigravity?.email || 'Google Account'}`)
@@ -647,33 +736,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="shrink-0 ml-2">
+                    <div className="w-full sm:w-auto shrink-0 flex items-center justify-end sm:justify-start">
                       {cliStatus?.antigravity?.linked ? (
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setShowAgyCodeInput(!showAgyCodeInput)}
-                            className="text-xs text-outline hover:text-on-surface transition-colors cursor-pointer"
-                            title="Re-authenticate or update authorization code"
-                          >
-                            {showAgyCodeInput ? 'Hide' : 'Re-link'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleUnlinkGeminiCli}
-                            disabled={isSubmitting}
-                            className="px-2.5 py-1.5 rounded-lg border border-error/30 text-error hover:bg-error/10 font-label-md text-xs font-semibold transition-all cursor-pointer"
-                            title="Unlink Antigravity CLI"
-                          >
-                            Unlink
-                          </button>
-                        </div>
+                        <button
+                          type="button"
+                          onClick={handleUnlinkGeminiCli}
+                          disabled={isSubmitting || unlinkingCli === 'antigravity'}
+                          className="w-full sm:w-auto px-3 py-1.5 rounded-lg border border-error/30 text-error hover:bg-error/10 font-medium text-xs transition-all cursor-pointer text-center flex items-center justify-center gap-1.5 disabled:opacity-50"
+                          title="Unlink Antigravity CLI"
+                        >
+                          {unlinkingCli === 'antigravity' ? (
+                            <>
+                              <span className="material-symbols-outlined text-[13px] animate-spin">progress_activity</span>
+                              <span>Unlinking...</span>
+                            </>
+                          ) : (
+                            'Unlink'
+                          )}
+                        </button>
                       ) : (
                         <button
                           type="button"
                           onClick={handleLinkGeminiCli}
                           disabled={isSubmitting}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#4285F4] text-white hover:bg-[#3367D6] font-label-md text-xs font-semibold transition-all cursor-pointer shadow-sm disabled:opacity-50"
+                          className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-3.5 py-2 sm:py-1.5 rounded-lg bg-[#4285F4] text-white hover:bg-[#3367D6] font-semibold text-xs transition-all cursor-pointer shadow-sm disabled:opacity-50"
                         >
                           <span className="material-symbols-outlined text-[14px]">open_in_new</span>
                           <span>Link Antigravity CLI</span>
@@ -682,48 +768,63 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </div>
                   </div>
 
-                  <div className="pt-1 flex items-center justify-between gap-2 border-t border-outline-variant/15 text-[11px]">
-                    <span className="text-outline text-[11px]">
-                      Opens Google sign-in tab &rarr; Authorize &rarr; paste the code below
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setShowAgyCodeInput(!showAgyCodeInput)}
-                      className="text-outline hover:text-on-surface transition-colors cursor-pointer shrink-0"
-                    >
-                      {showAgyCodeInput ? 'Hide code input' : 'Paste code manually'}
-                    </button>
-                  </div>
-
-                  {showAgyCodeInput && (
-                    <div className="p-2.5 rounded-lg bg-surface-container/40 border border-outline-variant/20 flex flex-col gap-2 mt-1">
-                      <div className="text-[11px] text-on-surface-variant flex flex-col gap-0.5">
-                        <span className="font-semibold text-on-surface">3-Step Authorization:</span>
-                        <span>1. Sign in on the opened Google authorization tab.</span>
-                        <span>2. Copy the authorization code shown (or the full redirect URL).</span>
-                        <span>3. Paste it below and click <strong>Submit Code</strong>:</span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="text"
-                          placeholder="Paste authorization code or callback URL here..."
-                          value={agyCodeInput}
-                          onChange={(e) => setAgyCodeInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleSubmitAgyCode();
-                          }}
-                          className="flex-1 bg-surface-container-lowest border border-outline-variant/30 rounded-md px-2.5 py-1.5 text-xs text-on-surface outline-none focus:border-primary font-mono"
-                        />
+                  {cliStatus?.antigravity?.linked ? (
+                    <div className="pt-2 border-t border-outline-variant/15 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium">
+                      <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                      <span>Antigravity CLI is linked! You can now safely close the Google sign-in window.</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="pt-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5 sm:gap-2 border-t border-outline-variant/15 text-[11px]">
+                        <span className="text-outline text-[11px] leading-snug">
+                          Opens Google sign-in tab &rarr; Authorize &rarr; paste the code below
+                        </span>
                         <button
                           type="button"
-                          onClick={handleSubmitAgyCode}
-                          disabled={!agyCodeInput.trim() || isSubmitting}
-                          className="px-3 py-1.5 rounded-md bg-[#4285F4] text-white font-label-md text-xs font-semibold cursor-pointer disabled:opacity-40 hover:bg-[#3367D6] transition-colors"
+                          onClick={() => setShowAgyCodeInput(!showAgyCodeInput)}
+                          className="text-outline hover:text-on-surface transition-colors cursor-pointer self-start sm:self-auto shrink-0"
                         >
-                          {isSubmitting ? 'Submitting...' : 'Submit Code'}
+                          {showAgyCodeInput ? 'Hide code input' : 'Paste code manually'}
                         </button>
                       </div>
-                    </div>
+
+                      {showAgyCodeInput && (
+                        <div className="p-2.5 rounded-lg bg-surface-container/40 border border-outline-variant/20 flex flex-col gap-2 mt-1">
+                          <div className="text-[11px] text-on-surface-variant flex flex-col gap-0.5">
+                            <span className="font-semibold text-on-surface">3-Step Authorization:</span>
+                            <span>1. Click <strong>Link Antigravity CLI</strong> to open Google sign-in.</span>
+                            <span>2. Sign in, then click the <strong>Copy to Clipboard</strong> button on the webpage (starts with <strong>4/</strong>). Do not copy the URL bar.</span>
+                            <span>3. Paste the code below and click <strong>Submit Code</strong> (you can then close the Google window).</span>
+                          </div>
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5">
+                            <input
+                              type="text"
+                              placeholder="Paste authorization code (starts with 4/)..."
+                              value={agyCodeInput}
+                              onChange={(e) => setAgyCodeInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSubmitAgyCode();
+                              }}
+                              className="flex-1 bg-surface-container-lowest border border-outline-variant/30 rounded-md px-2.5 py-1.5 text-xs text-on-surface outline-none focus:border-primary font-mono"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleSubmitAgyCode}
+                              disabled={!agyCodeInput.trim() || isSubmitting}
+                              className="px-3 py-1.5 rounded-md bg-[#4285F4] text-white font-medium text-xs cursor-pointer disabled:opacity-40 hover:bg-[#3367D6] transition-colors text-center"
+                            >
+                              {isSubmitting ? 'Submitting...' : 'Submit Code'}
+                            </button>
+                          </div>
+                          {agyCodeInput.trim() && !agyCodeInput.trim().startsWith('4/') && !agyCodeInput.includes('code=') && (
+                            <div className="flex items-center gap-1.5 text-[11px] text-amber-400 font-medium">
+                              <span className="material-symbols-outlined text-[14px]">warning</span>
+                              <span>Authorization codes start with <strong>4/</strong>. Please copy the code displayed on the webpage, not the address bar.</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
 

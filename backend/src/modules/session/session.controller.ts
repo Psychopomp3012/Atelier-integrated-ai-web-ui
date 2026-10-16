@@ -24,7 +24,9 @@ export class SessionController {
 
   public async getSessions(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const userId = this.getUserId(req);
-    const sessions = await sessionService.getUserSessions(userId);
+    const query = req.query as { includeMessages?: string };
+    const includeAll = query?.includeMessages === 'true' || query?.includeMessages === '1';
+    const sessions = await sessionService.getUserSessions(userId, { includeAllMessages: includeAll });
     return reply.status(200).send(createSuccessResponse(sessions));
   }
 
@@ -46,11 +48,35 @@ export class SessionController {
       throw new AppError('Session ID is required', 400, 'VALIDATION_ERROR');
     }
 
-    const session = await sessionService.getSessionById(userId, params.id);
+    const query = req.query as { limit?: string; beforeId?: string; all?: string };
+    const limit = query?.limit ? parseInt(query.limit, 10) : 25;
+    const beforeId = query?.beforeId;
+    const all = query?.all === 'true' || query?.all === '1';
+
+    const session = await sessionService.getSessionById(userId, params.id, { limit, beforeId, all });
     if (!session) {
       throw new AppError(`Session ${params.id} not found`, 404, 'NOT_FOUND');
     }
     return reply.status(200).send(createSuccessResponse(session));
+  }
+
+  public async getSessionMessages(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const userId = this.getUserId(req);
+    const params = req.params as { id: string };
+    if (!params?.id) {
+      throw new AppError('Session ID is required', 400, 'VALIDATION_ERROR');
+    }
+
+    const query = req.query as { limit?: string; beforeId?: string; all?: string };
+    const limit = query?.limit ? parseInt(query.limit, 10) : 25;
+    const beforeId = query?.beforeId;
+    const all = query?.all === 'true' || query?.all === '1';
+
+    const result = await sessionService.getSessionMessages(userId, params.id, { limit, beforeId, all });
+    if (!result) {
+      throw new AppError(`Session ${params.id} not found`, 404, 'NOT_FOUND');
+    }
+    return reply.status(200).send(createSuccessResponse(result));
   }
 
   public async deleteSession(req: FastifyRequest, reply: FastifyReply): Promise<void> {

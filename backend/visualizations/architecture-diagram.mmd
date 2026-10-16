@@ -10,19 +10,20 @@ config:
 ---
 architecture-beta
     group client(cloud)[Client Frontend (Vercel)]
-    service ui(server)[React 19 UI] in client
+    service ui(server)[React 19 UI & Modals] in client
     service inspector(server)[Cloud Inspector] in client
 
     group backend(server)[Fastify Backend Orchestrator (Heroku)]
     service auth(server)[7-Day JWT Auth] in backend
-    service api(server)[Fastify API Core] in backend
+    service api(server)[Fastify API Core & SSE] in backend
     service firestore(database)[Google Cloud Firestore] in backend
+    service compactor(server)[Context Compactor] in backend
 
-    group sandbox(cloud)[E2B MicroVM Sandbox]
+    group sandbox(cloud)[E2B MicroVM Sandbox Pool (Max 3)]
     junction entry in sandbox
-    service agy(cloud)[Google Antigravity] in sandbox
-    service codex(cloud)[OpenAI Codex] in sandbox
-    service claude(cloud)[Anthropic Claude] in sandbox
+    service codex(cloud)[OpenAI Codex (codex)] in sandbox
+    service claude(cloud)[Anthropic Claude (claude)] in sandbox
+    service agy(cloud)[Google Antigravity (agy)] in sandbox
 
     ui:R -- L:inspector
     ui:B -- T:auth
@@ -30,7 +31,8 @@ architecture-beta
 
     auth:R -- L:api
     auth:B -- T:firestore
-    api:B -- T:firestore
+    api:B -- T:compactor
+    firestore:R -- L:compactor
 
     api:R -- L:entry
     entry:T -- L:codex

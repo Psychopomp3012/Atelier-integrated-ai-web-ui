@@ -56,6 +56,49 @@ export class DockerSandboxProvider implements ISandboxProvider {
     return id.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 24);
   }
 
+  private formatAgyTool(toolName: string, params: Record<string, any> = {}): { desc: string; cmd?: string } {
+    if (toolName === 'run_command') {
+      const rawCmd = params.CommandLine || '';
+      const preview = rawCmd.length > 55 ? `${rawCmd.slice(0, 52)}...` : rawCmd;
+      return {
+        desc: rawCmd ? `Running command in sandbox: \`${preview}\`` : 'Running command in sandbox',
+        cmd: rawCmd,
+      };
+    }
+    if (toolName === 'view_file' || toolName === 'read_resource') {
+      const file = params.AbsolutePath || params.filePath || '';
+      const base = file ? path.basename(file) : 'file';
+      return { desc: `Reading file \`${base}\``, cmd: file };
+    }
+    if (toolName === 'write_to_file') {
+      const file = params.TargetFile || params.targetFile || '';
+      const base = file ? path.basename(file) : 'artifact';
+      return { desc: `Writing artifact \`${base}\``, cmd: file };
+    }
+    if (toolName === 'replace_file_content' || toolName === 'multi_replace_file_content' || toolName === 'sed_file') {
+      const file = params.TargetFile || params.targetFile || '';
+      const base = file ? path.basename(file) : 'code';
+      return { desc: `Editing code in \`${base}\``, cmd: file };
+    }
+    if (toolName === 'list_dir') {
+      const dir = params.DirectoryPath || '/workspace';
+      const base = path.basename(dir) || dir;
+      return { desc: `Scanning directory \`${base}\``, cmd: dir };
+    }
+    if (toolName === 'grep_search') {
+      const q = params.Query || '';
+      return { desc: `Searching codebase for \`${q}\``, cmd: q };
+    }
+    if (toolName === 'search_web') {
+      const q = params.query || '';
+      return { desc: `Searching web for \`${q}\``, cmd: q };
+    }
+    if (toolName === 'generate_image') {
+      return { desc: 'Generating UI visual artifact', cmd: params.Prompt || '' };
+    }
+    return { desc: `Executing agent tool: ${toolName}`, cmd: '' };
+  }
+
   /**
    * Automatic Credential Bridge:
    * Safely synchronizes linked provider credentials (Antigravity/Gemini, Claude, Codex)
@@ -341,18 +384,250 @@ export class DockerSandboxProvider implements ISandboxProvider {
 
       const lines = stdout.split('\n');
       let text = '';
+      let cliUsage = {
+        input_tokens: 0,
+        output_tokens: 0,
+        thinking_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: 0,
+        duration_seconds: 0,
+        num_turns: 1,
+      };
+
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
         try {
-          const parsed = JSON.parse(trimmed);
-          if (parsed.text || parsed.delta) {
-            const token = parsed.text || parsed.delta;
+          const cleanLine = trimmed.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+          const event = JSON.parse(cleanLine);
+
+          // Handle standard delta/token events
+          if (event.type === 'token' || event.type === 'delta') {
+            const token = event.text || event.delta || '';
             text += token;
             req.onToken?.(token);
-          } else if (parsed.content) {
-            text += parsed.content;
-            req.onToken?.(parsed.content);
+          } else if (event.type === 'step' && req.onStep) {
+            req.onStep(event);
+          } else if (event.type === 'message' || event.type === 'assistant') {
+            const content = event.content || event.text || '';
+            if (content && !text.includes(content)) {
+              text += content;
+              req.onToken?.(content);
+            }
+          }
+          // Handle Codex event stream schema
+          else if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
+            const content = event.item.text || '';
+            if (content && !text.includes(content)) {
+              text += (text ? '\n\n' : '') + content;
+              req.onToken?.(content);
+            }
+          } else if (event.type === 'item.started' && event.item?.type === 'reasoning') {
+            req.onStep?.({
+              id: event.item.id || `step_reasoning_${Date.now()}`,
+              description: 'Reasoning and formulating execution strategy...',
+              status: 'in_progress',
+              durationMs: 0,
+            });
+          } else if (event.type === 'item.completed' && event.item?.type === 'reasoning') {
+            req.onStep?.({
+              id: event.item.id || `step_reasoning_${Date.now()}`,
+              description: 'Formulated strategy & reasoned about execution plan',
+              status: 'completed',
+              durationMs: 180,
+            });
+          } else if (event.type === 'item.started' && event.item?.type === 'command_execution') {
+            const cmd = event.item.command || '';
+            const preview = cmd.length > 55 ? `${cmd.slice(0, 52)}...` : cmd;
+            req.onStep?.({
+              id: event.item.id || `step_${Date.now()}`,
+              description: `Running command in sandbox: \`${preview}\``,
+              status: 'in_progress',
+              durationMs: 0,
+              command: cmd,
+              tool: 'run_command',
+            });
+          } else if (event.type === 'item.completed' && event.item?.type === 'command_execution') {
+            const cmd = event.item.command || '';
+            const preview = cmd.length > 55 ? `${cmd.slice(0, 52)}...` : cmd;
+            req.onStep?.({
+              id: event.item.id || `step_${Date.now()}`,
+              description: `Completed command: \`${preview}\``,
+              status: event.item.exit_code === 0 ? 'completed' : 'failed',
+              durationMs: 120,
+              command: cmd,
+              output: event.item.aggregated_output,
+              tool: 'run_command',
+              exitCode: event.item.exit_code ?? 0,
+            });
+          } else if (event.type === 'turn.completed' && event.usage) {
+            cliUsage = {
+              input_tokens: event.usage.input_tokens || 0,
+              output_tokens: event.usage.output_tokens || 0,
+              thinking_tokens: event.usage.thinking_tokens || 0,
+              cache_read_tokens: event.usage.cache_read_tokens || 0,
+              total_tokens: (event.usage.input_tokens || 0) + (event.usage.output_tokens || 0),
+              duration_seconds: Math.round((Date.now() - start) / 1000),
+              num_turns: 1,
+            };
+          }
+          // Handle Claude event stream schema (thinking blocks and tool use)
+          else if (event.type === 'content_block_start' && event.content_block?.type === 'thinking') {
+            req.onStep?.({
+              id: `step_claude_think_${event.index ?? 0}`,
+              description: 'Reasoning and formulating execution strategy...',
+              status: 'in_progress',
+              durationMs: 0,
+            });
+          } else if (event.type === 'content_block_stop' && event.index !== undefined) {
+            req.onStep?.({
+              id: `step_claude_think_${event.index}`,
+              description: 'Formulated strategy & reasoned about execution plan',
+              status: 'completed',
+              durationMs: 180,
+            });
+          } else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+            const toolName = event.content_block.name || 'tool';
+            req.onStep?.({
+              id: `step_claude_tool_${event.content_block.id || event.index || Date.now()}`,
+              description: `Executing tool in sandbox: ${toolName}`,
+              status: 'in_progress',
+              durationMs: 0,
+              tool: toolName,
+            });
+          }
+          // Handle Antigravity CLI (agy) stream-json schema
+          else if (event.event === 'init') {
+            req.onStep?.({
+              id: 'step_init',
+              description: 'Connected to Docker sandbox & initialized agent tools',
+              status: 'completed',
+              durationMs: Math.max(16, Date.now() - start),
+            });
+            req.onStep?.({
+              id: 'step_reasoning_1',
+              description: 'Reasoning and formulating execution strategy...',
+              status: 'in_progress',
+              durationMs: 0,
+            });
+          } else if (event.event === 'step_update' && event.step_update) {
+            const su = event.step_update;
+            const stepIdx = su.step_index ?? 1;
+
+            if (su.step_type === 'tool') {
+              const toolName = su.tool_name || su.tool_info?.name || 'tool';
+              const params = su.tool_info?.parameters || {};
+              const { desc, cmd } = this.formatAgyTool(toolName, params);
+
+              if (su.state === 'ACTIVE') {
+                req.onStep?.({
+                  id: `step_tool_${stepIdx}`,
+                  description: desc,
+                  status: 'in_progress',
+                  durationMs: 0,
+                  tool: toolName,
+                  command: cmd,
+                });
+              } else if (su.state === 'DONE') {
+                const durationMs = su.duration_seconds ? Math.round(su.duration_seconds * 1000) : 120;
+                let output = su.tool_info?.output;
+                if (typeof output !== 'string' && output !== undefined && output !== null) {
+                  output = JSON.stringify(output, null, 2);
+                }
+                const completedDesc = desc
+                  .replace('Running command', 'Completed command')
+                  .replace('Reading file', 'Read file')
+                  .replace('Writing artifact', 'Created artifact')
+                  .replace('Editing code', 'Updated code')
+                  .replace('Scanning directory', 'Scanned directory')
+                  .replace('Searching codebase', 'Searched codebase')
+                  .replace('Searching web', 'Searched web')
+                  .replace('Executing agent tool:', 'Completed tool:');
+
+                req.onStep?.({
+                  id: `step_tool_${stepIdx}`,
+                  description:
+                    completedDesc.startsWith('Completed') ||
+                    completedDesc.startsWith('Created') ||
+                    completedDesc.startsWith('Read') ||
+                    completedDesc.startsWith('Updated') ||
+                    completedDesc.startsWith('Scanned') ||
+                    completedDesc.startsWith('Searched')
+                      ? completedDesc
+                      : `Completed: ${completedDesc}`,
+                  status: 'completed',
+                  durationMs,
+                  tool: toolName,
+                  command: cmd,
+                  output: output || undefined,
+                  exitCode: 0,
+                });
+
+                req.onStep?.({
+                  id: `step_reasoning_${stepIdx + 1}`,
+                  description: 'Reasoning and evaluating tool execution results...',
+                  status: 'in_progress',
+                  durationMs: 0,
+                });
+              }
+            } else if (su.step_type === 'agent_response') {
+              if (su.text_delta) {
+                text += su.text_delta;
+                req.onToken?.(su.text_delta);
+              }
+
+              const reasoningStepId = `step_reasoning_${stepIdx}`;
+              if (su.state === 'ACTIVE' && !su.text_delta) {
+                req.onStep?.({
+                  id: reasoningStepId,
+                  description: 'Reasoning and formulating execution strategy...',
+                  status: 'in_progress',
+                  durationMs: 0,
+                });
+              } else if (su.state === 'DONE') {
+                const durationMs = su.duration_seconds ? Math.round(su.duration_seconds * 1000) : 150;
+                const thinkingTokens = su.usage?.thinking_tokens;
+                if (thinkingTokens) {
+                  cliUsage.thinking_tokens = (cliUsage.thinking_tokens || 0) + thinkingTokens;
+                }
+                if (thinkingTokens || !su.text_delta) {
+                  req.onStep?.({
+                    id: reasoningStepId,
+                    description: thinkingTokens
+                      ? `Formulated strategy & reasoned about execution (${thinkingTokens} thinking tokens)`
+                      : 'Formulated strategy & reasoned about execution plan',
+                    status: 'completed',
+                    durationMs,
+                  });
+                }
+              }
+            }
+          } else if (event.event === 'result' && event.result) {
+            if (event.result.response && !text) {
+              text = event.result.response;
+              req.onToken?.(event.result.response);
+            }
+            if (event.result.usage) {
+              cliUsage = {
+                input_tokens: event.result.usage.input_tokens || 0,
+                output_tokens: event.result.usage.output_tokens || 0,
+                thinking_tokens: event.result.usage.thinking_tokens ?? cliUsage.thinking_tokens ?? 0,
+                cache_read_tokens: event.result.usage.cache_read_tokens || 0,
+                total_tokens: event.result.usage.total_tokens || 0,
+                duration_seconds: Math.round(event.result.duration_seconds || (Date.now() - start) / 1000),
+                num_turns: event.result.num_turns || 1,
+              };
+
+              const finalThinking = cliUsage.thinking_tokens;
+              req.onStep?.({
+                id: 'step_reasoning_1',
+                description: finalThinking
+                  ? `Formulated strategy & reasoned about execution (${finalThinking} thinking tokens)`
+                  : 'Formulated strategy & reasoned about execution plan',
+                status: 'completed',
+                durationMs: Math.round((event.result.duration_seconds || 1) * 1000),
+              });
+            }
           }
         } catch {
           text += line + '\n';
@@ -363,13 +638,7 @@ export class DockerSandboxProvider implements ISandboxProvider {
       return {
         text: text.trim() || stdout.trim(),
         durationMs,
-        usage: {
-          input_tokens: 0,
-          output_tokens: 0,
-          total_tokens: 0,
-          duration_seconds: Math.round(durationMs / 1000),
-          num_turns: 1,
-        },
+        usage: cliUsage,
         exitCode: 0,
         sandboxId: containerName,
       };

@@ -1,236 +1,146 @@
-import {
-  doc,
-  setDoc,
-  getDoc,
-  updateDoc,
-  deleteDoc,
-  collection,
-  query,
-  orderBy,
-  limit,
-  getDocs,
-  serverTimestamp,
-} from 'firebase/firestore';
-import { db } from '../config/firebase.config';
+import { apiFetch } from '../utils/api.util';
 import type { UserProfile, LinkedAIPlatformAccount, ChatMessage, ChatSession } from '../types';
 
 /**
- * Strips all undefined properties recursively because Firestore throws
- * "Function setDoc() called with invalid data. Unsupported field value: undefined"
+ * Service to manage user data and chat sessions via the secure Fastify backend API.
+ * In compliance with architectural rules, the frontend NEVER performs direct database
+ * write operations (e.g. direct Firestore writes). All persistence is authenticated
+ * with the user's weekly JWT and handled by the Fastify backend.
  */
-function cleanForFirestore<T>(data: T): T {
-  if (data === null || data === undefined) {
-    return null as unknown as T;
-  }
-  if (Array.isArray(data)) {
-    return data.map((item) => cleanForFirestore(item)) as unknown as T;
-  }
-  if (typeof data === 'object') {
-    const cleaned: Record<string, any> = {};
-    for (const [key, val] of Object.entries(data as Record<string, any>)) {
-      if (val !== undefined) {
-        cleaned[key] = cleanForFirestore(val);
-      }
-    }
-    return cleaned as T;
-  }
-  return data;
-}
-
 export const firestoreService = {
   /**
-   * Saves or merges the user profile into the Firestore `users` collection.
+   * Syncs the user profile to the cloud backend via POST /api/v1/auth/profile.
    */
-  async syncUserProfile(user: UserProfile, fbUid?: string): Promise<void> {
+  async syncUserProfile(user: UserProfile, _fbUid?: string): Promise<void> {
     try {
-      const docId = fbUid || user.id;
-      const userRef = doc(db, 'users', docId);
-
-      const payload = cleanForFirestore({
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        avatarUrl: user.avatarUrl,
-        primaryPlatform: user.primaryPlatform,
-        linkedPlatforms: user.linkedPlatforms,
-        updatedAt: serverTimestamp(),
-        lastLoginAt: new Date().toISOString(),
-        ...(user.createdAt ? { createdAt: user.createdAt } : { createdAt: new Date().toISOString() }),
+      await apiFetch('/api/v1/auth/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          avatarUrl: user.avatarUrl,
+          primaryPlatform: user.primaryPlatform,
+          linkedPlatforms: user.linkedPlatforms,
+        }),
       });
-
-      await setDoc(userRef, payload, { merge: true });
-      console.log(`[Firestore] Synchronized user profile for ${user.email} (${docId})`);
+      console.log(`[Backend API] Synchronized user profile for ${user.email} (${user.id})`);
     } catch (error) {
-      console.warn('[Firestore] Failed to sync user profile:', error);
+      console.warn('[Backend API] Failed to sync user profile:', error);
     }
   },
 
   /**
-   * Fetches the user profile document from Firestore.
+   * Fetches the user profile from the backend.
    */
-  async getUserProfile(docId: string): Promise<Partial<UserProfile> | null> {
+  async getUserProfile(_docId: string): Promise<Partial<UserProfile> | null> {
     try {
-      const userRef = doc(db, 'users', docId);
-      const snapshot = await getDoc(userRef);
-      if (snapshot.exists()) {
-        return snapshot.data() as Partial<UserProfile>;
+      const res = await apiFetch('/api/v1/auth/me');
+      if (res.ok) {
+        const data = await res.json();
+        return (data.data as Partial<UserProfile>) || null;
       }
       return null;
     } catch (error) {
-      console.warn('[Firestore] Failed to get user profile:', error);
+      console.warn('[Backend API] Failed to get user profile:', error);
       return null;
     }
   },
 
   /**
-   * Updates linked platforms (Claude, Codex, etc.) in Firestore.
+   * Updates linked platforms (Claude, Codex, etc.) via backend profile sync.
    */
   async updateLinkedPlatforms(
     docId: string,
     linkedPlatforms: LinkedAIPlatformAccount[]
   ): Promise<void> {
     try {
-      const userRef = doc(db, 'users', docId);
-      await updateDoc(userRef, {
-        linkedPlatforms,
-        updatedAt: serverTimestamp(),
+      await apiFetch('/api/v1/auth/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: docId,
+          linkedPlatforms,
+        }),
       });
-      console.log(`[Firestore] Updated linked platforms for ${docId}`);
+      console.log(`[Backend API] Updated linked platforms for ${docId}`);
     } catch (error) {
-      console.warn('[Firestore] Failed to update linked platforms:', error);
+      console.warn('[Backend API] Failed to update linked platforms:', error);
     }
   },
 
   /**
-   * Saves or updates a complete chat session in Firestore.
-   * Path: users/{userId}/sessions/{sessionId}
+   * Saves or updates a complete chat session via POST /api/v1/sessions.
    */
-  async saveSession(userId: string, session: ChatSession): Promise<void> {
+  async saveSession(_userId: string, session: ChatSession): Promise<void> {
     try {
-      const sessionRef = doc(db, 'users', userId, 'sessions', session.id);
-      const payload = cleanForFirestore({
-        id: session.id,
-        title: session.title,
-        createdAt: session.createdAt,
-        updatedAt: serverTimestamp(),
-        model: session.model,
-        messages: session.messages,
+      await apiFetch('/api/v1/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(session),
       });
-      await setDoc(sessionRef, payload, { merge: true });
-      console.log(`[Firestore] Successfully persisted session ${session.id} for user ${userId}`);
+      console.log(`[Backend API] Successfully persisted session ${session.id}`);
     } catch (error) {
-      console.warn('[Firestore] Failed to save session:', error);
+      console.warn('[Backend API] Failed to save session:', error);
     }
   },
 
   /**
-   * Loads all chat sessions for a user, sorted by most recently updated.
+   * Loads all chat sessions for the authenticated user via GET /api/v1/sessions.
    */
-  async loadUserSessions(userId: string): Promise<ChatSession[]> {
+  async loadUserSessions(_userId: string, _timeoutMs: number = 2500): Promise<ChatSession[]> {
     try {
-      const sessionsRef = collection(db, 'users', userId, 'sessions');
-      let snapshot;
-      try {
-        const q = query(sessionsRef, orderBy('updatedAt', 'desc'), limit(50));
-        snapshot = await getDocs(q);
-      } catch (queryErr) {
-        // Fallback without orderBy if Firestore index is missing
-        snapshot = await getDocs(sessionsRef);
+      const res = await apiFetch('/api/v1/sessions');
+      if (!res.ok) return [];
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        console.log(`[Backend API] Loaded ${data.data.length} sessions from backend`);
+        return data.data as ChatSession[];
       }
-
-      const sessions: ChatSession[] = [];
-      snapshot.forEach((d) => {
-        const data = d.data();
-        sessions.push({
-          id: data.id || d.id,
-          title: data.title || 'Untitled Session',
-          createdAt: data.createdAt || new Date().toISOString(),
-          updatedAt:
-            data.updatedAt?.toDate?.()?.toISOString() ||
-            data.updatedAt ||
-            new Date().toISOString(),
-          messages: data.messages || [],
-          model: data.model || 'claude-3-7-sonnet',
-        });
-      });
-      console.log(`[Firestore] Loaded ${sessions.length} sessions for user ${userId}`);
-      return sessions;
+      return [];
     } catch (error) {
-      console.warn('[Firestore] Failed to load sessions:', error);
+      console.warn('[Backend API] loadUserSessions failed:', error);
       return [];
     }
   },
 
   /**
-   * Deletes a chat session from Firestore.
+   * Deletes a chat session via DELETE /api/v1/sessions/:id.
    */
-  async deleteSession(userId: string, sessionId: string): Promise<void> {
+  async deleteSession(_userId: string, sessionId: string): Promise<void> {
     try {
-      const sessionRef = doc(db, 'users', userId, 'sessions', sessionId);
-      await deleteDoc(sessionRef);
-      console.log(`[Firestore] Successfully removed session ${sessionId} for user ${userId}`);
+      await apiFetch(`/api/v1/sessions/${sessionId}`, {
+        method: 'DELETE',
+      });
+      console.log(`[Backend API] Successfully removed session ${sessionId}`);
     } catch (error) {
-      console.warn('[Firestore] Failed to delete session:', error);
+      console.warn('[Backend API] Failed to delete session:', error);
     }
   },
 
   /**
-   * Stores a chat message in the user's conversation subcollection.
+   * Stores a chat message by saving the session state via the backend API.
    */
-  async saveChatMessage(userId: string, sessionId: string, message: ChatMessage): Promise<void> {
-    try {
-      const msgRef = doc(db, 'users', userId, 'sessions', sessionId, 'messages', message.id);
-      const payload = cleanForFirestore({
-        id: message.id,
-        role: message.role,
-        author: message.author,
-        authorBadge: message.authorBadge || null,
-        time: message.time,
-        avatarUrl: message.avatarUrl,
-        content: message.content,
-        modelBadge: message.modelBadge || null,
-        latency: message.latency || null,
-        steps: message.steps || [],
-        executionResult: message.executionResult || null,
-        explanationPoints: message.explanationPoints || [],
-        timestamp: serverTimestamp(),
-      });
-      await setDoc(msgRef, payload, { merge: true });
-    } catch (error) {
-      console.warn('[Firestore] Failed to save chat message in subcollection:', error);
-    }
+  async saveChatMessage(_userId: string, _sessionId: string, _message: ChatMessage): Promise<void> {
+    // Session state with full message array is persisted via saveSession
+    return Promise.resolve();
   },
 
   /**
-   * Loads chat messages for a specific session from Firestore.
+   * Loads chat messages for a specific session via GET /api/v1/sessions/:id.
    */
-  async loadChatMessages(userId: string, sessionId: string, maxLimit = 100): Promise<ChatMessage[]> {
+  async loadChatMessages(_userId: string, sessionId: string, _maxLimit = 25): Promise<ChatMessage[]> {
     try {
-      const messagesRef = collection(db, 'users', userId, 'sessions', sessionId, 'messages');
-      const q = query(messagesRef, orderBy('timestamp', 'asc'), limit(maxLimit));
-      const snapshot = await getDocs(q);
-
-      const messages: ChatMessage[] = [];
-      snapshot.forEach((d) => {
-        const data = d.data();
-        messages.push({
-          id: data.id || d.id,
-          role: data.role,
-          author: data.author,
-          authorBadge: data.authorBadge,
-          time: data.time,
-          avatarUrl: data.avatarUrl,
-          content: data.content,
-          modelBadge: data.modelBadge,
-          latency: data.latency,
-          steps: data.steps || [],
-          executionResult: data.executionResult,
-          explanationPoints: data.explanationPoints || [],
-        });
-      });
-      return messages;
+      const res = await apiFetch(`/api/v1/sessions/${sessionId}?limit=${_maxLimit}`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      if (data.success && data.data?.messages) {
+        return data.data.messages as ChatMessage[];
+      }
+      return [];
     } catch (error) {
-      console.warn('[Firestore] Failed to load chat history:', error);
+      console.warn('[Backend API] Failed to load chat history:', error);
       return [];
     }
   },

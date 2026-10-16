@@ -10,7 +10,7 @@ import { MarkdownContent } from './components/MarkdownContent';
 import { signOutFirebase } from './services/firebaseAuth.service';
 import { firestoreService } from './services/firestore.service';
 import { sessionSyncService } from './services/sessionSync.service';
-import { fetchCliStatus, refreshAuthToken, type CliStatus } from './services/cliAuth.service';
+import { fetchCliStatus, refreshAuthToken, closeGeminiCliLoginPopup, type CliStatus } from './services/cliAuth.service';
 import { apiFetch } from './utils/api.util';
 import type { ModelType, ChatMessage, UserProfile, AIPlatform, ChatSession, RateLimitState, GeminiQuotaStats, CodexQuotaStats, StepItem, ModelOption } from './types';
 import { AVAILABLE_MODELS, NONE_MODEL, getModelDisplayInfo, getMinimumEffortModelId } from './types';
@@ -64,25 +64,9 @@ function getAttachmentIcon(fileName: string): { icon: string; colorClass: string
 }
 
 export const App: React.FC = () => {
-  // Session history state
-  const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    try {
-      const raw = localStorage.getItem('harness_chat_sessions');
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
-    }
-  });
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
-    try {
-      const saved = localStorage.getItem('harness_current_session_id');
-      if (saved) return saved;
-      const raw = localStorage.getItem('harness_chat_sessions');
-      const all: ChatSession[] = raw ? JSON.parse(raw) : [];
-      if (all.length > 0 && all[0]?.id) return all[0].id;
-    } catch {}
-    return null;
-  });
+  // Session history state - strictly initialized to empty until authenticated user is resolved
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
   // Provider - Model - Effort preference state: initialized from localStorage preference, or 'none'
   const [selectedModel, setSelectedModel] = useState<ModelType>(() => {
@@ -106,29 +90,25 @@ export const App: React.FC = () => {
 
   const [availableModels, setAvailableModels] = useState<ModelOption[]>(AVAILABLE_MODELS);
 
-  const [messages, setMessages] = useState<ChatMessage[]>(() => {
-    try {
-      const savedId = localStorage.getItem('harness_current_session_id');
-      const raw = localStorage.getItem('harness_chat_sessions');
-      const all: ChatSession[] = raw ? JSON.parse(raw) : [];
-      const target = savedId ? all.find((s) => s.id === savedId) : (all[0] || null);
-      if (target) {
-        return target.messages || [];
-      }
-    } catch {}
-    return [];
-  });
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
 
-  // Persist current session ID to localStorage whenever it changes
+  // AI Platform Auth State
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isSyncingSessions, setIsSyncingSessions] = useState(false);
+
+  // Persist current session ID to localStorage whenever it changes, strictly scoped per user
   useEffect(() => {
     try {
-      if (currentSessionId) {
-        localStorage.setItem('harness_current_session_id', currentSessionId);
-      } else {
-        localStorage.removeItem('harness_current_session_id');
+      if (currentUser?.id) {
+        if (currentSessionId) {
+          localStorage.setItem(`harness_current_session_id_${currentUser.id}`, currentSessionId);
+        } else {
+          localStorage.removeItem(`harness_current_session_id_${currentUser.id}`);
+        }
       }
     } catch {}
-  }, [currentSessionId]);
+  }, [currentUser?.id, currentSessionId]);
   const [isLoading, setIsLoading] = useState(false);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -143,9 +123,10 @@ export const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
 
-  // AI Platform Auth State
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  // Paginated chat history state
+  const [hasMoreEarlierMessages, setHasMoreEarlierMessages] = useState<boolean>(false);
+  const [remainingMessageCount, setRemainingMessageCount] = useState<number>(0);
+  const [isLoadingEarlierMessages, setIsLoadingEarlierMessages] = useState<boolean>(false);
 
   // Rate Limiting & Quota State
   const [rateLimit, setRateLimit] = useState<RateLimitState>({
@@ -169,6 +150,7 @@ export const App: React.FC = () => {
   const refreshCliStatus = () => {
     fetchCliStatus().then((status) => {
       setCliStatus(status);
+      fetchGeminiQuota(currentSessionId || undefined);
       fetchCodexQuota(currentSessionId || undefined);
     }).catch(() => {});
   };
@@ -195,6 +177,8 @@ export const App: React.FC = () => {
   const [isAttachingSandbox, setIsAttachingSandbox] = useState<string | null>(null);
   const [selectedSandboxId, setSelectedSandboxId] = useState<string | null>(() => {
     try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) return null;
       return localStorage.getItem('harness_selected_sandbox_id') || null;
     } catch {
       return null;
@@ -211,16 +195,26 @@ export const App: React.FC = () => {
     } catch {}
   }, [selectedSandboxId]);
 
+  const validSessionIds = useMemo(() => sessions.map((s) => s.id), [sessions.map((s) => s.id).join(',')]);
+  const currentUserRef = useRef(currentUser);
+  currentUserRef.current = currentUser;
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const isFetchingUsageRef = useRef(false);
+
   const fetchSandboxUsage = useCallback(async () => {
+    if (isFetchingUsageRef.current) return;
     try {
-      if (!currentUser?.id) {
+      const u = currentUserRef.current;
+      if (!u?.id) {
         setSandboxUsage({ used: 0, max: 3, sandboxes: [] });
         setSelectedSandboxId(null);
         return;
       }
-      const activeIds = sessions.map((s) => s.id).join(',');
+      isFetchingUsageRef.current = true;
+      const activeIds = sessionsRef.current.map((s) => s.id).join(',');
       const params = new URLSearchParams();
-      params.set('userId', currentUser.id);
+      params.set('userId', u.id);
       params.set('activeSessionIds', activeIds);
       const url = `/api/v1/sandbox/usage?${params.toString()}`;
       const res = await apiFetch(url);
@@ -228,8 +222,10 @@ export const App: React.FC = () => {
       if (data.success && data.data) {
         setSandboxUsage(data.data);
       }
-    } catch {}
-  }, [currentUser, sessions]);
+    } catch {} finally {
+      isFetchingUsageRef.current = false;
+    }
+  }, []);
 
   // Clean up sandbox state and stored preferences when logged out
   useEffect(() => {
@@ -243,15 +239,27 @@ export const App: React.FC = () => {
   }, [currentUser]);
 
   useEffect(() => {
+    if (!currentUser?.id) return;
     fetchSandboxUsage();
-    const interval = setInterval(fetchSandboxUsage, 8000);
-    const onFocus = () => fetchSandboxUsage();
+
+    // Poll usage calmly once every 60 seconds only when tab is visible
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchSandboxUsage();
+      }
+    }, 60000);
+
+    const onFocus = () => {
+      if (document.visibilityState === 'visible') {
+        fetchSandboxUsage();
+      }
+    };
     window.addEventListener('focus', onFocus);
     return () => {
       clearInterval(interval);
       window.removeEventListener('focus', onFocus);
     };
-  }, [fetchSandboxUsage, currentSessionId]);
+  }, [currentUser?.id, fetchSandboxUsage]);
 
   // If the saved sandbox was destroyed or terminated, clean up stale selection
   useEffect(() => {
@@ -359,13 +367,10 @@ export const App: React.FC = () => {
   }, [selectedModel, availableModels]);
 
   const isModelLinked = useMemo(() => {
-    if (!currentUser) return false;
     if (selectedModel === 'none') return true;
     const isAgyLinked = Boolean(
       cliStatus?.antigravity?.linked ||
-      cliStatus?.gemini?.linked ||
-      currentUser.primaryPlatform === 'google' ||
-      currentUser.email
+      cliStatus?.gemini?.linked
     );
 
     // If the model is hosted by Antigravity (Gemini, Claude, GPT-OSS via AGY CLI), it uses Antigravity account
@@ -381,7 +386,7 @@ export const App: React.FC = () => {
         cliStatus?.claude?.linked && cliStatus?.claude?.authMethod !== 'api_key'
       );
       const isAccountSubscription = Boolean(
-        currentUser.linkedPlatforms?.some(
+        currentUser?.linkedPlatforms?.some(
           (p) => p.platform === 'claude_subscription' && p.hasValidSession
         )
       );
@@ -395,13 +400,22 @@ export const App: React.FC = () => {
     ) {
       return Boolean(
         cliStatus?.codex?.linked ||
-        currentUser.linkedPlatforms?.some(
+        currentUser?.linkedPlatforms?.some(
           (p) => (p.platform === 'codex_subscription' || p.platform === 'openai') && p.hasValidSession
         )
       );
     }
-    return false;
+    return isAgyLinked;
   }, [selectedModel, selectedModelOption, cliStatus, currentUser]);
+
+  const isAnyCliLinked = useMemo(() => {
+    return Boolean(
+      cliStatus?.antigravity?.linked ||
+      cliStatus?.gemini?.linked ||
+      cliStatus?.claude?.linked ||
+      cliStatus?.codex?.linked
+    );
+  }, [cliStatus]);
 
   useEffect(() => {
     fetchAvailableModels()
@@ -464,15 +478,19 @@ export const App: React.FC = () => {
     [messages, selectedModel, geminiQuota, codexQuota, selectedModelOption]
   );
 
-  const fetchGeminiQuota = async (sessId?: string) => {
-    if (!currentUser?.email) {
-      setGeminiQuota(null);
+  const lastGeminiQuotaFetchRef = useRef<number>(0);
+  const lastCodexQuotaFetchRef = useRef<number>(0);
+
+  const fetchGeminiQuota = async (sessId?: string, force = false) => {
+    const now = Date.now();
+    if (!force && now - lastGeminiQuotaFetchRef.current < 1500) {
       return;
     }
+    lastGeminiQuotaFetchRef.current = now;
     try {
-      const emailParam = `?userEmail=${encodeURIComponent(currentUser.email)}`;
+      const emailParam = currentUser?.email ? `?userEmail=${encodeURIComponent(currentUser.email)}` : '';
       const activeId = sessId || currentSessionId;
-      const sessionParam = activeId ? `&sessionId=${encodeURIComponent(activeId)}` : '';
+      const sessionParam = activeId ? `${emailParam ? '&' : '?'}sessionId=${encodeURIComponent(activeId)}` : '';
       const res = await apiFetch(`/api/v1/quota/gemini${emailParam}${sessionParam}`);
       if (res.ok) {
         const json = await res.json();
@@ -485,7 +503,12 @@ export const App: React.FC = () => {
     }
   };
 
-  const fetchCodexQuota = async (sessId?: string) => {
+  const fetchCodexQuota = async (sessId?: string, force = false) => {
+    const now = Date.now();
+    if (!force && now - lastCodexQuotaFetchRef.current < 1500) {
+      return;
+    }
+    lastCodexQuotaFetchRef.current = now;
     try {
       const emailParam = currentUser?.email ? `?userEmail=${encodeURIComponent(currentUser.email)}` : '';
       const activeId = sessId || currentSessionId;
@@ -518,8 +541,18 @@ export const App: React.FC = () => {
     } else {
       fetchGeminiQuota(currentSessionId || undefined);
     }
-  }, [selectedModelOption]);
+  }, [selectedModelOption?.id, selectedModelOption?.hostedBy, selectedModelOption?.provider]);
 
+  const handleRefreshQuota = useCallback(() => {
+    fetchGeminiQuota(currentSessionId || undefined, true);
+    fetchCodexQuota(currentSessionId || undefined, true);
+  }, [currentSessionId, currentUser?.email]);
+
+  const handleCliStatusChange = useCallback((newStatus: CliStatus) => {
+    setCliStatus(newStatus);
+    fetchGeminiQuota(currentSessionId || undefined);
+    fetchCodexQuota(currentSessionId || undefined);
+  }, [currentSessionId]);
 
   const fetchQuota = async () => {
     try {
@@ -653,21 +686,32 @@ export const App: React.FC = () => {
 
   // Comprehensive user and session cleanup routine
   const performUserCleanup = useCallback(() => {
-    // 1. Invalidate authentication tokens
+    const prevUserId = currentUserRef.current?.id;
+    closeGeminiCliLoginPopup();
+    // 1. Invalidate authentication tokens & caches
     localStorage.removeItem('auth_token');
+    sessionSyncService.clearLocalCache(prevUserId);
     setCurrentUser(null);
 
     // 2. Clear current session and message view
     localStorage.removeItem('harness_current_session_id');
     setCurrentSessionId(null);
     setMessages([]);
+    setHasMoreEarlierMessages(false);
+    setRemainingMessageCount(0);
+    setIsLoadingEarlierMessages(false);
 
     // 3. Clear local session list so previous user's chats don't linger
     localStorage.removeItem('harness_chat_sessions');
     setSessions([]);
+    setIsSyncingSessions(false);
 
-    // 4. Reset quotas, metrics, and cloud sandboxes
+    // 4. Reset sandbox selection & usage
+    setSelectedSandboxId(null);
+    localStorage.removeItem('harness_selected_sandbox_id');
     setSandboxUsage(null);
+
+    // 5. Reset quotas, metrics, and cloud limits
     setGeminiQuota(null);
     setCodexQuota(null);
     setRateLimit({
@@ -675,13 +719,44 @@ export const App: React.FC = () => {
       remaining: 1000,
       resetInSeconds: 0,
     });
+
+    // 6. Reset CLI link state for signed out session
+    setCliStatus({
+      antigravity: { linked: false },
+      gemini: { linked: false },
+      claude: { linked: false },
+      codex: { linked: false },
+    });
   }, []);
+
+  // Immediate full reset whenever user logs out or is unauthenticated
+  useEffect(() => {
+    if (!currentUser) {
+      setSessions([]);
+      setMessages([]);
+      setCurrentSessionId(null);
+      setSelectedSandboxId(null);
+      setHasMoreEarlierMessages(false);
+      setRemainingMessageCount(0);
+      setIsLoadingEarlierMessages(false);
+      localStorage.removeItem('harness_current_session_id');
+      localStorage.removeItem('harness_chat_sessions');
+      localStorage.removeItem('harness_selected_sandbox_id');
+      sessionSyncService.clearLocalCache();
+      setCliStatus({
+        antigravity: { linked: false },
+        gemini: { linked: false },
+        claude: { linked: false },
+        codex: { linked: false },
+      });
+    }
+  }, [currentUser]);
 
   // Sync user profile on load using verified session token and auto-refresh weekly
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
     if (!token) {
-      setCurrentUser(null);
+      performUserCleanup();
       return;
     }
 
@@ -694,7 +769,9 @@ export const App: React.FC = () => {
         if (data.success && data.data) {
           const user = data.data;
           setCurrentUser(user);
-          await firestoreService.syncUserProfile(user);
+          firestoreService.syncUserProfile(user).catch((fErr) => {
+            console.warn('Firestore user profile sync warning', fErr);
+          });
           // Auto-refresh token if within refresh window (weekly refresh requirement)
           refreshAuthToken().then((refreshed) => {
             if (refreshed?.token) {
@@ -713,38 +790,137 @@ export const App: React.FC = () => {
   }, [performUserCleanup]);
 
   // Sync and merge chat sessions across Cloud Backend, Firestore, and LocalStorage
-  useEffect(() => {
-    if (!currentUser) return;
-    sessionSyncService.loadAndReconcileSessions(currentUser.id).then((merged) => {
+  const syncSessions = useCallback(async () => {
+    if (!currentUser?.id) {
+      setIsSyncingSessions(false);
+      return null;
+    }
+    // Instant hydration from local cache if available
+    const cached = sessionSyncService.getLocalSessions(currentUser.id);
+    if (cached.length > 0) {
+      setSessions(cached);
+    }
+    setIsSyncingSessions(true);
+    try {
+      const merged = await sessionSyncService.loadAndReconcileSessions(
+        currentUser.id,
+        (interim) => {
+          if (currentUserRef.current?.id === currentUser.id) {
+            setSessions(interim);
+          }
+        }
+      );
+      // Guard: if user logged out while request was in-flight, discard!
+      if (!currentUserRef.current?.id || currentUserRef.current.id !== currentUser.id) {
+        return null;
+      }
       setSessions(merged);
+      return merged;
+    } catch (err) {
+      console.error('Session reconciliation failed', err);
+      return null;
+    } finally {
+      setIsSyncingSessions(false);
+    }
+  }, [currentUser?.id]);
 
+  useEffect(() => {
+    if (!currentUser?.id) {
+      setIsSyncingSessions(false);
+      setSessions([]);
+      setMessages([]);
+      setCurrentSessionId(null);
+      setHasMoreEarlierMessages(false);
+      setRemainingMessageCount(0);
+      return;
+    }
+
+    // 0ms instant hydration: immediately display local sessions before network calls, scoped to user
+    const cached = sessionSyncService.getLocalSessions(currentUser.id);
+    if (cached.length > 0) {
+      setSessions(cached);
       try {
-        const activeId = localStorage.getItem('harness_current_session_id');
-        if (activeId) {
-          const matched = merged.find((s) => s.id === activeId);
-          if (matched && matched.messages) {
-            setMessages(matched.messages);
-            if (matched.model && matched.model !== 'none') {
-              setSelectedModel(matched.model);
+        const activeId = localStorage.getItem(`harness_current_session_id_${currentUser.id}`);
+        const matched = activeId ? cached.find((s) => s.id === activeId) : cached[0];
+        if (matched) {
+          if (!activeId) setCurrentSessionId(matched.id);
+          const localSlice = (matched.messages || []).slice(-25);
+          if (localSlice.length > 0) setMessages(localSlice);
+          const totalMsgs = matched.messageCount ?? matched.messages?.length ?? 0;
+          if (totalMsgs > localSlice.length) {
+            setHasMoreEarlierMessages(true);
+            setRemainingMessageCount(totalMsgs - localSlice.length);
+          } else {
+            setHasMoreEarlierMessages(false);
+            setRemainingMessageCount(0);
+          }
+          if (matched.model && matched.model !== 'none') setSelectedModel(matched.model);
+        }
+      } catch {}
+    } else {
+      // User has no cached sessions: ensure previous user's messages & active session are cleared!
+      setSessions([]);
+      setMessages([]);
+      setCurrentSessionId(null);
+      setHasMoreEarlierMessages(false);
+      setRemainingMessageCount(0);
+    }
+
+    syncSessions().then((merged) => {
+      // Guard: if user logged out or changed in the meantime, discard!
+      if (!currentUserRef.current?.id || currentUserRef.current.id !== currentUser.id) return;
+      if (!merged || merged.length === 0) {
+        setSessions([]);
+        setMessages([]);
+        setCurrentSessionId(null);
+        setHasMoreEarlierMessages(false);
+        setRemainingMessageCount(0);
+        return;
+      }
+      try {
+        const activeId = localStorage.getItem(`harness_current_session_id_${currentUser.id}`);
+        const target = activeId ? merged.find((s) => s.id === activeId) : merged[0];
+        if (target) {
+          if (!activeId) setCurrentSessionId(target.id);
+          if (target.model && target.model !== 'none') {
+            setSelectedModel(target.model);
+          }
+          sessionSyncService.getSession(target.id, { limit: 25 }).then((data) => {
+            if (data && currentUserRef.current?.id === currentUser.id) {
+              setMessages(data.messages || []);
+              if (data.pagination) {
+                setHasMoreEarlierMessages(data.pagination.hasMore);
+                setRemainingMessageCount(data.pagination.remaining);
+              } else {
+                setHasMoreEarlierMessages(false);
+                setRemainingMessageCount(0);
+              }
             }
-          }
-        } else if (merged.length > 0 && merged[0]) {
-          // If no active session, restore the most recent conversation from the cloud
-          setCurrentSessionId(merged[0].id);
-          setMessages(merged[0].messages || []);
-          if (merged[0].model && merged[0].model !== 'none') {
-            setSelectedModel(merged[0].model);
-          }
+          }).catch(() => {});
         }
       } catch {}
     });
-  }, [currentUser?.id]);
+  }, [currentUser?.id, syncSessions]);
 
   const handleSelectSession = (sessionId: string) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (session) {
       setCurrentSessionId(session.id);
-      setMessages(session.messages);
+
+      // Instant local preview
+      const localSlice = session.messages && session.messages.length > 0
+        ? session.messages.slice(-25)
+        : [];
+      setMessages(localSlice);
+      const totalMsgs = session.messageCount ?? session.messages?.length ?? 0;
+      if (totalMsgs > localSlice.length) {
+        setHasMoreEarlierMessages(true);
+        setRemainingMessageCount(totalMsgs - localSlice.length);
+      } else {
+        setHasMoreEarlierMessages(false);
+        setRemainingMessageCount(0);
+      }
+
       let sessionModel = session.model;
       if (sessionModel && sessionModel !== 'none') {
         const isAvailable = availableModels.some(
@@ -761,6 +937,49 @@ export const App: React.FC = () => {
         }
       }
       setSelectedModel(sessionModel || 'none');
+
+      // Fetch fresh 25-message chunk and pagination state from backend
+      sessionSyncService.getSession(session.id, { limit: 25 }).then((data) => {
+        if (data && data.id === session.id) {
+          setMessages(data.messages || []);
+          if (data.pagination) {
+            setHasMoreEarlierMessages(data.pagination.hasMore);
+            setRemainingMessageCount(data.pagination.remaining);
+          } else {
+            setHasMoreEarlierMessages(false);
+            setRemainingMessageCount(0);
+          }
+        }
+      }).catch(() => {});
+    }
+  };
+
+  const handleLoadEarlierMessages = async () => {
+    if (!currentSessionId || isLoadingEarlierMessages || messages.length === 0) return;
+    const oldestMessageId = messages[0]?.id;
+    if (!oldestMessageId) return;
+
+    setIsLoadingEarlierMessages(true);
+    try {
+      const resp = await sessionSyncService.loadEarlierMessages(currentSessionId, oldestMessageId, 25);
+      if (resp && Array.isArray(resp.messages) && resp.messages.length > 0) {
+        setMessages((prev) => [...resp.messages, ...prev]);
+        if (resp.pagination) {
+          setHasMoreEarlierMessages(resp.pagination.hasMore);
+          setRemainingMessageCount(resp.pagination.remaining);
+        } else {
+          setHasMoreEarlierMessages(false);
+          setRemainingMessageCount(0);
+        }
+      } else {
+        setHasMoreEarlierMessages(false);
+        setRemainingMessageCount(0);
+      }
+    } catch (err) {
+      console.warn('[App] Failed to load earlier messages:', err);
+      showToast('Could not load earlier messages');
+    } finally {
+      setIsLoadingEarlierMessages(false);
     }
   };
 
@@ -772,6 +991,8 @@ export const App: React.FC = () => {
     if (currentSessionId === sessionId) {
       setCurrentSessionId(null);
       setMessages([]);
+      setHasMoreEarlierMessages(false);
+      setRemainingMessageCount(0);
     }
 
     // Release/detach associated cloud sandbox and refresh usage immediately
@@ -796,6 +1017,8 @@ export const App: React.FC = () => {
   const handleNewSession = () => {
     setCurrentSessionId(null);
     setMessages([]);
+    setHasMoreEarlierMessages(false);
+    setRemainingMessageCount(0);
     showToast('New session initialized');
   };
 
@@ -806,6 +1029,14 @@ export const App: React.FC = () => {
     avatarUrl?: string
   ) => {
     try {
+      // Clear previous user's messages, active session, and sandbox selection immediately
+      setMessages([]);
+      setCurrentSessionId(null);
+      setSessions([]);
+      setSelectedSandboxId(null);
+      setHasMoreEarlierMessages(false);
+      setRemainingMessageCount(0);
+
       // If token is already a backend signed JWT (e.g. from CLI login)
       if (idToken.startsWith('eyJ')) {
         localStorage.setItem('auth_token', idToken);
@@ -813,14 +1044,30 @@ export const App: React.FC = () => {
         const meData = await meRes.json();
         if (meData.success && meData.data) {
           const user = meData.data;
+          currentUserRef.current = user;
           setCurrentUser(user);
-          setIsAuthModalOpen(false);
-          try {
-            await firestoreService.syncUserProfile(user);
-          } catch (fErr) {
+          firestoreService.syncUserProfile(user).catch((fErr) => {
             console.warn('Firestore user profile sync warning', fErr);
+          });
+
+          const freshStatus = await fetchCliStatus().catch(() => null);
+          if (freshStatus) {
+            setCliStatus(freshStatus);
           }
-          showToast(`Welcome, ${user.name}!`);
+          const hasAnyCli = Boolean(
+            freshStatus?.antigravity?.linked ||
+            freshStatus?.gemini?.linked ||
+            freshStatus?.claude?.linked ||
+            freshStatus?.codex?.linked
+          );
+
+          if (!hasAnyCli) {
+            setIsAuthModalOpen(true);
+            showToast(`Signed in as ${user.name}. Please link an AI CLI to execute models.`);
+          } else {
+            setIsAuthModalOpen(false);
+            showToast(`Welcome, ${user.name}!`);
+          }
           return;
         }
       }
@@ -835,14 +1082,30 @@ export const App: React.FC = () => {
       if (data.success && data.data?.token) {
         localStorage.setItem('auth_token', data.data.token);
         const user = data.data.user;
+        currentUserRef.current = user;
         setCurrentUser(user);
-        setIsAuthModalOpen(false);
-        try {
-          await firestoreService.syncUserProfile(user);
-        } catch (fErr) {
+        firestoreService.syncUserProfile(user).catch((fErr) => {
           console.warn('Firestore user profile sync warning', fErr);
+        });
+
+        const freshStatus = await fetchCliStatus().catch(() => null);
+        if (freshStatus) {
+          setCliStatus(freshStatus);
         }
-        showToast(`Welcome back, ${user.name}!`);
+        const hasAnyCli = Boolean(
+          freshStatus?.antigravity?.linked ||
+          freshStatus?.gemini?.linked ||
+          freshStatus?.claude?.linked ||
+          freshStatus?.codex?.linked
+        );
+
+        if (!hasAnyCli) {
+          setIsAuthModalOpen(true);
+          showToast(`Signed in as ${user.name}. Please link an AI CLI to execute models.`);
+        } else {
+          setIsAuthModalOpen(false);
+          showToast(`Welcome back, ${user.name}!`);
+        }
       } else {
         const errorMsg = data.error?.message || 'Authentication failed';
         showToast(errorMsg);
@@ -878,7 +1141,7 @@ export const App: React.FC = () => {
         const user = data.data;
         setCurrentUser(user);
         setIsAuthModalOpen(false);
-        await firestoreService.syncUserProfile(user);
+        firestoreService.syncUserProfile(user).catch(() => {});
         showToast(
           `Linked ${
             platform === 'claude_subscription' ? 'Claude Pro / Team' : 'ChatGPT Plus / Codex'
@@ -913,7 +1176,7 @@ export const App: React.FC = () => {
         const user = data.data;
         setCurrentUser(user);
         setIsAuthModalOpen(false);
-        await firestoreService.syncUserProfile(user);
+        firestoreService.syncUserProfile(user).catch(() => {});
         showToast(`Saved ${platform.toUpperCase()} API Key to secure sandbox`);
       } else {
         showToast(data.error?.message || 'Failed to save API key');
@@ -932,6 +1195,10 @@ export const App: React.FC = () => {
     }
     signOutFirebase();
     performUserCleanup();
+    setSessions([]);
+    setMessages([]);
+    setCurrentSessionId(null);
+    setSelectedSandboxId(null);
     showToast('Signed out successfully');
   };
 
@@ -981,6 +1248,18 @@ export const App: React.FC = () => {
   ) => {
     if (!currentUser) {
       setIsAuthModalOpen(true);
+      return;
+    }
+
+    if (!isAnyCliLinked) {
+      setIsAuthModalOpen(true);
+      showToast('Please link an AI CLI (Antigravity, Claude, or Codex) before sending a message.');
+      return;
+    }
+
+    if (!isModelLinked) {
+      setIsAuthModalOpen(true);
+      showToast(`Please link the required CLI for ${selectedModelOption?.name || 'this model'} before sending a message.`);
       return;
     }
 
@@ -1068,7 +1347,6 @@ export const App: React.FC = () => {
           };
           updated = [targetSession, ...prev];
         }
-        localStorage.setItem('harness_chat_sessions', JSON.stringify(updated));
         sessionSyncService.saveSession(targetSession, currentUser?.id).catch(() => {});
         return updated;
       });
@@ -1088,15 +1366,9 @@ export const App: React.FC = () => {
       content: '',
       steps: [
         {
-          id: 'step_dispatch',
-          text: `Dispatched prompt to ${modelDisplayName} live cloud endpoint`,
-          duration: 'Live',
-          completed: false,
-        },
-        {
-          id: 'step_stream',
-          text: `Streamed response tokens and parsed 0 code artifact(s)`,
-          duration: 'Pending',
+          id: 'step_init',
+          text: 'Connecting to cloud sandbox microVM & initializing agent...',
+          duration: '...',
           completed: false,
         },
       ],
@@ -1435,7 +1707,6 @@ export const App: React.FC = () => {
             if (idx >= 0) {
               const u = [...sPrev];
               u[idx] = { ...u[idx], messages: updated, updatedAt: new Date().toISOString() };
-              localStorage.setItem('harness_chat_sessions', JSON.stringify(u));
               sessionSyncService.saveSession(u[idx], currentUser?.id).catch(() => {});
               return u;
             }
@@ -1481,11 +1752,16 @@ export const App: React.FC = () => {
       {/* AI Platform Auth & Linking Modal */}
       <AuthModal
         isOpen={isAuthModalOpen}
-        onClose={() => setIsAuthModalOpen(false)}
+        onClose={() => {
+          setIsAuthModalOpen(false);
+          refreshCliStatus();
+        }}
         currentUser={currentUser}
         onGoogleLogin={handleGoogleLogin}
         onLinkSubscription={handleLinkSubscription}
         onConnectApiKey={handleConnectApiKey}
+        initialCliStatus={cliStatus}
+        onCliStatusChange={handleCliStatusChange}
       />
 
       {/* Left Sidebar (Mobile Drawer & Desktop Sidebar) */}
@@ -1497,6 +1773,8 @@ export const App: React.FC = () => {
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
         onNewSession={handleNewSession}
+        isSyncing={isSyncingSessions}
+        onRefreshSessions={syncSessions}
       />
 
       {/* Center Layout Container with Mobile Responsive Paddings */}
@@ -1518,6 +1796,7 @@ export const App: React.FC = () => {
           sandboxUsage={sandboxUsage}
           activeSandbox={activeSandbox}
           onRefreshSandboxUsage={fetchSandboxUsage}
+          onRefreshQuota={handleRefreshQuota}
           currentPath={
             currentSessionId
               ? `chats / ${sessions.find((s) => s.id === currentSessionId)?.title || 'session'}`
@@ -1530,7 +1809,7 @@ export const App: React.FC = () => {
           isDarkMode={isDarkMode}
           onToggleTheme={handleToggleTheme}
           currentSessionId={currentSessionId}
-          validSessionIds={sessions.map((s) => s.id)}
+          validSessionIds={validSessionIds}
           onSandboxChanged={(newSandboxId) => {
             setSelectedSandboxId(newSandboxId || null);
             fetchSandboxUsage();
@@ -1543,7 +1822,6 @@ export const App: React.FC = () => {
           <div className="flex flex-col w-full flex-1 min-h-0">
             {/* Sub-Header Operations Ribbon */}
             <Ribbon
-              onResetSession={handleNewSession}
               onShareSession={handleShareSession}
               onExportLogs={handleExportLogs}
             />
@@ -1557,6 +1835,13 @@ export const App: React.FC = () => {
                   </span>
                 </div>
 
+                {isSyncingSessions && (
+                  <div className="mb-3 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/25 text-primary text-xs font-medium animate-pulse">
+                    <span className="material-symbols-outlined text-[14px] animate-spin">sync</span>
+                    <span>Syncing cloud conversations & workspace...</span>
+                  </div>
+                )}
+
                 <h1 className="font-headline-lg text-headline-lg text-on-surface font-semibold tracking-tight text-xl sm:text-3xl mb-2 sm:mb-3">
                   {currentUser ? `Welcome back, ${currentUser.name}` : 'What do you want to build or run?'}
                 </h1>
@@ -1566,19 +1851,8 @@ export const App: React.FC = () => {
                 </p>
 
                 {/* Sandbox Status & Action in Hero */}
-                {!currentUser ? (
-                  <div className="mt-6 flex items-center gap-2.5 px-4 py-2 rounded-xl bg-surface-container-high border border-outline-variant/30 text-xs text-on-surface-variant animate-in fade-in duration-200">
-                    <span className="w-2 h-2 rounded-full bg-slate-400"></span>
-                    <span>Sign in with Google to access and launch your personal cloud sandboxes</span>
-                    <button
-                      type="button"
-                      onClick={() => setIsAuthModalOpen(true)}
-                      className="ml-2 text-primary hover:underline font-semibold cursor-pointer"
-                    >
-                      Sign In →
-                    </button>
-                  </div>
-                ) : activeSandbox ? (
+                {currentUser && (
+                  activeSandbox ? (
                   <div className="mt-6 flex items-center gap-2.5 px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium animate-in fade-in duration-200">
                     <span className="relative flex h-2 w-2">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -1594,63 +1868,81 @@ export const App: React.FC = () => {
                       Open Inspector →
                     </button>
                   </div>
-                ) : sandboxUsage && sandboxUsage.used >= sandboxUsage.max ? (
-                  /* When all slots are full, do NOT render the "Start Sandbox VM" button */
+                ) : currentUser && sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0 ? (
+                  /* At least one cloud VM is already initialized in the user's account */
                   <div className="mt-6 flex flex-col items-center gap-3 animate-in fade-in duration-200 max-w-xl">
-                    <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-surface-container-high border border-outline-variant/40 text-xs font-mono text-on-surface">
-                      <span className="w-2 h-2 rounded-full bg-amber-400"></span>
-                      <span>Sandbox Standby • Quota Full ({sandboxUsage.used}/{sandboxUsage.max} Running)</span>
-                    </div>
-
-                    <p className="text-xs text-outline font-mono text-center max-w-md">
-                      All cloud microVM slots are active. Select a sandbox to connect, or delete an idle sandbox to boot a new one:
+                    <p className="text-xs text-outline font-medium text-center">
+                      Cloud microVM ready. Attach this session to an active workspace:
                     </p>
 
-                    {sandboxUsage.sandboxes && sandboxUsage.sandboxes.length > 0 && (
-                      <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
-                        {sandboxUsage.sandboxes.map((sb) => {
-                          const validSet = new Set(sessions.map((s) => s.id));
-                          const attachedCount = sb.attachedSessionIds?.filter((id) => validSet.has(id)).length || 0;
-                          const isAttaching = isAttachingSandbox === sb.sandboxId;
-                          return (
-                            <button
-                              key={sb.sandboxId}
-                              type="button"
-                              onClick={() => handleAttachExistingSandbox(sb.sandboxId)}
-                              disabled={isAttaching}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-surface-container-high hover:bg-surface-container-highest border border-outline-variant/30 hover:border-primary/50 text-on-surface text-xs font-semibold shadow-xs transition-all cursor-pointer active:scale-95 disabled:opacity-50 group"
-                              title={`Connect to ${sb.name} (${sb.sandboxId})`}
-                            >
-                              {isAttaching ? (
-                                <span className="material-symbols-outlined text-[14px] animate-spin text-primary">progress_activity</span>
-                              ) : (
-                                <span className="w-2 h-2 rounded-full bg-emerald-400 group-hover:scale-125 transition-transform" />
-                              )}
-                              <span>{sb.name}</span>
-                              <span className="text-[10px] text-outline font-mono font-normal">
-                                ({attachedCount} {attachedCount === 1 ? 'chat' : 'chats'})
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      {sandboxUsage.sandboxes.map((sb) => {
+                        const validSet = new Set(sessions.map((s) => s.id));
+                        const attachedCount = sb.attachedSessionIds?.filter((id) => validSet.has(id)).length || 0;
+                        const isAttaching = isAttachingSandbox === sb.sandboxId;
+                        return (
+                          <button
+                            key={sb.sandboxId}
+                            type="button"
+                            onClick={() => handleAttachExistingSandbox(sb.sandboxId)}
+                            disabled={isAttaching}
+                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-surface-container-high hover:bg-surface-container-highest border border-primary/30 hover:border-primary text-on-surface text-xs font-semibold shadow-xs transition-all cursor-pointer active:scale-95 disabled:opacity-50 group"
+                            title={`Connect this chat to ${sb.name} (${sb.sandboxId})`}
+                          >
+                            {isAttaching ? (
+                              <span className="material-symbols-outlined text-[14px] animate-spin text-primary">progress_activity</span>
+                            ) : (
+                              <span className="relative flex h-2 w-2">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                               </span>
-                              <span className="material-symbols-outlined text-[13px] text-outline group-hover:text-primary transition-colors">
-                                arrow_forward
-                              </span>
-                            </button>
-                          );
-                        })}
+                            )}
+                            <span>Attach to {sb.name}</span>
+                            <span className="text-[10px] text-outline font-mono font-normal">
+                              ({attachedCount} {attachedCount === 1 ? 'chat' : 'chats'})
+                            </span>
+                            <span className="material-symbols-outlined text-[13px] text-primary group-hover:translate-x-0.5 transition-transform">
+                              arrow_forward
+                            </span>
+                          </button>
+                        );
+                      })}
 
+                      {sandboxUsage.used < sandboxUsage.max ? (
+                        <button
+                          type="button"
+                          onClick={handleStartSandboxVM}
+                          disabled={isStartingSandbox}
+                          className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-outline-variant/30 hover:border-outline-variant/60 bg-surface-container hover:bg-surface-container-high text-xs font-medium text-on-surface-variant hover:text-on-surface transition-all cursor-pointer active:scale-95 disabled:opacity-50"
+                          title="Start another isolated cloud sandbox microVM"
+                        >
+                          {isStartingSandbox ? (
+                            <>
+                              <span className="material-symbols-outlined text-[14px] animate-spin text-primary">progress_activity</span>
+                              <span>Booting...</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="material-symbols-outlined text-[15px] text-primary">add_circle</span>
+                              <span>+ New Sandbox</span>
+                            </>
+                          )}
+                        </button>
+                      ) : (
                         <button
                           type="button"
                           onClick={() => document.getElementById('cloud-sandboxes-menu-button')?.click()}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-outline-variant/30 hover:border-outline-variant/60 bg-surface-container hover:bg-surface-container-high text-xs font-medium text-outline hover:text-on-surface transition-all cursor-pointer"
+                          className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-outline-variant/30 hover:border-outline-variant/60 bg-surface-container hover:bg-surface-container-high text-xs font-medium text-outline hover:text-on-surface transition-all cursor-pointer"
                           title="Open Cloud Sandboxes menu to manage or delete sandboxes"
                         >
                           <span className="material-symbols-outlined text-[15px]">delete_sweep</span>
                           <span>Free a Slot</span>
                         </button>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                 ) : (
-                  /* Slots available (< max): Render Start Sandbox VM button */
+                  /* No sandboxes initialized yet: Render Start Sandbox VM button without subtitle */
                   <div className="mt-6 flex flex-col items-center gap-3 animate-in fade-in duration-200">
                     <button
                       type="button"
@@ -1670,15 +1962,46 @@ export const App: React.FC = () => {
                         </>
                       )}
                     </button>
-                    <div className="flex items-center gap-2 text-xs text-outline font-mono">
-                      <span className="w-2 h-2 rounded-full bg-slate-400"></span>
-                      <span>Sandbox Standby • {sandboxUsage ? `${sandboxUsage.used}/${sandboxUsage.max}` : '0/3'} Slots Used • Click to boot microVM</span>
-                    </div>
                   </div>
+                  )
                 )}
               </div>
             ) : (
               <div className="flex-1 w-full max-w-5xl mx-auto px-3 sm:px-margin-desktop py-space-md sm:py-space-xl flex flex-col gap-space-lg sm:gap-space-xl">
+                {hasMoreEarlierMessages && (
+                  <div className="w-full flex justify-center py-1 animate-in fade-in duration-200">
+                    <button
+                      type="button"
+                      onClick={handleLoadEarlierMessages}
+                      disabled={isLoadingEarlierMessages}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-surface-container-high/90 hover:bg-surface-container-highest border border-outline-variant/40 hover:border-primary/50 text-on-surface-variant hover:text-on-surface text-xs font-medium shadow-sm hover:shadow transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed group active:scale-98"
+                      title="Load older messages from this conversation"
+                    >
+                      {isLoadingEarlierMessages ? (
+                        <>
+                          <span className="material-symbols-outlined text-[16px] text-primary animate-spin">
+                            progress_activity
+                          </span>
+                          <span>Fetching earlier messages...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="material-symbols-outlined text-[16px] text-primary transition-transform group-hover:-translate-y-0.5">
+                            arrow_upward
+                          </span>
+                          <span>
+                            Load earlier messages
+                            {remainingMessageCount > 0 ? (
+                              <span className="ml-1.5 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-mono font-semibold border border-primary/20">
+                                {remainingMessageCount} remaining
+                              </span>
+                            ) : null}
+                          </span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
                 {messages.map((msg) => {
                   if (msg.role === 'user') {
                     if (editingMessageId === msg.id) {
@@ -1811,11 +2134,8 @@ export const App: React.FC = () => {
                       {/* Assistant Meta Header */}
                       <div className="flex flex-wrap items-center justify-between gap-space-xs">
                         <div className="flex items-center gap-space-sm">
-                          <span className="font-headline-sm text-headline-sm text-on-surface font-semibold text-sm sm:text-base">
-                            {msg.author}
-                          </span>
-                          {msg.modelBadge && (
-                            <span className="inline-flex items-center gap-1.5 px-space-xs py-0.5 rounded bg-primary/10 text-primary font-code-sm text-code-sm border border-primary/20 text-xs">
+                          {msg.modelBadge ? (
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-primary/10 text-primary font-medium border border-primary/20 text-xs sm:text-sm">
                               {msg.modelBadge.toLowerCase().includes('none') ? (
                                 <span className="material-symbols-outlined text-[14px] text-outline">tune</span>
                               ) : msg.modelBadge.toLowerCase().includes('claude') ? (
@@ -1828,6 +2148,10 @@ export const App: React.FC = () => {
                                 <img src="/provider-icons/antigravity.svg" alt="" className="w-3.5 h-3.5 object-contain" />
                               )}
                               {msg.modelBadge}
+                            </span>
+                          ) : (
+                            <span className="font-headline-sm text-headline-sm text-on-surface font-semibold text-sm sm:text-base">
+                              {msg.author || 'Atelier Assistant'}
                             </span>
                           )}
                         </div>
@@ -1914,6 +2238,7 @@ export const App: React.FC = () => {
                   codexQuota={codexQuota}
                   availableModels={availableModels}
                   activeSandbox={activeSandbox}
+                  onOpenAuthModal={() => setIsAuthModalOpen(true)}
                 />
               </div>
             </div>

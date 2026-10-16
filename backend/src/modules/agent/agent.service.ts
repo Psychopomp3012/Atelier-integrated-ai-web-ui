@@ -15,7 +15,7 @@ import { generateId } from '../../utils/id.util.js';
 import { logger } from '../../utils/logger.util.js';
 import { authService } from '../auth/auth.service.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
-import { geminiQuotaService } from '../quota/gemini-quota.service.js';
+import { antigravityQuotaService } from '../quota/antigravity-quota.service.js';
 import { codexQuotaService } from '../quota/codex-quota.service.js';
 import type { CliUsageTelemetry } from '../quota/quota.types.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
@@ -1140,14 +1140,21 @@ export class AgentService {
       // Ensure all live steps are marked completed when response successfully finalized
       const accumulatedSteps: AgentStep[] =
         liveStepsMap.size > 0
-          ? Array.from(liveStepsMap.values()).map((s) => ({
-              ...s,
-              status: 'completed',
-              durationMs: s.durationMs || 120,
-            }))
+          ? Array.from(liveStepsMap.values()).map((s) => {
+              let desc = s.description;
+              if (s.status === 'in_progress' && desc.includes('evaluating tool execution results')) {
+                desc = 'Formulated final response & verified solution';
+              }
+              return {
+                ...s,
+                description: desc,
+                status: s.status === 'failed' ? 'failed' : 'completed',
+                durationMs: s.durationMs || 120,
+              };
+            })
           : [
               {
-                id: 'step_dispatch',
+                id: 'step_init',
                 description: `Dispatched prompt to ${modelTitle} live cloud endpoint`,
                 durationMs: Math.round(liveResult.durationMs * 0.4),
                 status: 'completed',
@@ -1201,7 +1208,7 @@ export class AgentService {
         if (isCodex) {
           await codexQuotaService.recordTurn(turnData);
         } else {
-          await geminiQuotaService.recordTurn(turnData);
+          await antigravityQuotaService.recordTurn(turnData);
         }
       }
 
@@ -1320,103 +1327,81 @@ export class AgentService {
 
     onEvent({ type: 'start', sessionId, model: modelUsed });
 
-    const step1Id = 'step_dispatch';
-    const step2Id = 'step_stream';
-
-    const step1: AgentStep = {
-      id: step1Id,
-      description: `Dispatched prompt to ${modelTitle} live cloud endpoint`,
+    const initStepId = 'step_init';
+    const initStep: AgentStep = {
+      id: initStepId,
+      description: `Connecting to cloud sandbox microVM & initializing agent...`,
       durationMs: 0,
       status: 'in_progress',
     };
-    const step2: AgentStep = {
-      id: step2Id,
-      description: `Streamed response tokens and parsed 0 code artifact(s)`,
-      durationMs: 0,
-      status: 'pending',
-    };
 
-    onEvent({ type: 'step', step: step1 });
-    onEvent({ type: 'step', step: step2 });
+    onEvent({ type: 'step', step: initStep });
 
-    let step1Finished = false;
-    const markStep1Completed = () => {
-      if (step1Finished) return;
-      step1Finished = true;
+    let hasLiveSteps = false;
+    let initStepFinished = false;
+
+    const markInitStepCompleted = (customDesc?: string) => {
+      if (initStepFinished) return;
+      initStepFinished = true;
       const dispatchDuration = Math.max(16, Date.now() - startTime);
       onEvent({
         type: 'step',
         step: {
-          ...step1,
+          ...initStep,
+          description: customDesc || `Connected to cloud sandbox microVM & initialized agent`,
           durationMs: dispatchDuration,
           status: 'completed',
         },
       });
-      onEvent({
-        type: 'step',
-        step: {
-          ...step2,
-          durationMs: 0,
-          status: 'in_progress',
-        },
-      });
     };
 
-    // Auto-transition step 1 to completed after 1.2s dispatch phase if first token has not arrived yet
-    const dispatchTimer = setTimeout(() => {
-      markStep1Completed();
-    }, 1200);
-
     const onToken = (tokenChunk: string) => {
-      clearTimeout(dispatchTimer);
-      markStep1Completed();
+      if (!hasLiveSteps) {
+        markInitStepCompleted();
+      }
       onEvent({ type: 'token', token: tokenChunk });
     };
 
     const onStreamStep = (step: AgentStep) => {
-      markStep1Completed();
+      hasLiveSteps = true;
+      if (step.id === initStepId) {
+        initStepFinished = true;
+      } else if (!initStepFinished) {
+        markInitStepCompleted();
+      }
       onEvent({ type: 'step', step });
     };
 
     const response = await this.executePrompt(input, token, onToken, onStreamStep);
-    clearTimeout(dispatchTimer);
-    markStep1Completed();
+    markInitStepCompleted();
 
     const totalDuration = response.message.latencyMs || Date.now() - startTime;
     const dispatchDuration = Math.min(Math.round(totalDuration * 0.4), 2200);
     const streamDuration = Math.max(20, totalDuration - dispatchDuration);
     const artifactCount = response.message.codeFiles?.length || 0;
 
-    const finalStep1: AgentStep = {
-      id: step1Id,
-      description: `Dispatched prompt to ${modelTitle} live cloud endpoint`,
-      durationMs: dispatchDuration,
-      status: 'completed',
-    };
-
-    const finalStep2: AgentStep = {
-      id: step2Id,
-      description: `Streamed response tokens and parsed ${artifactCount} code artifact(s)`,
-      durationMs: streamDuration,
-      status: 'completed',
-    };
-
-    onEvent({
-      type: 'step',
-      step: finalStep1,
-    });
-
-    onEvent({
-      type: 'step',
-      step: finalStep2,
-    });
-
-    if (!response.message.steps || response.message.steps.length === 0) {
-      response.message.steps = [finalStep1, finalStep2];
-    } else {
+    // If real live steps were generated by the CLI / sandbox, emit and keep ONLY the real live steps
+    if (response.message.steps && response.message.steps.length > 0) {
       for (const st of response.message.steps) {
         onEvent({ type: 'step', step: st });
       }
+    } else {
+      // Pure fallback when no live steps were streamed
+      const finalStep1: AgentStep = {
+        id: initStepId,
+        description: `Dispatched prompt to ${modelTitle} live cloud endpoint`,
+        durationMs: dispatchDuration,
+        status: 'completed',
+      };
+      const finalStep2: AgentStep = {
+        id: 'step_stream',
+        description: `Streamed response tokens and parsed ${artifactCount} code artifact(s)`,
+        durationMs: streamDuration,
+        status: 'completed',
+      };
+      response.message.steps = [finalStep1, finalStep2];
+      onEvent({ type: 'step', step: finalStep1 });
+      onEvent({ type: 'step', step: finalStep2 });
     }
 
     onEvent({ type: 'done', response });

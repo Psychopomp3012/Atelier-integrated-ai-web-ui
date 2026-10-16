@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { UserMenu } from './UserMenu';
+import { DeleteSandboxModal, type SandboxPendingDelete } from './DeleteSandboxModal';
 import type { UserProfile, TokenUsageState, ModelOption, ModelType } from '../types';
 import { formatTokenMetric } from '../utils/token.util';
 import { apiFetch } from '../utils/api.util';
@@ -41,6 +43,7 @@ interface HeaderProps {
   validSessionIds?: string[];
   activeSandbox?: { sandboxId: string; name: string } | null;
   onRefreshSandboxUsage?: () => void;
+  onRefreshQuota?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -64,6 +67,7 @@ export const Header: React.FC<HeaderProps> = ({
   sandboxUsage: propSandboxUsage,
   activeSandbox: propActiveSandbox,
   onRefreshSandboxUsage,
+  onRefreshQuota,
   validSessionIds,
 }) => {
   const [showLimitsPopover, setShowLimitsPopover] = useState(false);
@@ -75,18 +79,23 @@ export const Header: React.FC<HeaderProps> = ({
   const [isCreatingSandbox, setIsCreatingSandbox] = useState(false);
   const [switchingSandboxId, setSwitchingSandboxId] = useState<string | null>(null);
   const [deletingSandboxId, setDeletingSandboxId] = useState<string | null>(null);
+  const [sandboxPendingDelete, setSandboxPendingDelete] = useState<SandboxPendingDelete | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const sandboxRef = useRef<HTMLDivElement>(null);
 
   const validSessionSet = useMemo(() => new Set(validSessionIds || []), [validSessionIds]);
   const sandboxUsage = propSandboxUsage !== undefined ? propSandboxUsage : internalSandboxUsage;
 
   const fetchSandboxUsage = async () => {
+    if (onRefreshSandboxUsage) {
+      onRefreshSandboxUsage();
+      return;
+    }
     try {
       if (!user?.id) {
         setInternalSandboxUsage({ used: 0, max: 3, sandboxes: [] });
         return;
       }
-      onRefreshSandboxUsage?.();
       const activeIds = (validSessionIds || []).join(',');
       const params = new URLSearchParams();
       params.set('userId', user.id);
@@ -100,9 +109,12 @@ export const Header: React.FC<HeaderProps> = ({
     } catch {}
   };
 
+  // Only perform standalone fetch if sandboxUsage prop is not provided by parent App
   useEffect(() => {
-    fetchSandboxUsage();
-  }, [currentSessionId, user, validSessionIds]);
+    if (propSandboxUsage === undefined && user?.id) {
+      fetchSandboxUsage();
+    }
+  }, [user?.id, propSandboxUsage]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -118,6 +130,18 @@ export const Header: React.FC<HeaderProps> = ({
     }
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showLimitsPopover, showSandboxDropdown]);
+
+  const hasFetchedQuotaOnOpenRef = useRef(false);
+  useEffect(() => {
+    if (showLimitsPopover && isModelLinked) {
+      if (!hasFetchedQuotaOnOpenRef.current) {
+        hasFetchedQuotaOnOpenRef.current = true;
+        onRefreshQuota?.();
+      }
+    } else if (!showLimitsPopover) {
+      hasFetchedQuotaOnOpenRef.current = false;
+    }
+  }, [showLimitsPopover, isModelLinked]);
 
   const activeSandbox = useMemo(() => {
     if (propActiveSandbox) return propActiveSandbox;
@@ -199,13 +223,26 @@ export const Header: React.FC<HeaderProps> = ({
     }
   };
 
-  const handleDeleteSandbox = async (targetId: string, targetName: string, attachedCount: number) => {
-    const warning =
-      attachedCount > 1
-        ? `Warning: ${attachedCount} chats are currently attached to ${targetName}. Deleting it will terminate this cloud microVM and erase its workspace for all attached chats. Continue?`
-        : `Are you sure you want to delete ${targetName}? This will permanently terminate the cloud microVM and release 1 sandbox quota slot.`;
-    if (!window.confirm(warning)) return;
+  const handleDeleteSandbox = (
+    targetId: string,
+    targetName: string,
+    attachedCount: number,
+    isCurrentSandbox?: boolean
+  ) => {
+    setSandboxPendingDelete({
+      id: targetId,
+      name: targetName,
+      attachedCount,
+      isCurrent: isCurrentSandbox,
+    });
+    setDeleteError(null);
+  };
+
+  const confirmDeleteSandbox = async () => {
+    if (!sandboxPendingDelete || deletingSandboxId) return;
+    const targetId = sandboxPendingDelete.id;
     setDeletingSandboxId(targetId);
+    setDeleteError(null);
     try {
       const res = await apiFetch(`/api/v1/sandbox?sandboxId=${encodeURIComponent(targetId)}`, {
         method: 'DELETE',
@@ -214,9 +251,13 @@ export const Header: React.FC<HeaderProps> = ({
       if (data.success) {
         await fetchSandboxUsage();
         onSandboxChanged?.('');
+        setSandboxPendingDelete(null);
+      } else {
+        setDeleteError(data.error?.message || 'Failed to delete sandbox VM');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to delete sandbox', err);
+      setDeleteError(err?.message || 'Failed to connect to backend to delete sandbox');
     } finally {
       setDeletingSandboxId(null);
     }
@@ -274,6 +315,7 @@ export const Header: React.FC<HeaderProps> = ({
   const quotaLimits = isCodex
     ? (tokenUsage?.codexQuota?.quotaLimits || tokenUsage?.quotaLimits)
     : (tokenUsage?.geminiQuota?.quotaLimits || tokenUsage?.quotaLimits);
+
 
   // Identify the quota group corresponding to the selected model
   const relevantGroup = useMemo(() => {
@@ -380,20 +422,21 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <header className="fixed top-0 left-0 right-0 lg:left-[260px] xl:right-[360px] h-14 bg-background/90 backdrop-blur-md border-b border-outline-variant/30 px-3 md:px-gutter-desktop flex items-center justify-between z-40 transition-all">
-      <div className="flex items-center gap-2 md:gap-space-md min-w-0">
+      <div className="flex items-center gap-2 md:gap-space-md shrink-0">
         {/* Mobile Hamburger Toggle for Left Sidebar */}
         <button
           onClick={onToggleSidebar}
-          className="lg:hidden p-1.5 rounded-lg text-outline hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer"
+          className="lg:hidden p-1.5 rounded-lg text-outline hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer shrink-0 z-20"
           title="Open Workflows Menu"
+          aria-label="Open sidebar"
         >
           <span className="material-symbols-outlined text-[20px]">menu</span>
         </button>
       </div>
 
-      <div className="flex items-center gap-2 md:gap-space-md shrink-0">
+      <div className="flex items-center gap-1 sm:gap-2 md:gap-space-md min-w-0 shrink">
         {/* Interactive Sandbox Selector & Quota Chip */}
-        <div className="relative" ref={sandboxRef}>
+        <div className="relative shrink-0" ref={sandboxRef}>
           <button
             id="cloud-sandboxes-menu-button"
             type="button"
@@ -401,7 +444,7 @@ export const Header: React.FC<HeaderProps> = ({
               setShowSandboxDropdown(!showSandboxDropdown);
               if (!showSandboxDropdown) fetchSandboxUsage();
             }}
-            className="flex items-center gap-1.5 bg-surface-container-low hover:bg-surface-container px-2 sm:px-2.5 py-1 rounded-lg border border-outline-variant/30 hover:border-outline-variant/60 font-code-sm text-code-sm text-on-surface transition-all cursor-pointer shadow-xs"
+            className="flex items-center gap-1 sm:gap-1.5 bg-surface-container-low hover:bg-surface-container px-1.5 sm:px-2.5 py-1 rounded-lg border border-outline-variant/30 hover:border-outline-variant/60 font-code-sm text-code-sm text-on-surface transition-all cursor-pointer shadow-xs max-w-[150px] xs:max-w-[190px] sm:max-w-none"
             title={
               activeSandbox
                 ? `Cloud Sandbox: ${activeSandbox.name} (Active)`
@@ -423,12 +466,12 @@ export const Header: React.FC<HeaderProps> = ({
             <span className={`material-symbols-outlined text-[15px] shrink-0 ${activeSandbox ? 'text-primary' : 'text-outline'}`}>
               {activeSandbox ? 'deployed_code' : 'cloud_off'}
             </span>
-            <span className={`font-medium text-xs truncate max-w-[80px] sm:max-w-[140px] ${activeSandbox ? 'text-on-surface' : 'text-on-surface-variant'}`}>
-              {activeSandbox ? activeSandbox.name : user ? 'No Sandbox' : 'Sign in for Sandbox'}
+            <span className={`font-medium text-xs truncate max-w-[55px] xs:max-w-[85px] sm:max-w-[140px] ${activeSandbox ? 'text-on-surface' : 'text-on-surface-variant'}`}>
+              {activeSandbox ? activeSandbox.name : user ? 'No Sandbox' : 'Sandbox'}
             </span>
             {user && sandboxUsage && (
               <span
-                className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-medium ${
+                className={`text-[9px] sm:text-[10px] px-1 sm:px-1.5 py-0.2 rounded font-mono font-medium shrink-0 ${
                   activeSandbox
                     ? sandboxUsage.used >= sandboxUsage.max
                       ? 'bg-amber-500/20 text-amber-300'
@@ -439,222 +482,461 @@ export const Header: React.FC<HeaderProps> = ({
                 {sandboxUsage.used}/{sandboxUsage.max}
               </span>
             )}
-            <span className="material-symbols-outlined text-[14px] text-outline">
+            <span className="material-symbols-outlined text-[14px] text-outline shrink-0">
               {showSandboxDropdown ? 'expand_less' : 'expand_more'}
             </span>
           </button>
 
-          {/* Sandbox Environments Popover */}
+          {/* Sandbox Environments - Desktop Popover & Mobile Modal */}
           {showSandboxDropdown && (
-            <div className="absolute left-0 top-full mt-2 w-80 sm:w-96 bg-surface-container-lowest border border-outline-variant/30 rounded-xl shadow-2xl p-3.5 z-50 animate-in fade-in zoom-in-95 duration-150">
-              {/* Header */}
-              <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-outline-variant/20">
-                <div className="flex items-center gap-2">
-                  <span className="material-symbols-outlined text-[18px] text-primary">cloud_queue</span>
-                  <div>
-                    <h3 className="text-xs font-bold text-on-surface tracking-wide">Cloud Sandboxes</h3>
-                    <p className="text-[10px] text-outline">Share workspaces across multiple chat sessions</p>
-                  </div>
-                </div>
-                {sandboxUsage && (
-                  <span
-                    className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${
-                      sandboxUsage.used >= sandboxUsage.max
-                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                    }`}
-                  >
-                    {sandboxUsage.used}/{sandboxUsage.max} {sandboxUsage.used >= sandboxUsage.max ? 'FULL' : 'SLOTS'}
-                  </span>
-                )}
-              </div>
-
-              {/* Explainer Tip */}
-              <div className="bg-surface-container/60 rounded-lg p-2 mb-3 text-[11px] text-on-surface-variant flex items-start gap-1.5 border border-outline-variant/15">
-                <span className="material-symbols-outlined text-[14px] text-primary shrink-0 mt-0.5">info</span>
-                <span>
-                  Multiple chats can attach to the <strong>same sandbox</strong> to collaborate on the same files (/home/user/workspace) without consuming extra quota.
-                </span>
-              </div>
-
-              {/* Sandboxes List or Empty Standby State */}
-              <div className="space-y-2 max-h-56 overflow-y-auto pr-0.5 mb-3 custom-scrollbar">
-                {!user ? (
-                  <div className="p-3.5 bg-surface-container-low rounded-xl border border-outline-variant/25 text-center">
-                    <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2 shadow-xs">
-                      <span className="material-symbols-outlined text-[22px]">lock</span>
+            <>
+              {/* Desktop Popover (hidden sm:block) */}
+              <div className="hidden sm:block absolute left-0 top-full mt-2 w-96 bg-surface-container-lowest border border-outline-variant/30 rounded-xl shadow-2xl p-3.5 z-50 animate-in fade-in zoom-in-95 duration-150">
+                {/* Header */}
+                <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-outline-variant/20">
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[18px] text-primary">cloud_queue</span>
+                    <div>
+                      <h3 className="text-xs font-bold text-on-surface tracking-wide">Cloud Sandboxes</h3>
+                      <p className="text-[10px] text-outline">Share workspaces across multiple chat sessions</p>
                     </div>
-                    <h4 className="text-xs font-bold text-on-surface mb-1">Sign In Required</h4>
-                    <p className="text-[11px] text-outline leading-relaxed mb-3">
-                      Cloud sandboxes and workspaces are private. Sign in to boot, attach, and access your isolated microVMs.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowSandboxDropdown(false);
-                        onOpenAuthModal();
-                      }}
-                      className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer"
+                  </div>
+                  {sandboxUsage && (
+                    <span
+                      className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${
+                        sandboxUsage.used >= sandboxUsage.max
+                          ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                          : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                      }`}
                     >
-                      <span className="material-symbols-outlined text-[15px]">login</span>
-                      <span>Sign in with Google</span>
-                    </button>
-                  </div>
-                ) : (!sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) ? (
-                  <div className="p-3.5 bg-surface-container-low rounded-xl border border-outline-variant/25 text-center">
-                    <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2 shadow-xs">
-                      <span className="material-symbols-outlined text-[22px]">rocket_launch</span>
+                      {sandboxUsage.used}/{sandboxUsage.max} {sandboxUsage.used >= sandboxUsage.max ? 'FULL' : 'SLOTS'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Explainer Tip */}
+                <div className="bg-surface-container/60 rounded-lg p-2 mb-3 text-[11px] text-on-surface-variant flex items-start gap-1.5 border border-outline-variant/15">
+                  <span className="material-symbols-outlined text-[14px] text-primary shrink-0 mt-0.5">info</span>
+                  <span>
+                    Multiple chats can attach to the <strong>same sandbox</strong> to collaborate without consuming extra quota.
+                  </span>
+                </div>
+
+                {/* Sandboxes List or Empty Standby State */}
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-0.5 mb-3 custom-scrollbar">
+                  {!user ? (
+                    <div className="p-3.5 bg-surface-container-low rounded-xl border border-outline-variant/25 text-center">
+                      <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2 shadow-xs">
+                        <span className="material-symbols-outlined text-[22px]">lock</span>
+                      </div>
+                      <h4 className="text-xs font-bold text-on-surface mb-1">Sign In Required</h4>
+                      <p className="text-[11px] text-outline leading-relaxed mb-3">
+                        Cloud sandboxes and workspaces are private. Sign in to boot, attach, and access your isolated microVMs.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowSandboxDropdown(false);
+                          onOpenAuthModal();
+                        }}
+                        className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-[15px]">login</span>
+                        <span className="hidden sm:inline">Sign in with Google</span>
+                        <span className="sm:hidden">Sign In</span>
+                      </button>
                     </div>
-                    <h4 className="text-xs font-bold text-on-surface mb-1">Sandbox VM in Standby</h4>
-                    <p className="text-[11px] text-outline leading-relaxed mb-3">
-                      Start an isolated cloud microVM to execute code, run bash commands, and access dedicated workspace (<code className="text-primary font-mono text-[10px]">/workspace</code>).
-                    </p>
+                  ) : (!sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) ? (
+                    <div className="p-3.5 bg-surface-container-low rounded-xl border border-outline-variant/25 text-center">
+                      <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2 shadow-xs">
+                        <span className="material-symbols-outlined text-[22px]">rocket_launch</span>
+                      </div>
+                      <h4 className="text-xs font-bold text-on-surface mb-1">Sandbox VM in Standby</h4>
+                      <p className="text-[11px] text-outline leading-relaxed mb-3">
+                        Start an isolated cloud microVM to execute code, run bash commands, and access dedicated workspace (<code className="text-primary font-mono text-[10px]">/workspace</code>).
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleCreateSandbox}
+                        disabled={isCreatingSandbox}
+                        className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {isCreatingSandbox ? (
+                          <>
+                            <span className="material-symbols-outlined text-[15px] animate-spin">progress_activity</span>
+                            <span>Booting Cloud MicroVM...</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="material-symbols-outlined text-[15px]">bolt</span>
+                            <span>Start Sandbox VM</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  ) : (
+                    sandboxUsage.sandboxes.map((sb, index) => {
+                      const isCurrent = activeSandbox?.sandboxId === sb.sandboxId;
+                      const isSwitching = switchingSandboxId === sb.sandboxId;
+                      const displayName = sb.name || `Sandbox #${index + 1} (${sb.sandboxId.substring(0, 6)})`;
+                      const realChatCount = validSessionIds !== undefined
+                        ? (sb.attachedSessionIds?.filter((id) => validSessionSet.has(id)).length || 0)
+                        : (sb.attachedSessionCount || 0);
+                      return (
+                        <div
+                          key={sb.sandboxId}
+                          onClick={() => {
+                            if (!isCurrent && !isSwitching) {
+                              handleSwitchSandbox(sb.sandboxId);
+                            } else if (isCurrent) {
+                              setShowSandboxDropdown(false);
+                            }
+                          }}
+                          className={`p-2.5 rounded-lg border transition-all ${
+                            isCurrent
+                              ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
+                              : 'bg-surface-container-low hover:bg-surface-container hover:border-primary/40 border-outline-variant/20 cursor-pointer'
+                          }`}
+                          title={isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {isSwitching ? (
+                                <span className="material-symbols-outlined text-[16px] text-primary shrink-0 animate-spin">progress_activity</span>
+                              ) : isCurrent ? (
+                                <span className="material-symbols-outlined text-[16px] text-primary shrink-0">check_circle</span>
+                              ) : (
+                                <span className="material-symbols-outlined text-[16px] text-outline shrink-0">radio_button_unchecked</span>
+                              )}
+                              <span className="font-semibold text-xs text-on-surface truncate" title={displayName}>
+                                {displayName}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              {isCurrent && (
+                                <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
+                                  Active Chat
+                                </span>
+                              )}
+                              {isSwitching && (
+                                <span className="text-[10px] text-primary font-medium animate-pulse">
+                                  Attaching...
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteSandbox(sb.sandboxId, displayName, realChatCount, isCurrent);
+                                }}
+                                disabled={deletingSandboxId === sb.sandboxId}
+                                className="p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors cursor-pointer"
+                                title="Delete this sandbox to free up 1 slot"
+                              >
+                                <span className="material-symbols-outlined text-[15px]">
+                                  {deletingSandboxId === sb.sandboxId ? 'sync' : 'delete'}
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between text-[11px] text-outline pl-5">
+                            <span className="flex items-center gap-1">
+                              <span className="material-symbols-outlined text-[12px] text-primary">link</span>
+                              <span>{realChatCount} chat{realChatCount === 1 ? '' : 's'} sharing workspace</span>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Actions Footer */}
+                <div className="pt-2 border-t border-outline-variant/20 flex flex-col gap-2">
+                  {sandboxUsage && sandboxUsage.sandboxes && sandboxUsage.sandboxes.length > 0 && (
                     <button
                       type="button"
                       onClick={handleCreateSandbox}
-                      disabled={isCreatingSandbox}
-                      className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                      disabled={
+                        isCreatingSandbox ||
+                        (sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max)
+                      }
+                      className={`w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all ${
+                        isCreatingSandbox
+                          ? 'bg-surface-container text-outline cursor-wait opacity-60'
+                          : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
+                          ? 'bg-surface-container text-outline cursor-not-allowed opacity-60'
+                          : 'bg-primary text-on-primary hover:bg-primary/90 shadow-xs cursor-pointer'
+                      }`}
+                      title={
+                        sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
+                          ? `Quota limit reached (${sandboxUsage.used}/${sandboxUsage.max} full). Delete an existing sandbox using the trash icon to create a new one.`
+                          : 'Create a brand new isolated sandbox environment'
+                      }
                     >
-                      {isCreatingSandbox ? (
-                        <>
-                          <span className="material-symbols-outlined text-[15px] animate-spin">progress_activity</span>
-                          <span>Booting Cloud MicroVM...</span>
-                        </>
-                      ) : (
-                        <>
-                          <span className="material-symbols-outlined text-[15px]">bolt</span>
-                          <span>Start Sandbox VM</span>
-                        </>
-                      )}
+                      <span className="material-symbols-outlined text-[16px]">
+                        {isCreatingSandbox ? 'sync' : 'add_circle'}
+                      </span>
+                      <span>
+                        {isCreatingSandbox
+                          ? 'Launching Cloud MicroVM...'
+                          : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
+                          ? `Quota Full (${sandboxUsage.used}/${sandboxUsage.max})`
+                          : '+ New Isolated Sandbox'}
+                      </span>
                     </button>
-                  </div>
-                ) : (
-                  sandboxUsage.sandboxes.map((sb, index) => {
-                    const isCurrent = activeSandbox?.sandboxId === sb.sandboxId;
-                    const isSwitching = switchingSandboxId === sb.sandboxId;
-                    const displayName = sb.name || `Sandbox #${index + 1} (${sb.sandboxId.substring(0, 6)})`;
-                    const realChatCount = validSessionIds !== undefined
-                      ? (sb.attachedSessionIds?.filter((id) => validSessionSet.has(id)).length || 0)
-                      : (sb.attachedSessionCount || 0);
-                    return (
-                      <div
-                        key={sb.sandboxId}
-                        onClick={() => {
-                          if (!isCurrent && !isSwitching) {
-                            handleSwitchSandbox(sb.sandboxId);
-                          } else if (isCurrent) {
-                            setShowSandboxDropdown(false);
-                          }
-                        }}
-                        className={`p-2.5 rounded-lg border transition-all ${
-                          isCurrent
-                            ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
-                            : 'bg-surface-container-low hover:bg-surface-container hover:border-primary/40 border-outline-variant/20 cursor-pointer'
-                        }`}
-                        title={isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            {isSwitching ? (
-                              <span className="material-symbols-outlined text-[16px] text-primary shrink-0 animate-spin">progress_activity</span>
-                            ) : isCurrent ? (
-                              <span className="material-symbols-outlined text-[16px] text-primary shrink-0">check_circle</span>
-                            ) : (
-                              <span className="material-symbols-outlined text-[16px] text-outline shrink-0">radio_button_unchecked</span>
-                            )}
-                            <span className="font-semibold text-xs text-on-surface truncate" title={displayName}>
-                              {displayName}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            {isCurrent && (
-                              <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
-                                Active Chat
-                              </span>
-                            )}
-                            {isSwitching && (
-                              <span className="text-[10px] text-primary font-medium animate-pulse">
-                                Attaching...
-                              </span>
-                            )}
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteSandbox(sb.sandboxId, displayName, realChatCount);
-                              }}
-                              disabled={deletingSandboxId === sb.sandboxId}
-                              className="p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors cursor-pointer"
-                              title="Delete this sandbox to free up 1 slot"
-                            >
-                              <span className="material-symbols-outlined text-[15px]">
-                                {deletingSandboxId === sb.sandboxId ? 'sync' : 'delete'}
-                              </span>
-                            </button>
-                          </div>
-                        </div>
+                  )}
 
-                        <div className="flex items-center justify-between text-[11px] text-outline pl-5">
-                          <span className="flex items-center gap-1">
-                            <span className="material-symbols-outlined text-[12px] text-primary">link</span>
-                            <span>{realChatCount} chat{realChatCount === 1 ? '' : 's'} sharing workspace</span>
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-
-              {/* Actions Footer */}
-              <div className="pt-2 border-t border-outline-variant/20 flex flex-col gap-2">
-                {sandboxUsage && sandboxUsage.sandboxes && sandboxUsage.sandboxes.length > 0 && (
                   <button
                     type="button"
-                    onClick={handleCreateSandbox}
-                    disabled={
-                      isCreatingSandbox ||
-                      (sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max)
-                    }
-                    className={`w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all ${
-                      isCreatingSandbox
-                        ? 'bg-surface-container text-outline cursor-wait opacity-60'
-                        : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
-                        ? 'bg-surface-container text-outline cursor-not-allowed opacity-60'
-                        : 'bg-primary text-on-primary hover:bg-primary/90 shadow-xs cursor-pointer'
-                    }`}
-                    title={
-                      sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
-                        ? `Quota limit reached (${sandboxUsage.used}/${sandboxUsage.max} full). Delete an existing sandbox using the trash icon to create a new one.`
-                        : 'Create a brand new isolated sandbox environment'
-                    }
+                    onClick={() => {
+                      setShowSandboxDropdown(false);
+                      onToggleInspector?.();
+                    }}
+                    className="w-full flex items-center justify-center gap-1 py-1 px-2 rounded text-[11px] text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer"
                   >
-                    <span className="material-symbols-outlined text-[16px]">
-                      {isCreatingSandbox ? 'sync' : 'add_circle'}
-                    </span>
-                    <span>
-                      {isCreatingSandbox
-                        ? 'Launching Cloud MicroVM...'
-                        : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
-                        ? `Quota Full (${sandboxUsage.used}/${sandboxUsage.max})`
-                        : '+ New Isolated Sandbox'}
-                    </span>
+                    <span className="material-symbols-outlined text-[14px]">folder_open</span>
+                    <span>Inspect Workspace Files & Telemetry</span>
                   </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowSandboxDropdown(false);
-                    onToggleInspector?.();
-                  }}
-                  className="w-full flex items-center justify-center gap-1 py-1 px-2 rounded text-[11px] text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer"
-                >
-                  <span className="material-symbols-outlined text-[14px]">folder_open</span>
-                  <span>Inspect Workspace Files & Telemetry</span>
-                </button>
+                </div>
               </div>
-            </div>
+
+              {/* Mobile Modal (sm:hidden) via React Portal */}
+              {createPortal(
+                <div
+                  className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs sm:hidden animate-fade-in"
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget) setShowSandboxDropdown(false);
+                  }}
+                >
+                  <div
+                    className="w-full max-w-sm bg-surface-container-lowest border border-outline-variant/30 rounded-2xl shadow-2xl p-4 animate-in fade-in zoom-in-95 duration-150 max-h-[85vh] flex flex-col"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {/* Modal Header */}
+                    <div className="flex items-center justify-between pb-3 mb-2.5 border-b border-outline-variant/20 shrink-0">
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-[20px] text-primary">cloud_queue</span>
+                        <div>
+                          <h3 className="text-sm font-bold text-on-surface tracking-wide">Cloud Sandboxes</h3>
+                          <p className="text-[10px] text-outline">Share workspaces across multiple chat sessions</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {sandboxUsage && (
+                          <span
+                            className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${
+                              sandboxUsage.used >= sandboxUsage.max
+                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                            }`}
+                          >
+                            {sandboxUsage.used}/{sandboxUsage.max} {sandboxUsage.used >= sandboxUsage.max ? 'FULL' : 'SLOTS'}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setShowSandboxDropdown(false)}
+                          className="w-7 h-7 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/30 flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-all cursor-pointer"
+                          title="Close"
+                        >
+                          <span className="material-symbols-outlined text-[16px]">close</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Explainer Tip */}
+                    <div className="bg-surface-container/60 rounded-lg p-2.5 mb-3 text-[11px] text-on-surface-variant flex items-start gap-1.5 border border-outline-variant/15 shrink-0">
+                      <span className="material-symbols-outlined text-[14px] text-primary shrink-0 mt-0.5">info</span>
+                      <span>
+                        Multiple chats can attach to the <strong>same sandbox</strong> to collaborate without consuming extra quota.
+                      </span>
+                    </div>
+
+                    {/* Sandboxes List or Empty Standby State */}
+                    <div className="space-y-2 max-h-64 overflow-y-auto pr-0.5 mb-3 custom-scrollbar flex-1">
+                      {!user ? (
+                        <div className="p-3.5 bg-surface-container-low rounded-xl border border-outline-variant/25 text-center">
+                          <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2 shadow-xs">
+                            <span className="material-symbols-outlined text-[22px]">lock</span>
+                          </div>
+                          <h4 className="text-xs font-bold text-on-surface mb-1">Sign In Required</h4>
+                          <p className="text-[11px] text-outline leading-relaxed mb-3">
+                            Cloud sandboxes and workspaces are private. Sign in to boot, attach, and access your isolated microVMs.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowSandboxDropdown(false);
+                              onOpenAuthModal();
+                            }}
+                            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[15px]">login</span>
+                            <span className="hidden sm:inline">Sign in with Google</span>
+                            <span className="sm:hidden">Sign In</span>
+                          </button>
+                        </div>
+                      ) : (!sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) ? (
+                        <div className="p-3.5 bg-surface-container-low rounded-xl border border-outline-variant/25 text-center">
+                          <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center mb-2 shadow-xs">
+                            <span className="material-symbols-outlined text-[22px]">rocket_launch</span>
+                          </div>
+                          <h4 className="text-xs font-bold text-on-surface mb-1">Sandbox VM in Standby</h4>
+                          <p className="text-[11px] text-outline leading-relaxed mb-3">
+                            Start an isolated cloud microVM to execute code, run bash commands, and access dedicated workspace (<code className="text-primary font-mono text-[10px]">/workspace</code>).
+                          </p>
+                          <button
+                            type="button"
+                            onClick={handleCreateSandbox}
+                            disabled={isCreatingSandbox}
+                            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                          >
+                            {isCreatingSandbox ? (
+                              <>
+                                <span className="material-symbols-outlined text-[15px] animate-spin">progress_activity</span>
+                                <span>Booting Cloud MicroVM...</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="material-symbols-outlined text-[15px]">bolt</span>
+                                <span>Start Sandbox VM</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      ) : (
+                        sandboxUsage.sandboxes.map((sb, index) => {
+                          const isCurrent = activeSandbox?.sandboxId === sb.sandboxId;
+                          const isSwitching = switchingSandboxId === sb.sandboxId;
+                          const displayName = sb.name || `Sandbox #${index + 1} (${sb.sandboxId.substring(0, 6)})`;
+                          const realChatCount = validSessionIds !== undefined
+                            ? (sb.attachedSessionIds?.filter((id) => validSessionSet.has(id)).length || 0)
+                            : (sb.attachedSessionCount || 0);
+                          return (
+                            <div
+                              key={sb.sandboxId}
+                              onClick={() => {
+                                if (!isCurrent && !isSwitching) {
+                                  handleSwitchSandbox(sb.sandboxId);
+                                } else if (isCurrent) {
+                                  setShowSandboxDropdown(false);
+                                }
+                              }}
+                              className={`p-2.5 rounded-lg border transition-all ${
+                                isCurrent
+                                  ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
+                                  : 'bg-surface-container-low hover:bg-surface-container hover:border-primary/40 border-outline-variant/20 cursor-pointer'
+                              }`}
+                              title={isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  {isSwitching ? (
+                                    <span className="material-symbols-outlined text-[16px] text-primary shrink-0 animate-spin">progress_activity</span>
+                                  ) : isCurrent ? (
+                                    <span className="material-symbols-outlined text-[16px] text-primary shrink-0">check_circle</span>
+                                  ) : (
+                                    <span className="material-symbols-outlined text-[16px] text-outline shrink-0">radio_button_unchecked</span>
+                                  )}
+                                  <span className="font-semibold text-xs text-on-surface truncate" title={displayName}>
+                                    {displayName}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {isCurrent && (
+                                    <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
+                                      Active Chat
+                                    </span>
+                                  )}
+                                  {isSwitching && (
+                                    <span className="text-[10px] text-primary font-medium animate-pulse">
+                                      Attaching...
+                                    </span>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteSandbox(sb.sandboxId, displayName, realChatCount, isCurrent);
+                                    }}
+                                    disabled={deletingSandboxId === sb.sandboxId}
+                                    className="p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors cursor-pointer"
+                                    title="Delete this sandbox to free up 1 slot"
+                                  >
+                                    <span className="material-symbols-outlined text-[15px]">
+                                      {deletingSandboxId === sb.sandboxId ? 'sync' : 'delete'}
+                                    </span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-between text-[11px] text-outline pl-5">
+                                <span className="flex items-center gap-1">
+                                  <span className="material-symbols-outlined text-[12px] text-primary">link</span>
+                                  <span>{realChatCount} chat{realChatCount === 1 ? '' : 's'} sharing workspace</span>
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    {/* Actions Footer */}
+                    <div className="pt-2 border-t border-outline-variant/20 flex flex-col gap-2 shrink-0">
+                      {sandboxUsage && sandboxUsage.sandboxes && sandboxUsage.sandboxes.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleCreateSandbox}
+                          disabled={
+                            isCreatingSandbox ||
+                            (sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max)
+                          }
+                          className={`w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${
+                            isCreatingSandbox
+                              ? 'bg-surface-container text-outline cursor-wait opacity-60'
+                              : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
+                              ? 'bg-surface-container text-outline cursor-not-allowed opacity-60'
+                              : 'bg-primary text-on-primary hover:bg-primary/90 shadow-xs cursor-pointer'
+                          }`}
+                          title={
+                            sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
+                              ? `Quota limit reached (${sandboxUsage.used}/${sandboxUsage.max} full). Delete an existing sandbox using the trash icon to create a new one.`
+                              : 'Create a brand new isolated sandbox environment'
+                          }
+                        >
+                          <span className="material-symbols-outlined text-[16px]">
+                            {isCreatingSandbox ? 'sync' : 'add_circle'}
+                          </span>
+                          <span>
+                            {isCreatingSandbox
+                              ? 'Launching Cloud MicroVM...'
+                              : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
+                              ? `Quota Full (${sandboxUsage.used}/${sandboxUsage.max})`
+                              : '+ New Isolated Sandbox'}
+                          </span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowSandboxDropdown(false);
+                          onToggleInspector?.();
+                        }}
+                        className="w-full flex items-center justify-center gap-1 py-1.5 px-2 rounded text-[11px] text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">folder_open</span>
+                        <span>Inspect Workspace Files & Telemetry</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>,
+                document.body
+              )}
+            </>
           )}
         </div>
 
@@ -1001,6 +1283,18 @@ export const Header: React.FC<HeaderProps> = ({
                       <p className="text-[11px] text-outline">
                         Antigravity CLI is evaluating capacity for your linked Google account.
                       </p>
+                      {onRefreshQuota && (
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() => onRefreshQuota()}
+                            className="px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest border border-outline-variant/30 text-on-surface text-[11px] font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
+                          >
+                            <span className="material-symbols-outlined text-[14px]">refresh</span>
+                            <span>Retry Live Refresh</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1130,11 +1424,11 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Mobile Inspector Toggle */}
         <button
           onClick={onToggleInspector}
-          className="xl:hidden flex items-center gap-1 px-2 py-1 rounded bg-surface-container hover:bg-surface-container-high text-tertiary font-code-sm text-code-sm border border-outline-variant/30 cursor-pointer"
+          className="xl:hidden flex items-center gap-1 p-1.5 sm:px-2 sm:py-1 rounded bg-surface-container hover:bg-surface-container-high text-tertiary font-code-sm text-code-sm border border-outline-variant/30 cursor-pointer shrink-0"
           title="Toggle Cloud Inspector"
         >
           <span className="material-symbols-outlined text-[16px]">troubleshoot</span>
-          <span className="hidden xs:inline">Inspector</span>
+          <span className="hidden sm:inline">Inspector</span>
         </button>
 
         <div className="hidden sm:block h-4 w-px bg-outline-variant/30" />
@@ -1146,6 +1440,21 @@ export const Header: React.FC<HeaderProps> = ({
           onLogout={onLogout}
         />
       </div>
+
+      {/* Custom Delete Sandbox Confirmation Modal */}
+      <DeleteSandboxModal
+        isOpen={!!sandboxPendingDelete}
+        sandbox={sandboxPendingDelete}
+        isDeleting={!!deletingSandboxId}
+        error={deleteError}
+        onConfirm={confirmDeleteSandbox}
+        onCancel={() => {
+          if (!deletingSandboxId) {
+            setSandboxPendingDelete(null);
+            setDeleteError(null);
+          }
+        }}
+      />
     </header>
   );
 };

@@ -15,6 +15,7 @@ import type {
 import { generateId } from '../../utils/id.util.js';
 import { logger } from '../../utils/logger.util.js';
 import { envConfig } from '../../config/env.config.js';
+import { firestoreBackendService } from '../../services/firestore.service.js';
 
 export interface SandboxRecord {
   sandboxId: string;
@@ -59,63 +60,53 @@ export class E2BSandboxProvider implements ISandboxProvider {
   }
 
   private loadRecordsFromDisk(): void {
-    try {
-      const storagePath = this.getStoragePath();
-      if (!fs.existsSync(storagePath)) return;
-      const raw = fs.readFileSync(storagePath, 'utf8');
-      const data = JSON.parse(raw);
-      if (Array.isArray(data.records)) {
-        for (const item of data.records) {
-          if (item && item.sandboxId) {
-            this.sandboxRecords.set(item.sandboxId, {
-              sandboxId: item.sandboxId,
-              name: item.name || `Sandbox (${item.sandboxId.substring(0, 6)})`,
-              userId: item.userId || 'default_user',
-              attachedSessionIds: new Set(Array.isArray(item.attachedSessionIds) ? item.attachedSessionIds : []),
-              createdAt: item.createdAt || Date.now(),
-              lastActiveAt: item.lastActiveAt || Date.now(),
-            });
-          }
-        }
-        this.renumberSandboxes();
-      }
-      if (data.sessionToSandbox && typeof data.sessionToSandbox === 'object') {
-        for (const [sess, sbId] of Object.entries(data.sessionToSandbox)) {
-          if (typeof sbId === 'string') {
-            this.sessionToSandboxId.set(sess, sbId);
-          }
-        }
-      }
-    } catch (err) {
-      logger.warn('Failed to load sandbox records from disk', { error: String(err) });
-    }
+    // Records are loaded per user from Firebase Firestore on demand
   }
 
   private saveRecordsToDisk(): void {
     try {
-      const storagePath = this.getStoragePath();
-      const records = Array.from(this.sandboxRecords.values()).map((r) => ({
-        sandboxId: r.sandboxId,
-        name: r.name,
-        userId: r.userId,
-        attachedSessionIds: Array.from(r.attachedSessionIds),
-        createdAt: r.createdAt,
-        lastActiveAt: r.lastActiveAt,
-      }));
-      const sessionToSandbox: Record<string, string> = {};
-      for (const [sess, sbId] of this.sessionToSandboxId.entries()) {
-        sessionToSandbox[sess] = sbId;
+      for (const r of this.sandboxRecords.values()) {
+        if (r && r.userId && r.userId !== 'default_user') {
+          firestoreBackendService.saveSandboxRecord(r.userId, {
+            sandboxId: r.sandboxId,
+            name: r.name,
+            userId: r.userId,
+            attachedSessionIds: Array.from(r.attachedSessionIds),
+            createdAt: r.createdAt,
+            lastActiveAt: r.lastActiveAt,
+            provider: 'e2b',
+          }).catch(() => {});
+        }
       }
-      fs.writeFileSync(storagePath, JSON.stringify({ records, sessionToSandbox }, null, 2), {
-        encoding: 'utf8',
-        mode: 0o600,
-      });
     } catch (err) {
-      logger.warn('Failed to save sandbox records to disk', { error: String(err) });
+      logger.warn('Failed to persist sandbox records to Firestore', { error: String(err) });
     }
   }
 
   public async syncWithCloud(userId?: string): Promise<void> {
+    if (userId && userId !== 'default_user') {
+      try {
+        const remoteRecords = await firestoreBackendService.getUserSandboxes(userId);
+        if (remoteRecords && remoteRecords.length > 0) {
+          for (const item of remoteRecords) {
+            if (item && item.sandboxId && !this.sandboxRecords.has(item.sandboxId)) {
+              this.sandboxRecords.set(item.sandboxId, {
+                sandboxId: item.sandboxId,
+                name: item.name || `Sandbox (${item.sandboxId.substring(0, 6)})`,
+                userId: item.userId || userId,
+                attachedSessionIds: new Set(Array.isArray(item.attachedSessionIds) ? item.attachedSessionIds : []),
+                createdAt: item.createdAt || Date.now(),
+                lastActiveAt: item.lastActiveAt || Date.now(),
+              });
+            }
+          }
+          this.renumberSandboxes();
+        }
+      } catch (err) {
+        logger.warn('Failed to load user sandboxes from Firestore', { error: String(err) });
+      }
+    }
+
     const apiKey = this.getApiKey();
     if (!apiKey) return;
     if (!userId || userId === 'default_user') return;
@@ -156,6 +147,10 @@ export class E2BSandboxProvider implements ISandboxProvider {
       // Prune records deleted from cloud
       for (const localId of Array.from(this.sandboxRecords.keys())) {
         if (!activeCloudIds.has(localId)) {
+          const rec = this.sandboxRecords.get(localId);
+          if (rec && rec.userId && rec.userId !== 'default_user') {
+            firestoreBackendService.deleteSandboxRecord(rec.userId, localId).catch(() => {});
+          }
           this.sandboxRecords.delete(localId);
           this.activeSandboxes.delete(localId);
           for (const [sess, targetId] of this.sessionToSandboxId.entries()) {
@@ -853,6 +848,8 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     let cliUsage = {
       input_tokens: 0,
       output_tokens: 0,
+      thinking_tokens: 0,
+      cache_read_tokens: 0,
       total_tokens: 0,
       duration_seconds: 0,
       num_turns: 1,
@@ -872,7 +869,10 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
             const trimmed = line.trim();
             if (!trimmed) continue;
             try {
-              const event = JSON.parse(trimmed);
+              // Strip ANSI escape codes from pty/script wrapper if present
+              const cleanLine = trimmed.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+              const event = JSON.parse(cleanLine);
+
               // Handle standard delta/token events
               if (event.type === 'token' || event.type === 'delta') {
                 const token = event.text || event.delta || '';
@@ -894,41 +894,187 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
                   accumulatedText += (accumulatedText ? '\n\n' : '') + content;
                   req.onToken?.(content);
                 }
+              } else if (event.type === 'item.started' && event.item?.type === 'reasoning') {
+                req.onStep?.({
+                  id: event.item.id || `step_reasoning_${Date.now()}`,
+                  description: 'Reasoning and formulating execution strategy...',
+                  status: 'in_progress',
+                  durationMs: 0,
+                });
+              } else if (event.type === 'item.completed' && event.item?.type === 'reasoning') {
+                req.onStep?.({
+                  id: event.item.id || `step_reasoning_${Date.now()}`,
+                  description: 'Formulated strategy & reasoned about execution plan',
+                  status: 'completed',
+                  durationMs: 180,
+                });
               } else if (event.type === 'item.started' && event.item?.type === 'command_execution') {
                 const cmd = event.item.command || '';
-                const preview = cmd.length > 48 ? `${cmd.slice(0, 48)}...` : cmd;
+                const preview = cmd.length > 55 ? `${cmd.slice(0, 52)}...` : cmd;
                 req.onStep?.({
                   id: event.item.id || `step_${Date.now()}`,
-                  description: `Executing in sandbox: \`${preview}\``,
+                  description: `Running command in sandbox: \`${preview}\``,
                   status: 'in_progress',
                   durationMs: 0,
                   command: cmd,
+                  tool: 'run_command',
                 });
               } else if (event.type === 'item.completed' && event.item?.type === 'command_execution') {
                 const cmd = event.item.command || '';
-                const preview = cmd.length > 48 ? `${cmd.slice(0, 48)}...` : cmd;
+                const preview = cmd.length > 55 ? `${cmd.slice(0, 52)}...` : cmd;
                 req.onStep?.({
                   id: event.item.id || `step_${Date.now()}`,
-                  description: `Completed: \`${preview}\``,
+                  description: `Completed command: \`${preview}\``,
                   status: event.item.exit_code === 0 ? 'completed' : 'failed',
                   durationMs: 120,
                   command: cmd,
                   output: event.item.aggregated_output,
+                  tool: 'run_command',
+                  exitCode: event.item.exit_code ?? 0,
                 });
               } else if (event.type === 'turn.completed' && event.usage) {
                 cliUsage = {
                   input_tokens: event.usage.input_tokens || 0,
                   output_tokens: event.usage.output_tokens || 0,
+                  thinking_tokens: event.usage.thinking_tokens || 0,
+                  cache_read_tokens: event.usage.cache_read_tokens || 0,
                   total_tokens: (event.usage.input_tokens || 0) + (event.usage.output_tokens || 0),
                   duration_seconds: Math.round((Date.now() - start) / 1000),
                   num_turns: 1,
                 };
               }
+              // Handle Claude event stream schema (thinking blocks and tool use)
+              else if (event.type === 'content_block_start' && event.content_block?.type === 'thinking') {
+                req.onStep?.({
+                  id: `step_claude_think_${event.index ?? 0}`,
+                  description: 'Reasoning and formulating execution strategy...',
+                  status: 'in_progress',
+                  durationMs: 0,
+                });
+              } else if (event.type === 'content_block_stop' && event.index !== undefined) {
+                req.onStep?.({
+                  id: `step_claude_think_${event.index}`,
+                  description: 'Formulated strategy & reasoned about execution plan',
+                  status: 'completed',
+                  durationMs: 180,
+                });
+              } else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+                const toolName = event.content_block.name || 'tool';
+                req.onStep?.({
+                  id: `step_claude_tool_${event.content_block.id || event.index || Date.now()}`,
+                  description: `Executing tool in sandbox: ${toolName}`,
+                  status: 'in_progress',
+                  durationMs: 0,
+                  tool: toolName,
+                });
+              }
               // Handle Antigravity CLI (agy) stream-json schema
-              else if (event.event === 'step_update' && event.step_update?.text_delta) {
-                const delta = event.step_update.text_delta;
-                accumulatedText += delta;
-                req.onToken?.(delta);
+              else if (event.event === 'init') {
+                req.onStep?.({
+                  id: 'step_init',
+                  description: 'Connected to cloud sandbox microVM & initialized agent tools',
+                  status: 'completed',
+                  durationMs: Math.max(16, Date.now() - start),
+                });
+                req.onStep?.({
+                  id: 'step_reasoning_1',
+                  description: 'Reasoning and formulating execution strategy...',
+                  status: 'in_progress',
+                  durationMs: 0,
+                });
+              } else if (event.event === 'step_update' && event.step_update) {
+                const su = event.step_update;
+                const stepIdx = su.step_index ?? 1;
+
+                if (su.step_type === 'tool') {
+                  const toolName = su.tool_name || su.tool_info?.name || 'tool';
+                  const params = su.tool_info?.parameters || {};
+                  const { desc, cmd } = this.formatAgyTool(toolName, params);
+
+                  if (su.state === 'ACTIVE') {
+                    req.onStep?.({
+                      id: `step_tool_${stepIdx}`,
+                      description: desc,
+                      status: 'in_progress',
+                      durationMs: 0,
+                      tool: toolName,
+                      command: cmd,
+                    });
+                  } else if (su.state === 'DONE') {
+                    const durationMs = su.duration_seconds ? Math.round(su.duration_seconds * 1000) : 120;
+                    let output = su.tool_info?.output;
+                    if (typeof output !== 'string' && output !== undefined && output !== null) {
+                      output = JSON.stringify(output, null, 2);
+                    }
+                    const completedDesc = desc
+                      .replace('Running command', 'Completed command')
+                      .replace('Reading file', 'Read file')
+                      .replace('Writing artifact', 'Created artifact')
+                      .replace('Editing code', 'Updated code')
+                      .replace('Scanning directory', 'Scanned directory')
+                      .replace('Searching codebase', 'Searched codebase')
+                      .replace('Searching web', 'Searched web')
+                      .replace('Executing agent tool:', 'Completed tool:');
+
+                    req.onStep?.({
+                      id: `step_tool_${stepIdx}`,
+                      description:
+                        completedDesc.startsWith('Completed') ||
+                        completedDesc.startsWith('Created') ||
+                        completedDesc.startsWith('Read') ||
+                        completedDesc.startsWith('Updated') ||
+                        completedDesc.startsWith('Scanned') ||
+                        completedDesc.startsWith('Searched')
+                          ? completedDesc
+                          : `Completed: ${completedDesc}`,
+                      status: 'completed',
+                      durationMs,
+                      tool: toolName,
+                      command: cmd,
+                      output: output || undefined,
+                      exitCode: 0,
+                    });
+
+                    // Prepare next reasoning step if subsequent thoughts/actions follow
+                    req.onStep?.({
+                      id: `step_reasoning_${stepIdx + 1}`,
+                      description: 'Reasoning and evaluating tool execution results...',
+                      status: 'in_progress',
+                      durationMs: 0,
+                    });
+                  }
+                } else if (su.step_type === 'agent_response') {
+                  if (su.text_delta) {
+                    accumulatedText += su.text_delta;
+                    req.onToken?.(su.text_delta);
+                  }
+
+                  const reasoningStepId = `step_reasoning_${stepIdx}`;
+                  if (su.state === 'ACTIVE' && !su.text_delta) {
+                    req.onStep?.({
+                      id: reasoningStepId,
+                      description: 'Reasoning and formulating execution strategy...',
+                      status: 'in_progress',
+                      durationMs: 0,
+                    });
+                  } else if (su.state === 'DONE') {
+                    const durationMs = su.duration_seconds ? Math.round(su.duration_seconds * 1000) : 150;
+                    const thinkingTokens = su.usage?.thinking_tokens;
+                    if (thinkingTokens) {
+                      cliUsage.thinking_tokens = (cliUsage.thinking_tokens || 0) + thinkingTokens;
+                    }
+                    if (thinkingTokens || !su.text_delta) {
+                      req.onStep?.({
+                        id: reasoningStepId,
+                        description: thinkingTokens
+                          ? `Formulated strategy & reasoned about execution (${thinkingTokens} thinking tokens)`
+                          : 'Formulated strategy & reasoned about execution plan',
+                        status: 'completed',
+                        durationMs,
+                      });
+                    }
+                  }
+                }
               } else if (event.event === 'result' && event.result) {
                 if (event.result.response && !accumulatedText) {
                   accumulatedText = event.result.response;
@@ -938,10 +1084,22 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
                   cliUsage = {
                     input_tokens: event.result.usage.input_tokens || 0,
                     output_tokens: event.result.usage.output_tokens || 0,
+                    thinking_tokens: event.result.usage.thinking_tokens ?? cliUsage.thinking_tokens ?? 0,
+                    cache_read_tokens: event.result.usage.cache_read_tokens || 0,
                     total_tokens: event.result.usage.total_tokens || 0,
                     duration_seconds: Math.round(event.result.duration_seconds || (Date.now() - start) / 1000),
                     num_turns: event.result.num_turns || 1,
                   };
+
+                  const finalThinking = cliUsage.thinking_tokens;
+                  req.onStep?.({
+                    id: 'step_reasoning_1',
+                    description: finalThinking
+                      ? `Formulated strategy & reasoned about execution (${finalThinking} thinking tokens)`
+                      : 'Formulated strategy & reasoned about execution plan',
+                    status: 'completed',
+                    durationMs: Math.round((event.result.duration_seconds || 1) * 1000),
+                  });
                 }
               }
             } catch {
@@ -1097,6 +1255,49 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     }
   }
 
+  private formatAgyTool(toolName: string, params: Record<string, any> = {}): { desc: string; cmd?: string } {
+    if (toolName === 'run_command') {
+      const rawCmd = params.CommandLine || '';
+      const preview = rawCmd.length > 55 ? `${rawCmd.slice(0, 52)}...` : rawCmd;
+      return {
+        desc: rawCmd ? `Running command in sandbox: \`${preview}\`` : 'Running command in sandbox',
+        cmd: rawCmd,
+      };
+    }
+    if (toolName === 'view_file' || toolName === 'read_resource') {
+      const file = params.AbsolutePath || params.filePath || '';
+      const base = file ? path.basename(file) : 'file';
+      return { desc: `Reading file \`${base}\``, cmd: file };
+    }
+    if (toolName === 'write_to_file') {
+      const file = params.TargetFile || params.targetFile || '';
+      const base = file ? path.basename(file) : 'artifact';
+      return { desc: `Writing artifact \`${base}\``, cmd: file };
+    }
+    if (toolName === 'replace_file_content' || toolName === 'multi_replace_file_content' || toolName === 'sed_file') {
+      const file = params.TargetFile || params.targetFile || '';
+      const base = file ? path.basename(file) : 'code';
+      return { desc: `Editing code in \`${base}\``, cmd: file };
+    }
+    if (toolName === 'list_dir') {
+      const dir = params.DirectoryPath || '/workspace';
+      const base = path.basename(dir) || dir;
+      return { desc: `Scanning directory \`${base}\``, cmd: dir };
+    }
+    if (toolName === 'grep_search') {
+      const q = params.Query || '';
+      return { desc: `Searching codebase for \`${q}\``, cmd: q };
+    }
+    if (toolName === 'search_web') {
+      const q = params.query || '';
+      return { desc: `Searching web for \`${q}\``, cmd: q };
+    }
+    if (toolName === 'generate_image') {
+      return { desc: 'Generating UI visual artifact', cmd: params.Prompt || '' };
+    }
+    return { desc: `Executing agent tool: ${toolName}`, cmd: '' };
+  }
+
   public async writeFile(
     sandboxId: string,
     filePath: string,
@@ -1237,6 +1438,10 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
 
   public async destroySandbox(sandboxIdOrSessionId: string): Promise<void> {
     const targetSandboxId = this.sessionToSandboxId.get(sandboxIdOrSessionId) || sandboxIdOrSessionId;
+    const targetRec = this.sandboxRecords.get(targetSandboxId);
+    if (targetRec && targetRec.userId && targetRec.userId !== 'default_user') {
+      firestoreBackendService.deleteSandboxRecord(targetRec.userId, targetSandboxId).catch(() => {});
+    }
     try {
       this.addLog('INFO', `Terminating E2B microVM ${targetSandboxId.substring(0, 8)}...`);
       const sandbox = await this.getSandboxInstance(targetSandboxId);

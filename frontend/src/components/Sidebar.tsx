@@ -10,6 +10,8 @@ interface SidebarProps {
   onNewSession: () => void;
   isOpen?: boolean;
   onClose?: () => void;
+  isSyncing?: boolean;
+  onRefreshSessions?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -20,6 +22,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onNewSession,
   isOpen = false,
   onClose,
+  isSyncing = false,
+  onRefreshSessions,
 }) => {
   return (
     <>
@@ -92,15 +96,51 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Chat Sessions Stream */}
         <div className="flex-1 overflow-y-auto px-space-sm py-space-md space-y-space-md">
           <div className="px-space-sm flex items-center justify-between">
-            <span className="font-label-sm text-label-sm uppercase tracking-wider text-outline">
-              Recent Chats
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="font-label-sm text-label-sm uppercase tracking-wider text-outline">
+                Recent Chats
+              </span>
+              <button
+                type="button"
+                onClick={onRefreshSessions}
+                disabled={isSyncing}
+                className="p-0.5 rounded text-outline hover:text-primary transition-colors cursor-pointer disabled:cursor-not-allowed"
+                title={isSyncing ? 'Syncing cloud sessions...' : 'Reload cloud sessions'}
+              >
+                <span
+                  className={`material-symbols-outlined text-[13px] ${
+                    isSyncing ? 'text-primary animate-spin' : 'hover:scale-110'
+                  }`}
+                >
+                  sync
+                </span>
+              </button>
+            </div>
             <span className="font-code-sm text-code-sm text-outline">
-              {sessions.length}
+              {isSyncing ? '...' : sessions.length}
             </span>
           </div>
 
-          {sessions.length === 0 ? (
+          {isSyncing && sessions.length === 0 ? (
+            <div className="space-y-2.5 px-space-sm py-3">
+              <div className="flex items-center gap-2.5 p-2 rounded-lg bg-surface-container/60 border border-outline-variant/15 animate-pulse">
+                <div className="w-4 h-4 rounded bg-primary/30 shrink-0" />
+                <div className="h-3.5 bg-outline-variant/30 rounded w-3/4" />
+              </div>
+              <div className="flex items-center gap-2.5 p-2 rounded-lg bg-surface-container/40 border border-outline-variant/10 animate-pulse delay-75">
+                <div className="w-4 h-4 rounded bg-outline-variant/20 shrink-0" />
+                <div className="h-3.5 bg-outline-variant/20 rounded w-1/2" />
+              </div>
+              <div className="flex items-center gap-2.5 p-2 rounded-lg bg-surface-container/30 border border-outline-variant/10 animate-pulse delay-150">
+                <div className="w-4 h-4 rounded bg-outline-variant/20 shrink-0" />
+                <div className="h-3.5 bg-outline-variant/20 rounded w-2/3" />
+              </div>
+              <div className="flex items-center justify-center gap-1.5 pt-2 text-primary/80">
+                <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
+                <span className="text-[11px] font-medium tracking-wide">Syncing cloud sessions...</span>
+              </div>
+            </div>
+          ) : sessions.length === 0 ? (
             <div className="px-space-sm py-6 text-center text-outline">
               <span className="material-symbols-outlined text-[28px] opacity-40 mb-1 block">
                 chat_bubble_outline

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import type { ModelType, ModelProvider, UserProfile, ModelOption, GeminiQuotaStats, CodexQuotaStats, QuotaGroup } from '../types';
 import { AVAILABLE_MODELS, getModelDisplayInfo, getMinimumEffortModelId } from '../types';
 import {
@@ -16,6 +17,7 @@ interface ModelSelectorDropdownProps {
   geminiQuota?: GeminiQuotaStats | null;
   codexQuota?: CodexQuotaStats | null;
   availableModels?: ModelOption[];
+  onOpenAuthModal?: () => void;
 }
 
 interface ProviderMeta {
@@ -58,6 +60,17 @@ const PROVIDERS: ProviderMeta[] = [
   },
 ];
 
+const getShortModelName = (name: string): string => {
+  return name
+    .replace(/^Google\s+/i, '')
+    .replace(/^Antigravity\s+/i, '')
+    .replace(/^OpenAI\s+/i, '')
+    .replace(/\s*\(Latest\)/gi, '')
+    .replace(/\s*\(Thinking\)/gi, '')
+    .replace(/\s*\(Reasoning\)/gi, '')
+    .trim();
+};
+
 export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   selectedModel,
   onSelectModel,
@@ -67,6 +80,7 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   geminiQuota,
   codexQuota,
   availableModels = AVAILABLE_MODELS,
+  onOpenAuthModal,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [hoveredProvider, setHoveredProvider] = useState<ModelProvider | null>(null);
@@ -93,9 +107,12 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
 
   // Determine if a provider is signed in / unlocked
   const isProviderUnlocked = (provider: ModelProvider): boolean => {
-    // Google Gemini (Antigravity native engine) is always accessible
+    // If not signed in, all providers require sign in and are locked
+    if (!currentUser) return false;
+
+    // Google Gemini (Antigravity native engine) requires Antigravity CLI to be linked
     if (provider === 'gemini') {
-      return true;
+      return Boolean(activeCliStatus?.antigravity?.linked || activeCliStatus?.gemini?.linked);
     }
     if (provider === 'claude') {
       const isCliSubscription = Boolean(
@@ -118,6 +135,15 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
     }
     return false;
   };
+
+  // Reset dropdown when user signs out
+  useEffect(() => {
+    if (!currentUser) {
+      setIsOpen(false);
+      setHoveredProvider(null);
+      setHoveredModel(null);
+    }
+  }, [currentUser]);
 
   // Close when clicking outside or pressing Escape
   useEffect(() => {
@@ -154,9 +180,9 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   const handleToggleOpen = () => {
     if (disabled) return;
     if (!isOpen) {
-      // If the current provider is unlocked, show its models by default
+      // If the current provider is unlocked, show its models by default, otherwise gemini
       const unlocked = isProviderUnlocked(activeProvider);
-      setHoveredProvider(unlocked ? activeProvider : null);
+      setHoveredProvider(unlocked ? activeProvider : 'gemini');
       setHoveredModel(null);
     } else {
       setHoveredModel(null);
@@ -278,13 +304,13 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   }, [selectedModel, displayInfo]);
 
   return (
-    <div ref={containerRef} className="relative inline-block text-left">
+    <div ref={containerRef} className="relative inline-block text-left min-w-0 shrink">
       {/* Trigger Button next to Attach */}
       <button
         type="button"
         onClick={handleToggleOpen}
         disabled={disabled}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-xs border border-outline-variant/20 transition-all cursor-pointer shadow-xs max-w-[280px] sm:max-w-[420px] ${
+        className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 rounded-md bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-xs border border-outline-variant/20 transition-all cursor-pointer shadow-xs max-w-[110px] xs:max-w-[145px] sm:max-w-[420px] shrink min-w-0 ${
           isOpen ? 'ring-2 ring-primary/30 border-primary/50' : ''
         }`}
         title={
@@ -296,34 +322,26 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
         }
       >
         {selectedModel === 'none' ? (
-          <div className="flex items-center gap-1.5 min-w-0 truncate">
+          <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 truncate">
             <span
               className="material-symbols-outlined text-[15px] text-outline shrink-0"
               style={{ fontVariationSettings: "'FILL' 1" }}
             >
               tune
             </span>
-            <span className="font-medium text-on-surface truncate">No Model Selected</span>
+            <span className="font-medium text-on-surface truncate hidden sm:inline">No Model Selected</span>
+            <span className="font-medium text-on-surface truncate sm:hidden">Select</span>
           </div>
         ) : (
-          <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
-            {/* Provider Icon & Provider Name */}
-            {selectedProviderMeta && (
-              <>
-                <img
-                  src={selectedProviderMeta.iconSvg}
-                  alt=""
-                  className="w-3.5 h-3.5 object-contain shrink-0"
-                />
-                <span className="font-semibold text-on-surface shrink-0">
-                  {selectedProviderMeta.name}
-                </span>
-                <span className="text-outline/40 shrink-0">•</span>
-              </>
-            )}
-
-            {/* Model Icon & Model Name */}
-            {displayInfo.iconSvg ? (
+          <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 overflow-hidden">
+            {/* Provider Icon */}
+            {selectedProviderMeta?.iconSvg ? (
+              <img
+                src={selectedProviderMeta.iconSvg}
+                alt=""
+                className="w-3.5 h-3.5 object-contain shrink-0"
+              />
+            ) : displayInfo.iconSvg ? (
               <img
                 src={displayInfo.iconSvg}
                 alt=""
@@ -337,15 +355,30 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                 {displayInfo.icon}
               </span>
             )}
-            <span className="font-medium text-on-surface truncate">
+
+            {/* Provider Name (Desktop only to keep mobile compact) */}
+            {selectedProviderMeta && (
+              <>
+                <span className="font-semibold text-on-surface shrink-0 hidden sm:inline">
+                  {selectedProviderMeta.name}
+                </span>
+                <span className="text-outline/40 shrink-0 hidden sm:inline">•</span>
+              </>
+            )}
+
+            {/* Model Name (Compact & truncated on mobile) */}
+            <span className="font-medium text-on-surface truncate max-w-[65px] xs:max-w-[95px] sm:hidden">
+              {getShortModelName(displayInfo.baseName)}
+            </span>
+            <span className="font-medium text-on-surface truncate hidden sm:inline">
               {displayInfo.baseName}
             </span>
 
-            {/* Dot & Effort (if reasoning effort is available) */}
+            {/* Dot & Effort (Desktop only) */}
             {displayInfo.effortLabel && (
               <>
-                <span className="text-outline/40 shrink-0">•</span>
-                <span className="text-[11px] text-on-surface-variant font-medium shrink-0">
+                <span className="text-outline/40 shrink-0 hidden sm:inline">•</span>
+                <span className="text-[11px] text-on-surface-variant font-medium shrink-0 hidden sm:inline">
                   {displayInfo.effortLabel}
                 </span>
               </>
@@ -368,229 +401,11 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
         </span>
       </button>
 
-      {/* Main Providers Dropdown Popover */}
+      {/* Desktop Providers Dropdown Popover (hidden sm:flex) */}
       {isOpen && (
-        <div className="absolute bottom-full mb-2 left-0 z-50 flex items-end">
-          {/* Mobile Drill-Down View (when on small screen and an UNLOCKED provider is selected) */}
-          {isMobile && displayProvider && currentProviderMeta ? (
-            <div className="w-72 max-h-[380px] p-2 rounded-xl bg-surface-container border border-outline-variant/30 shadow-2xl backdrop-blur-md flex flex-col animate-in fade-in duration-150">
-              {/* Back to providers button */}
-              <div className="flex items-center justify-between px-1 py-1 mb-1.5 border-b border-outline-variant/15 text-xs text-on-surface font-medium shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setHoveredProvider(null)}
-                  className="flex items-center gap-1 text-primary hover:underline cursor-pointer"
-                >
-                  <span className="material-symbols-outlined text-[16px]">arrow_back</span>
-                  <span>Providers</span>
-                </button>
-                <div className="flex items-center gap-1.5">
-                  {currentProviderMeta.iconSvg ? (
-                    <img
-                      src={currentProviderMeta.iconSvg}
-                      alt=""
-                      className="w-4 h-4 object-contain shrink-0"
-                    />
-                  ) : (
-                    <span className={`material-symbols-outlined text-[14px] ${currentProviderMeta.iconColor}`}>
-                      {currentProviderMeta.icon}
-                    </span>
-                  )}
-                  <span className="text-xs font-semibold">{currentProviderMeta.shortLabel}</span>
-                </div>
-              </div>
-
-              {/* Sub-Models List with Mobile Effort Selector or Visual Cue */}
-              <div className="flex flex-col gap-1.5 overflow-y-auto max-h-64 pr-0.5">
-                {/* Quota banner for mobile */}
-                {((displayProvider === 'gemini' && (isGeminiQuotaExhausted || isThirdPartyQuotaExhausted)) ||
-                  (displayProvider === 'claude' && isThirdPartyQuotaExhausted) ||
-                  (displayProvider === 'codex' && isThirdPartyQuotaExhausted)) && (
-                  <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 mb-1">
-                    <span className="material-symbols-outlined text-[14px] shrink-0">warning</span>
-                    <div className="min-w-0">
-                      {displayProvider === 'gemini' ? (
-                        isAllQuotaExhausted ? (
-                          <>
-                            <p className="text-[11px] font-semibold leading-tight">All Model Quotas Reached</p>
-                            <p className="text-[10px] text-amber-400/80 leading-tight">All Antigravity models temporarily unavailable.</p>
-                          </>
-                        ) : isGeminiQuotaExhausted ? (
-                          <>
-                            <p className="text-[11px] font-semibold leading-tight">Gemini Quota Reached</p>
-                            <p className="text-[10px] text-amber-400/80 leading-tight">Gemini models unavailable.</p>
-                          </>
-                        ) : (
-                          <>
-                            <p className="text-[11px] font-semibold leading-tight">Provider Quota Reached</p>
-                            <p className="text-[10px] text-amber-400/80 leading-tight">Quota limit reached for secondary models.</p>
-                          </>
-                        )
-                      ) : displayProvider === 'claude' ? (
-                        <>
-                          <p className="text-[11px] font-semibold leading-tight">Claude Quota Reached</p>
-                          <p className="text-[10px] text-amber-400/80 leading-tight">Anthropic Claude quota limit reached.</p>
-                        </>
-                      ) : (
-                        <>
-                          <p className="text-[11px] font-semibold leading-tight">Codex Quota Reached</p>
-                          <p className="text-[10px] text-amber-400/80 leading-tight">OpenAI Codex quota limit reached.</p>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {providerModels.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-8 px-4 text-center space-y-2">
-                    <div className="w-6 h-6 rounded-full border-2 border-primary/20 border-t-primary animate-spin" />
-                    <p className="text-xs font-medium text-outline">Discovering {currentProviderMeta.shortLabel} models...</p>
-                  </div>
-                ) : (
-                  providerModels.map((m) => {
-                    const hasEffortOptions = Boolean(m.effortOptions && m.effortOptions.length > 0);
-                    const activeEffort = m.effortOptions?.find((opt) => opt.modelId === selectedModel);
-                    const isCurrentActive = selectedModel === m.id || Boolean(activeEffort);
-                    const isModelDisabled = isModelQuotaExhausted(m);
-
-                    if (hasEffortOptions && m.effortOptions) {
-                      return (
-                        <div
-                          key={m.id}
-                          className={`flex flex-col p-2 rounded-lg transition-all border ${
-                            isModelDisabled
-                              ? 'opacity-40 grayscale border-outline-variant/10 bg-surface-container/20'
-                              : isCurrentActive
-                              ? 'bg-primary/5 border-primary/30 text-on-surface'
-                              : 'bg-surface-container-low border-outline-variant/20 text-on-surface-variant'
-                          }`}
-                        >
-                          <button
-                            type="button"
-                            disabled={isModelDisabled}
-                            onClick={() => !isModelDisabled && handleSelectModel(getMinimumEffortModelId(m))}
-                            className="flex items-center justify-between gap-2 w-full text-left cursor-pointer"
-                          >
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              {m.iconSvg ? (
-                                <img
-                                  src={m.iconSvg}
-                                  alt=""
-                                  className="w-4 h-4 object-contain shrink-0"
-                                />
-                              ) : (
-                                <span className={`material-symbols-outlined text-[15px] ${m.iconColor}`}>
-                                  {m.icon}
-                                </span>
-                              )}
-                              <span className="font-semibold text-xs text-on-surface truncate">
-                                {m.name}
-                              </span>
-                            </div>
-                            {isModelDisabled ? (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/30">
-                                Quota Limit
-                              </span>
-                            ) : (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-surface-container-highest text-on-surface-variant border border-outline-variant/20">
-                                {m.badge}
-                              </span>
-                            )}
-                          </button>
-                          <p className="text-[11px] text-on-surface-variant/80 mt-1 line-clamp-1">
-                            {isModelDisabled ? getModelQuotaDescription(m) : m.description}
-                          </p>
-
-                        {/* Mobile Effort Pills */}
-                        <div className="flex items-center gap-1.5 mt-2 pt-1.5 border-t border-outline-variant/15 flex-wrap">
-                          <span className="text-[10px] text-outline font-medium mr-0.5">Effort:</span>
-                          {m.effortOptions.map((opt) => {
-                            const isSelected = selectedModel === opt.modelId;
-                            return (
-                              <button
-                                key={`${m.id}-${opt.effort}`}
-                                type="button"
-                                disabled={isModelDisabled}
-                                onClick={() => !isModelDisabled && handleSelectModel(opt.modelId)}
-                                className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                                  isModelDisabled
-                                    ? 'cursor-not-allowed opacity-50'
-                                    : isSelected
-                                    ? 'bg-primary text-on-primary font-semibold shadow-xs cursor-pointer'
-                                    : 'bg-surface-container-highest hover:bg-surface-container-highest/80 text-on-surface-variant cursor-pointer'
-                                }`}
-                              >
-                                {isSelected && !isModelDisabled && (
-                                  <span className="material-symbols-outlined text-[12px]">check</span>
-                                )}
-                                <span>{opt.label}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      disabled={isModelDisabled}
-                      onClick={() => !isModelDisabled && handleSelectModel(m.id)}
-                      className={`flex flex-col text-left p-2 rounded-lg transition-all border ${
-                        isModelDisabled
-                          ? 'opacity-40 grayscale cursor-not-allowed border-transparent bg-surface-container/20 select-none'
-                          : isCurrentActive
-                          ? 'bg-primary/10 border-primary/40 text-on-surface shadow-xs cursor-pointer'
-                          : 'hover:bg-surface-container-high border-transparent text-on-surface-variant hover:text-on-surface cursor-pointer'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2 w-full">
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          {m.iconSvg ? (
-                            <img
-                              src={m.iconSvg}
-                              alt=""
-                              className="w-4 h-4 object-contain shrink-0"
-                            />
-                          ) : (
-                            <span className={`material-symbols-outlined text-[15px] ${m.iconColor}`}>
-                              {m.icon}
-                            </span>
-                          )}
-                          <span className="font-semibold text-xs text-on-surface truncate">
-                            {m.name}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1 shrink-0">
-                          {isModelDisabled ? (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/30">
-                              Quota Limit
-                            </span>
-                          ) : (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-surface-container-highest text-on-surface-variant border border-outline-variant/20">
-                              {m.badge}
-                            </span>
-                          )}
-                          {!isModelDisabled && isCurrentActive && (
-                            <span className="material-symbols-outlined text-[16px] text-primary">
-                              check
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <p className="text-[11px] text-on-surface-variant/80 mt-1 line-clamp-2">
-                        {isModelDisabled ? getModelQuotaDescription(m) : m.description}
-                      </p>
-                    </button>
-                  );
-                }))}
-              </div>
-            </div>
-          ) : (
-            /* Desktop / Standard View: Providers List + Gapless Flyout to Right on Hover */
-            <div className="relative flex items-end">
-              {/* Column 1: Providers List */}
+        <div className="hidden sm:flex absolute bottom-full mb-2 left-0 z-50 items-end">
+          <div className="relative flex items-end">
+            {/* Column 1: Providers List */}
               <div className="w-56 p-1.5 rounded-xl bg-surface-container border border-outline-variant/30 shadow-2xl backdrop-blur-md flex flex-col shrink-0 animate-in fade-in slide-in-from-bottom-2 duration-150">
                 <div className="flex items-center justify-between px-2 py-1 mb-1 border-b border-outline-variant/15 text-[10px] font-semibold text-outline uppercase tracking-wider">
                   <span>AI Providers</span>
@@ -626,14 +441,18 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                       >
                         <button
                           type="button"
-                          disabled={!isUnlocked}
                           onClick={() => {
-                            if (!isUnlocked) return;
+                            if (!isUnlocked) {
+                              setIsOpen(false);
+                              onOpenAuthModal?.();
+                              return;
+                            }
                             setHoveredProvider(meta.provider);
+                            setHoveredModel(null);
                           }}
                           className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-left transition-all ${
                             !isUnlocked
-                              ? 'opacity-40 grayscale-[40%] cursor-not-allowed select-none bg-surface-container/20 border border-transparent'
+                              ? 'opacity-60 grayscale-[30%] hover:bg-amber-500/10 cursor-pointer select-none bg-surface-container/20 border border-transparent'
                               : isHovered
                               ? 'bg-surface-container-highest text-on-surface shadow-xs cursor-pointer'
                               : isSelected
@@ -643,7 +462,7 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                           title={
                             isUnlocked
                               ? `${meta.title} (Available)`
-                              : `${meta.title} is locked. Sign in or link account to unlock.`
+                              : `${meta.title} is locked. Click to link CLI.`
                           }
                         >
                           <div className="flex items-center gap-2 min-w-0">
@@ -819,8 +638,17 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                                 setHoveredModel(null);
                               }
                             }}
-                            onClick={() => {
+                            onClick={(e) => {
                               if (isModelDisabled) return;
+                              if (hasEffortOptions) {
+                                if (hoveredModel?.name === m.name) {
+                                  handleSelectModel(getMinimumEffortModelId(m));
+                                } else {
+                                  setHoveredModel(m);
+                                  setHoveredModelTop(e.currentTarget.offsetTop);
+                                }
+                                return;
+                              }
                               handleSelectModel(getMinimumEffortModelId(m));
                             }}
                             className={`flex flex-col text-left p-2 rounded-lg transition-all border ${
@@ -958,9 +786,239 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                 </div>
               )}
             </div>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+
+      {/* Mobile Dedicated Modal (sm:hidden) via React Portal */}
+      {isOpen &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:hidden bg-black/75 backdrop-blur-xs animate-fade-in"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setIsOpen(false);
+              }
+            }}
+          >
+            <div
+              className="w-full max-w-sm bg-surface-container-lowest border border-outline-variant/30 rounded-2xl shadow-2xl p-4 animate-in fade-in zoom-in-95 duration-150 max-h-[85vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between pb-3 mb-2.5 border-b border-outline-variant/20 shrink-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="material-symbols-outlined text-[20px] text-primary">psychology</span>
+                  <div>
+                    <h3 className="text-sm font-bold text-on-surface tracking-wide">Select AI Model</h3>
+                    <p className="text-[10px] text-outline">Choose provider, model & reasoning effort</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsOpen(false)}
+                  className="w-7 h-7 rounded-lg bg-surface-container/70 hover:bg-surface-container-high border border-outline-variant/30 flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-all cursor-pointer shadow-xs active:scale-95 shrink-0"
+                  title="Close"
+                >
+                  <span className="material-symbols-outlined text-[16px]">close</span>
+                </button>
+              </div>
+
+              {/* Provider Selection Tabs */}
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-surface-container-low border border-outline-variant/20 mb-3 shrink-0">
+                {PROVIDERS.map((meta) => {
+                  const isUnlocked = isProviderUnlocked(meta.provider);
+                  const isSelected = displayProvider === meta.provider;
+                  return (
+                    <button
+                      key={meta.provider}
+                      type="button"
+                      onClick={() => {
+                        if (!isUnlocked) {
+                          setIsOpen(false);
+                          onOpenAuthModal?.();
+                          return;
+                        }
+                        setHoveredProvider(meta.provider);
+                      }}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
+                        isSelected
+                          ? 'bg-surface-container-highest text-on-surface shadow-xs border border-outline-variant/30'
+                          : !isUnlocked
+                          ? 'text-outline/60 hover:text-amber-400 cursor-pointer opacity-70'
+                          : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container cursor-pointer'
+                      }`}
+                      title={isUnlocked ? meta.title : `${meta.title} (Locked - Click to link CLI)`}
+                    >
+                      <img src={meta.iconSvg} alt="" className="w-3.5 h-3.5 object-contain" />
+                      <span className="truncate">{meta.shortLabel}</span>
+                      {!isUnlocked && (
+                        <span className="material-symbols-outlined text-[12px] text-outline">lock</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Quota Exhausted Warning if any */}
+              {((displayProvider === 'gemini' && (isGeminiQuotaExhausted || isThirdPartyQuotaExhausted)) ||
+                (displayProvider === 'claude' && isThirdPartyQuotaExhausted) ||
+                (displayProvider === 'codex' && isThirdPartyQuotaExhausted)) && (
+                <div className="flex items-center gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 mb-2 shrink-0">
+                  <span className="material-symbols-outlined text-[14px] shrink-0">warning</span>
+                  <div className="min-w-0 text-[11px] font-medium leading-tight">
+                    Quota limit reached for some models. Refreshes in rolling 5-hour window.
+                  </div>
+                </div>
+              )}
+
+              {/* Scrollable Models & Reasoning Effort List */}
+              <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[140px]">
+                {providerModels.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8 text-center space-y-2">
+                    <div className="w-6 h-6 rounded-full border-2 border-primary/20 border-t-primary animate-spin" />
+                    <p className="text-xs font-medium text-outline">Discovering models...</p>
+                  </div>
+                ) : (
+                  providerModels.map((m) => {
+                    const hasEffortOptions = Boolean(m.effortOptions && m.effortOptions.length > 0);
+                    const activeEffort = m.effortOptions?.find((opt) => opt.modelId === selectedModel);
+                    const isCurrentActive = selectedModel === m.id || Boolean(activeEffort);
+                    const isModelDisabled = isModelQuotaExhausted(m);
+
+                    if (hasEffortOptions && m.effortOptions) {
+                      return (
+                        <div
+                          key={m.id}
+                          className={`p-2.5 rounded-xl border transition-all ${
+                            isModelDisabled
+                              ? 'opacity-40 grayscale border-outline-variant/15 bg-surface-container/20'
+                              : isCurrentActive
+                              ? 'bg-primary/5 border-primary/40 shadow-xs'
+                              : 'bg-surface-container-low border-outline-variant/20'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {m.iconSvg ? (
+                                <img src={m.iconSvg} alt="" className="w-4 h-4 object-contain shrink-0" />
+                              ) : (
+                                <span className={`material-symbols-outlined text-[15px] ${m.iconColor}`}>
+                                  {m.icon}
+                                </span>
+                              )}
+                              <span className="font-semibold text-xs text-on-surface truncate">
+                                {m.name}
+                              </span>
+                            </div>
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-surface-container-highest text-on-surface-variant border border-outline-variant/20 shrink-0">
+                              {m.badge}
+                            </span>
+                          </div>
+
+                          <p className="text-[11px] text-outline mb-2 line-clamp-2">
+                            {isModelDisabled ? getModelQuotaDescription(m) : m.description}
+                          </p>
+
+                          {/* Mobile Reasoning Effort Buttons */}
+                          <div className="space-y-1">
+                            <span className="text-[10px] text-on-surface-variant font-medium flex items-center gap-1">
+                              <span className="material-symbols-outlined text-[12px] text-primary">psychology</span>
+                              Reasoning Effort:
+                            </span>
+                            <div className="grid grid-cols-3 gap-1">
+                              {m.effortOptions.map((effort) => {
+                                const isEffortActive = selectedModel === effort.modelId;
+                                return (
+                                  <button
+                                    key={`${m.id}-${effort.effort}`}
+                                    type="button"
+                                    disabled={isModelDisabled}
+                                    onClick={() => handleSelectModel(effort.modelId)}
+                                    className={`py-1.5 px-1 rounded-lg text-xs font-semibold border flex flex-col items-center justify-center transition-all cursor-pointer ${
+                                      isEffortActive
+                                        ? 'bg-primary text-on-primary border-primary shadow-xs'
+                                        : 'bg-surface-container hover:bg-surface-container-high border-outline-variant/25 text-on-surface'
+                                    }`}
+                                  >
+                                    <span>{effort.label}</span>
+                                    <span className={`text-[9px] font-normal ${isEffortActive ? 'text-on-primary/80' : 'text-outline'}`}>
+                                      {effort.badge}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        disabled={isModelDisabled}
+                        onClick={() => handleSelectModel(m.id)}
+                        className={`w-full text-left p-2.5 rounded-xl border transition-all cursor-pointer ${
+                          isModelDisabled
+                            ? 'opacity-40 grayscale cursor-not-allowed bg-surface-container/20 border-outline-variant/15'
+                            : isCurrentActive
+                            ? 'bg-primary/10 border-primary text-on-surface shadow-xs font-medium'
+                            : 'bg-surface-container-low hover:bg-surface-container border-outline-variant/20 text-on-surface-variant hover:text-on-surface'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            {m.iconSvg ? (
+                              <img src={m.iconSvg} alt="" className="w-4 h-4 object-contain shrink-0" />
+                            ) : (
+                              <span className={`material-symbols-outlined text-[15px] ${m.iconColor}`}>
+                                {m.icon}
+                              </span>
+                            )}
+                            <span className="font-semibold text-xs text-on-surface truncate">
+                              {m.name}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-surface-container-highest text-on-surface-variant border border-outline-variant/20">
+                              {m.badge}
+                            </span>
+                            {isCurrentActive && (
+                              <span className="material-symbols-outlined text-[15px] text-primary">
+                                check
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-outline line-clamp-2">
+                          {isModelDisabled ? getModelQuotaDescription(m) : m.description}
+                        </p>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Standby / No Model Option at bottom */}
+              <div className="pt-2.5 mt-2 border-t border-outline-variant/15 flex items-center justify-between shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleSelectModel('none')}
+                  className={`text-xs flex items-center gap-1.5 py-1 px-2.5 rounded-lg border transition-all cursor-pointer ${
+                    selectedModel === 'none'
+                      ? 'bg-surface-container text-on-surface border-outline-variant/40 font-semibold'
+                      : 'text-outline hover:text-on-surface hover:bg-surface-container border-transparent'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[14px]">tune</span>
+                  <span>Standby Mode (No Model)</span>
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

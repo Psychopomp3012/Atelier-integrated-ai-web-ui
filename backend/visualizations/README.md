@@ -34,11 +34,11 @@ You can view these diagrams in three convenient ways:
 ## 1. System Architecture Diagram (`architecture-beta`)
 
 Built strictly with Mermaid's native **`architecture-beta`** syntax matching the cloud-only execution model:
-- **`group client(cloud)`**: React 19 Frontend UI & Cloud Inspector telemetry client hosted on **Vercel**.
-- **`group backend(server)`**: Fastify API core, 7-day JWT auth guard, and **Google Cloud Firestore** (persisting user profiles, active 7-day sessions, linked CLI credentials, and conversation logs) hosted on **Heroku**.
-- **`group sandbox(cloud)`**: Dedicated E2B MicroVM Sandbox housing the isolated AI CLIs (**Google Antigravity**, **OpenAI Codex**, and **Anthropic Claude**) with zero peer-to-peer coupling.
+- **`group client(cloud)`**: React 19 Frontend UI (with custom modals & Tailwind v3 design tokens) & Cloud Inspector telemetry client hosted on **Vercel**.
+- **`group backend(server)`**: Fastify API core & SSE streaming, 7-day JWT auth guard, **Context Compactor** (stitching past conversation turns into one-shot CLI prompts), and **Google Cloud Firestore** (persisting user profiles, active 7-day sessions, linked CLI credentials, conversation messages, and sandbox allocations with zero host disk usage) hosted on **Heroku**.
+- **`group sandbox(cloud)`**: Dedicated E2B MicroVM Sandbox Pool (up to 3 microVMs per user) housing the isolated AI CLIs (**Google Antigravity (`agy`)**, **OpenAI Codex (`codex`)**, and **Anthropic Claude (`claude`)**) under DAC `agent-runner` security boundary with zero peer-to-peer coupling.
 - **Fastify Core to Sandbox Connection**: A single unified dispatch line from `Fastify API Core` into the E2B Sandbox entry point, which branches to the respective CLI environment.
-- **Directional Port Pinning**: Precision directional edges using Mermaid port connectors (`:T`, `:B`, `:L`, `:R`) with pure white paths (`#ffffff`).
+- **Directional Port Pinning**: Precision rectilinear grid edges using Mermaid port connectors (`:T`, `:B`, `:L`, `:R`) with pure white paths (`#ffffff`) and zero line crossing.
 
 ![System Architecture Diagram](architecture-diagram.png)
 
@@ -48,10 +48,16 @@ Built strictly with Mermaid's native **`architecture-beta`** syntax matching the
 
 Built with Mermaid's **`flowchart TD`** visual decision engine featuring native FontAwesome iconography and condition branches:
 - **Session & Identity**: OS theme auto-detection (`fa:fa-adjust`) and 7-day JWT auth check (`fa:fa-key`) with Google OAuth fallback.
-- **Subscription Linking Flow**: Zero-key account linking via provider OAuth (`fa:fa-shield`, `fa:fa-user-check`).
-- **Cloud MicroVM Provisioning**: Firecracker microVM launch (`fa:fa-cloud`), 1GB swap allocation (`fa:fa-microchip`), DAC isolation boundary (`fa:fa-lock`), CLI pre-installation (`fa:fa-download`), and pre-warmed credentials.
-- **Dynamic Post-Boot Hot-Swap**: Conditional check for credentials linked after VM start with live token injection (`fa:fa-bolt`).
-- **Execution & Observability**: Native CLI execution (`fa:fa-terminal`), exit validation (`fa:fa-question-circle`), real-time SSE token stream (`fa:fa-stream`), and live Cloud Inspector file & telemetry viewing (`fa:fa-desktop`).
+- **Subscription Linking Flow**: Zero-key account linking via provider OAuth (`fa:fa-shield`, `fa:fa-user-check`), persisted directly in Firestore.
+- **Multi-Sandbox Pooling & Sharing**: Sandbox decision branch (`fa:fa-cubes`):
+  - **Manage / Delete**: Custom Red Delete Modal (`fa:fa-trash-alt`) prompting quota slot release and workspace cleanup in Firestore (`fa:fa-minus-circle`).
+  - **Attach Existing**: Multiplexes and shares active microVM workspace across multiple chats (`fa:fa-link`).
+  - **Create New**: Firecracker microVM launch (`fa:fa-cloud`), 1GB swap allocation (`fa:fa-microchip`), DAC isolation boundary (`fa:fa-lock`), and pre-warmed credentials.
+- **One-Shot Execution & Compaction**:
+  - Fetches message history from Cloud Firestore (`fa:fa-database`).
+  - Context Compactor stitches previous turns into structured one-shot prompt payload (`fa:fa-compress-arrows-alt`).
+  - Dynamic live credential injection if linked post-boot (`fa:fa-bolt`) or pre-flight verification (`fa:fa-check-circle`).
+- **Execution & Observability**: Native one-shot CLI execution inside MicroVM (`fa:fa-terminal`), exit code validation (`fa:fa-question-circle`), saving response turns to Firestore (`fa:fa-save`), real-time SSE token stream (`fa:fa-stream`), and live Cloud Inspector file & telemetry viewing (`fa:fa-desktop`).
 
 ![User Flow Diagram](user-flow-diagram.png)
 

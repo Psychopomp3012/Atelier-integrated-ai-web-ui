@@ -140,9 +140,16 @@ export class AuthService {
       avatarUrl ||
       `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=4285F4&color=fff`;
 
-    // Look up existing user by stableId or email
+    // Look up existing user by canonical stableId derived from email hash
     const stableId = getStableUserId(email);
-    let user = this.users.get(stableId) || Array.from(this.users.values()).find((u) => u.email === email);
+    let user = this.users.get(stableId);
+    if (!user) {
+      const existing = Array.from(this.users.values()).find((u) => u.email === email);
+      if (existing) {
+        user = existing;
+        user.id = stableId;
+      }
+    }
 
     if (!user) {
       user = {
@@ -201,23 +208,24 @@ export class AuthService {
   }
 
   public async loginWithCliAccount(): Promise<AuthSession> {
-    const cliStatus = cliAuthService.getCliStatus();
-    const cliAccount = cliStatus.antigravity?.linked
-      ? cliStatus.antigravity
-      : cliStatus.gemini?.linked
-        ? cliStatus.gemini
-        : null;
-
-    if (!cliAccount || !cliAccount.email) {
+    const wsAccount = cliAuthService.getWorkspaceAntigravityUserInfo();
+    if (!wsAccount || !wsAccount.email) {
       throw new AppError('No Antigravity CLI account is linked to this workspace', 400, 'CLI_NOT_LINKED');
     }
 
-    const email = cliAccount.email;
-    const name = cliAccount.name || email.split('@')[0] || 'Developer';
+    const email = wsAccount.email;
+    const name = wsAccount.name || email.split('@')[0] || 'Developer';
     const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=10b981&color=fff`;
 
     const stableId = getStableUserId(email);
-    let user = this.users.get(stableId) || Array.from(this.users.values()).find((u) => u.email === email);
+    let user = this.users.get(stableId);
+    if (!user) {
+      const existing = Array.from(this.users.values()).find((u) => u.email === email);
+      if (existing) {
+        user = existing;
+        user.id = stableId;
+      }
+    }
     if (!user) {
       user = {
         id: stableId,
@@ -279,20 +287,28 @@ export class AuthService {
       throw new AppError('Invalid or expired token for refresh', 401, 'UNAUTHORIZED');
     }
 
-    const userId = verification.payload.sub;
-    let user = this.users.get(userId) || Array.from(this.users.values()).find((u) => u.email === verification.payload?.email);
-    if (!user && verification.payload.email) {
+    const email = verification.payload.email;
+    const stableId = email ? getStableUserId(email) : verification.payload.sub;
+    let user = this.users.get(stableId);
+    if (!user && email) {
+      const existing = Array.from(this.users.values()).find((u) => u.email === email);
+      if (existing) {
+        user = existing;
+        user.id = stableId;
+      }
+    }
+    if (!user && email) {
       user = {
-        id: userId,
-        name: verification.payload.name || verification.payload.email.split('@')[0],
-        email: verification.payload.email,
-        avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(verification.payload.name || verification.payload.email)}&background=4285F4&color=fff`,
+        id: stableId,
+        name: verification.payload.name || email.split('@')[0],
+        email: email,
+        avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(verification.payload.name || email)}&background=4285F4&color=fff`,
         primaryPlatform: 'google',
         linkedPlatforms: [
           {
             platform: 'google',
-            accountId: userId,
-            accountEmail: verification.payload.email,
+            accountId: stableId,
+            accountEmail: email,
             connectedAt: new Date().toISOString(),
             hasValidSession: true,
             tier: 'Google Gemini 2.5 Pro Active',
@@ -453,19 +469,28 @@ export class AuthService {
       const verification = tokenUtil.verifyJwt(token);
       if (verification.valid && verification.payload) {
         const payload = verification.payload;
-        let user = this.users.get(payload.sub) || Array.from(this.users.values()).find((u) => u.email === payload.email);
-        if (!user && payload.email) {
+        const email = payload.email;
+        const stableId = email ? getStableUserId(email) : payload.sub;
+        let user = this.users.get(stableId);
+        if (!user && email) {
+          const existing = Array.from(this.users.values()).find((u) => u.email === email);
+          if (existing) {
+            user = existing;
+            user.id = stableId;
+          }
+        }
+        if (!user && email) {
           user = {
-            id: payload.sub,
-            name: payload.name || payload.email.split('@')[0],
-            email: payload.email,
-            avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(payload.name || payload.email)}&background=4285F4&color=fff`,
+            id: stableId,
+            name: payload.name || email.split('@')[0],
+            email: email,
+            avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(payload.name || email)}&background=4285F4&color=fff`,
             primaryPlatform: 'google',
             linkedPlatforms: [
               {
                 platform: 'google',
-                accountId: payload.sub,
-                accountEmail: payload.email,
+                accountId: stableId,
+                accountEmail: email,
                 connectedAt: new Date().toISOString(),
                 hasValidSession: true,
                 tier: 'Google Gemini 2.5 Pro Active',

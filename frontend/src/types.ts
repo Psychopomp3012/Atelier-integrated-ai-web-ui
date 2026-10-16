@@ -45,7 +45,7 @@ export interface CliQuotaLimits {
   fetchedAt: string;
 }
 
-export interface GeminiQuotaStats {
+export type AntigravityQuotaStats = {
   linked: boolean;
   userEmail?: string;
   userName?: string;
@@ -59,7 +59,9 @@ export interface GeminiQuotaStats {
   avgLatencyMs: number;
   quotaLimits?: CliQuotaLimits | null;
   lastUpdated: string;
-}
+};
+
+export type GeminiQuotaStats = AntigravityQuotaStats;
 
 export interface CodexQuotaStats {
   linked: boolean;
@@ -335,6 +337,15 @@ export interface UserProfile {
   createdAt: string;
 }
 
+export interface PaginationMeta {
+  total: number;
+  returned: number;
+  hasMore: boolean;
+  remaining: number;
+  oldestMessageId?: string;
+  newestMessageId?: string;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
@@ -342,6 +353,14 @@ export interface ChatSession {
   updatedAt: string;
   messages: ChatMessage[];
   model: ModelType;
+  messageCount?: number;
+  pagination?: PaginationMeta;
+}
+
+export interface PaginatedMessagesResponse {
+  sessionId: string;
+  messages: ChatMessage[];
+  pagination: PaginationMeta;
 }
 
 export interface WorkflowItem {

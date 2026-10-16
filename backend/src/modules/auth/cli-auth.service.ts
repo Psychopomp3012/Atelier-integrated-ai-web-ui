@@ -81,6 +81,8 @@ export class CliAuthService {
   private activeCodexLogin: {
     process: ChildProcess;
     authUrl?: string;
+    userId?: string;
+    userEmail?: string;
     startedAt: number;
     timeoutId: NodeJS.Timeout;
   } | null = null;
@@ -105,6 +107,219 @@ export class CliAuthService {
 
   private getGeminiSettingsPath(): string {
     return path.join(this.getGeminiDir(), 'settings.json');
+  }
+
+  private getUserCliLinksPath(): string {
+    return path.join(this.getGeminiDir(), 'user_cli_links.json');
+  }
+
+  public loadUserCliLinks(): Record<string, any> {
+    const p = this.getUserCliLinksPath();
+    if (fs.existsSync(p)) {
+      try {
+        return JSON.parse(fs.readFileSync(p, 'utf8'));
+      } catch {}
+    }
+    return {};
+  }
+
+  public saveUserCliLinks(links: Record<string, any>): void {
+    const p = this.getUserCliLinksPath();
+    try {
+      const dir = path.dirname(p);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(p, JSON.stringify(links, null, 2), 'utf8');
+    } catch (err) {
+      logger.warn('Failed to save user CLI links', { error: String(err) });
+    }
+  }
+
+  public isUserCliLinked(userId: string, cli: 'antigravity' | 'gemini' | 'claude' | 'codex'): boolean {
+    const rec = this.getUserCliRecord(userId);
+    return Boolean(rec?.[cli]?.linked);
+  }
+
+  public getUserIdByEmail(email: string): string | null {
+    if (!email) return null;
+    const links = this.loadUserCliLinks();
+    const clean = email.toLowerCase().trim();
+    for (const [userId, rec] of Object.entries(links)) {
+      if (
+        rec.email?.toLowerCase().trim() === clean ||
+        rec.antigravity?.email?.toLowerCase().trim() === clean ||
+        rec.gemini?.email?.toLowerCase().trim() === clean ||
+        rec.claude?.email?.toLowerCase().trim() === clean ||
+        rec.codex?.email?.toLowerCase().trim() === clean
+      ) {
+        return userId;
+      }
+    }
+    return null;
+  }
+
+  public isUserCliLinkedByEmail(email: string, cli: 'antigravity' | 'gemini' | 'claude' | 'codex'): boolean {
+    if (!email) return false;
+    const userId = this.getUserIdByEmail(email);
+    if (userId && this.isUserCliLinked(userId, cli)) return true;
+    const rec = this.getUserCliRecord(email);
+    return Boolean(rec?.[cli]?.linked);
+  }
+
+  public getUserCliRecord(userId: string): any {
+    if (!userId) return null;
+    const links = this.loadUserCliLinks();
+    const clean = userId.toLowerCase().trim();
+
+    let directRec = links[userId];
+    let userEmail: string | undefined = directRec?.email;
+
+    if (!userEmail) {
+      for (const rec of Object.values(links)) {
+        if (
+          rec.email?.toLowerCase().trim() === clean ||
+          rec.antigravity?.email?.toLowerCase().trim() === clean ||
+          rec.gemini?.email?.toLowerCase().trim() === clean ||
+          rec.claude?.email?.toLowerCase().trim() === clean ||
+          rec.codex?.email?.toLowerCase().trim() === clean
+        ) {
+          userEmail = rec.email || rec.antigravity?.email || rec.codex?.email;
+          if (!directRec) directRec = rec;
+          break;
+        }
+      }
+    }
+
+    if (userEmail) {
+      const cleanEmail = userEmail.toLowerCase().trim();
+      const merged: any = { ...directRec, email: userEmail };
+
+      for (const c of ['antigravity', 'gemini', 'claude', 'codex'] as const) {
+        let latestTime = 0;
+        let latestState: any = directRec?.[c] || null;
+        if (latestState) {
+          latestTime = latestState.unlinkedAt
+            ? new Date(latestState.unlinkedAt).getTime()
+            : latestState.linkedAt
+            ? new Date(latestState.linkedAt).getTime()
+            : 1;
+        }
+
+        for (const entry of Object.values(links)) {
+          if (
+            entry.email?.toLowerCase().trim() === cleanEmail ||
+            entry.antigravity?.email?.toLowerCase().trim() === cleanEmail ||
+            entry.gemini?.email?.toLowerCase().trim() === cleanEmail ||
+            entry.codex?.email?.toLowerCase().trim() === cleanEmail ||
+            entry.claude?.email?.toLowerCase().trim() === cleanEmail
+          ) {
+            const entryState = entry[c];
+            if (!entryState) continue;
+
+            const entryTime = entryState.unlinkedAt
+              ? new Date(entryState.unlinkedAt).getTime()
+              : entryState.linkedAt
+              ? new Date(entryState.linkedAt).getTime()
+              : 0;
+
+            if (!latestState || entryTime >= latestTime) {
+              latestTime = entryTime;
+              latestState = entryState;
+            }
+          }
+        }
+
+        // If direct record has an explicit false, respect it unless a newer link occurred
+        if (directRec?.[c]?.linked === false) {
+          const directUnlinkTime = directRec[c]?.unlinkedAt
+            ? new Date(directRec[c].unlinkedAt).getTime()
+            : 0;
+          if (latestState?.linked && latestState?.linkedAt) {
+            const linkTime = new Date(latestState.linkedAt).getTime();
+            if (directUnlinkTime >= linkTime) {
+              latestState = directRec[c];
+            }
+          } else {
+            latestState = directRec[c];
+          }
+        }
+
+        if (latestState) {
+          merged[c] = latestState;
+        }
+      }
+
+      return merged;
+    }
+
+    return directRec || null;
+  }
+
+  public linkUserCli(
+    userId: string,
+    cli: 'antigravity' | 'gemini' | 'claude' | 'codex',
+    email?: string,
+    metadata?: Record<string, any>
+  ): void {
+    const links = this.loadUserCliLinks();
+    if (!links[userId]) {
+      links[userId] = { email };
+    }
+    links[userId][cli] = {
+      linked: true,
+      email: email || links[userId].email,
+      linkedAt: new Date().toISOString(),
+      ...metadata,
+    };
+    this.saveUserCliLinks(links);
+    logger.info(`Linked ${cli} CLI for user ${userId}`, { email });
+  }
+
+  public unlinkUserCli(userId: string, cli: 'antigravity' | 'gemini' | 'claude' | 'codex', userEmail?: string): void {
+    const links = this.loadUserCliLinks();
+    let targetEmail = userEmail || links[userId]?.email || links[userId]?.antigravity?.email || links[userId]?.gemini?.email;
+
+    if (!targetEmail && (cli === 'antigravity' || cli === 'gemini')) {
+      const hostInfo = this.getWorkspaceAntigravityUserInfo();
+      if (hostInfo?.email) targetEmail = hostInfo.email;
+    }
+
+    const cleanEmail = targetEmail ? targetEmail.toLowerCase().trim() : '';
+
+    if (userId) {
+      if (!links[userId]) {
+        links[userId] = {};
+      }
+      if (!links[userId][cli]) {
+        links[userId][cli] = {};
+      }
+      links[userId][cli].linked = false;
+      links[userId][cli].unlinkedAt = new Date().toISOString();
+      if (cleanEmail && !links[userId].email) {
+        links[userId].email = cleanEmail;
+      }
+    }
+
+    // Also mark unlinked in any legacy or alias entries matching this email
+    if (cleanEmail) {
+      for (const entry of Object.values(links)) {
+        if (
+          entry.email?.toLowerCase().trim() === cleanEmail ||
+          entry.antigravity?.email?.toLowerCase().trim() === cleanEmail ||
+          entry.gemini?.email?.toLowerCase().trim() === cleanEmail ||
+          entry.codex?.email?.toLowerCase().trim() === cleanEmail ||
+          entry.claude?.email?.toLowerCase().trim() === cleanEmail
+        ) {
+          if (!entry[cli]) entry[cli] = {};
+          entry[cli].linked = false;
+          entry[cli].unlinkedAt = new Date().toISOString();
+        }
+      }
+    }
+
+    this.saveUserCliLinks(links);
+    logger.info(`Unlinked ${cli} CLI for user ${userId}`, { targetEmail });
   }
 
   /**
@@ -336,6 +551,23 @@ export class CliAuthService {
     return 'agy';
   }
 
+  public getPtySpawnCommand(command: string, args: string[]): { cmd: string; args: string[] } {
+    const isLinux = process.platform === 'linux';
+    const hasScript = isLinux && (fs.existsSync('/usr/bin/script') || fs.existsSync('/bin/script'));
+
+    if (hasScript) {
+      // Use standard Linux 'script' utility to allocate a real kernel pseudo-terminal (PTY)
+      // This satisfies agy's isatty() requirement without requiring Python or native C++ addons.
+      const fullCmd = [command, ...args].map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ');
+      return {
+        cmd: 'script',
+        args: ['-q', '-f', '-c', fullCmd, '/dev/null'],
+      };
+    }
+
+    return { cmd: command, args };
+  }
+
   /**
    * Discovers and synchronizes valid Antigravity CLI OAuth credentials across standard config paths.
    */
@@ -403,7 +635,6 @@ export class CliAuthService {
       path.join(homedir, '.gemini', 'oauth_creds.json'),
       path.join(homedir, '.gemini', 'antigravity-cli', 'oauth_creds.json'),
       path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'oauth_creds.json'),
-      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'oauth_creds.json.bak'),
     ];
 
     let newestPath = '';
@@ -471,6 +702,97 @@ export class CliAuthService {
     }
   }
 
+  public getHostTokenFiles(): string[] {
+    const homedir = os.homedir();
+    return [
+      path.join(homedir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'jetski-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'jetski-keyring-unavailable-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+    ];
+  }
+
+  public stashHostAntigravityTokens(): void {
+    const files = this.getHostTokenFiles();
+    const stashDir = path.join(this.getGeminiDir(), 'stashed_tokens');
+    try {
+      if (!fs.existsSync(stashDir)) fs.mkdirSync(stashDir, { recursive: true, mode: 0o700 });
+      for (const f of files) {
+        if (fs.existsSync(f)) {
+          const dest = path.join(stashDir, `${path.basename(f)}_${Buffer.from(f).toString('hex').slice(-8)}`);
+          try {
+            fs.copyFileSync(f, dest);
+            fs.unlinkSync(f);
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  public ensureBrowserStubs(): string {
+    const stubScript = '#!/bin/sh\nexit 0\n';
+    const tools = ['xdg-open', 'gio', 'sensible-browser', 'x-www-browser', 'firefox', 'google-chrome', 'chromium', 'chromium-browser'];
+
+    // 1. Host shadow bin in system temp directory (clean, zero repo pollution)
+    const shadowBinDir = path.join(os.tmpdir(), 'atelier-browser-stubs');
+    try {
+      if (!fs.existsSync(shadowBinDir)) {
+        fs.mkdirSync(shadowBinDir, { recursive: true, mode: 0o755 });
+      }
+      for (const tool of tools) {
+        const p = path.join(shadowBinDir, tool);
+        if (!fs.existsSync(p)) {
+          fs.writeFileSync(p, stubScript, { mode: 0o755 });
+        }
+      }
+    } catch (e) {
+      logger.warn('Failed to setup host shadow bin stubs', { error: String(e) });
+    }
+
+    // 2. Snap user common local bin (strictly confined snap agy executes commands from $SNAP_USER_COMMON/local/bin first)
+    try {
+      const snapBinDir = path.join(os.homedir(), 'snap', 'antigravity-cli', 'common', 'local', 'bin');
+      if (!fs.existsSync(snapBinDir)) {
+        fs.mkdirSync(snapBinDir, { recursive: true, mode: 0o755 });
+      }
+      for (const tool of tools) {
+        const p = path.join(snapBinDir, tool);
+        if (!fs.existsSync(p)) {
+          fs.writeFileSync(p, stubScript, { mode: 0o755 });
+        }
+      }
+    } catch (e) {
+      logger.warn('Failed to setup snap shadow bin stubs', { error: String(e) });
+    }
+
+    return shadowBinDir;
+  }
+
+  /**
+   * Generates a completely headless environment for CLI child processes.
+   * Suppresses all display servers and browser commands to strictly prevent desktop tab popping (xdg-open).
+   */
+  public getHeadlessCliEnv(extraEnv: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+    const shadowBinDir = this.ensureBrowserStubs();
+    const existingPath = process.env.PATH || '';
+    const newPath = `${shadowBinDir}:${existingPath}`;
+
+    return {
+      ...process.env,
+      PATH: newPath,
+      DISPLAY: '',
+      WAYLAND_DISPLAY: '',
+      BROWSER: '/bin/true',
+      XDG_CURRENT_DESKTOP: '',
+      DESKTOP_SESSION: '',
+      GDMSESSION: '',
+      ...extraEnv,
+    };
+  }
+
   /**
    * Initiates Antigravity CLI Google OAuth authentication flow.
    * Spawns agy in headless mode, extracts the PKCE authorization URL, and holds process open for code.
@@ -498,16 +820,22 @@ export class CliAuthService {
       this.activeAntigravityLogin = null;
     }
 
+    this.stashHostAntigravityTokens();
+
     const agyBin = this.getAntigravityBin();
+    const ptySpawn = this.getPtySpawnCommand(agyBin, ['-p', 'init']);
 
     return new Promise((resolve, reject) => {
       let resolved = false;
-      const proc = spawn(agyBin, ['-p', 'init'], {
+
+      logger.info('[Antigravity Auth] Spawning agy process in headless mode via native PTY', {
+        spawnCmd: ptySpawn.cmd,
+        spawnArgs: ptySpawn.args,
+      });
+
+      const proc = spawn(ptySpawn.cmd, ptySpawn.args, {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          DBUS_SESSION_BUS_ADDRESS: '',
-        },
+        env: this.getHeadlessCliEnv(),
       });
 
       const timeoutId = setTimeout(() => {
@@ -574,63 +902,146 @@ export class CliAuthService {
   /**
    * Submits user-provided authorization code to active Antigravity CLI process stdin.
    */
-  public async submitAntigravityCliCode(code: string): Promise<boolean> {
-    if (!this.activeAntigravityLogin || !this.activeAntigravityLogin.process.stdin?.writable) {
-      logger.warn('No active Antigravity CLI login process waiting for code');
-      return false;
-    }
-    const proc = this.activeAntigravityLogin.process;
-
-    // Sanitize code: If user pasted redirect URL (https://antigravity.google/oauth-callback?code=4/0A...&state=...), extract the code
+  public async submitAntigravityCliCode(code: string): Promise<{ success: boolean; error?: string; reason?: string }> {
     let cleanCode = code.trim();
+    logger.info('[Antigravity Auth] Code submission received', {
+      rawLength: code.length,
+      hasCodeParam: cleanCode.includes('code='),
+      hasStateParam: cleanCode.includes('state='),
+    });
+
+    // 1. If user pasted the redirect URL or query string, extract the code parameter
     if (cleanCode.includes('code=')) {
       try {
         const parsed = new URL(cleanCode);
-        cleanCode = parsed.searchParams.get('code') || cleanCode;
+        const extracted = parsed.searchParams.get('code');
+        if (extracted) {
+          cleanCode = extracted;
+          logger.info('[Antigravity Auth] Extracted "code" parameter from full URL');
+        }
       } catch {
         const m = cleanCode.match(/[?&]code=([^&]+)/);
-        if (m) cleanCode = decodeURIComponent(m[1]);
+        if (m) {
+          cleanCode = decodeURIComponent(m[1]);
+          logger.info('[Antigravity Auth] Extracted "code" parameter via regex');
+        }
       }
     }
 
+    // 2. Validate code format: Google OAuth authorization codes start with "4/"
+    // If the user pasted the state parameter (e.g. u67EQ5wy6al-N9wuoTVR-sljLhRvC8w), detect it immediately!
+    if (!cleanCode.startsWith('4/')) {
+      logger.warn('[Antigravity Auth] Validation failed: Code does not begin with "4/". User likely copied state token from browser URL bar.', {
+        inputPreview: cleanCode.slice(0, 4),
+        length: cleanCode.length,
+      });
+      return {
+        success: false,
+        reason: 'INVALID_FORMAT_STATE_TOKEN',
+        error: 'Invalid authorization code: Google authorization codes always begin with "4/". You appear to have copied the "state" token from the browser address bar. Please switch to the opened Google authorization tab and click the "Copy to Clipboard" button (or copy the code shown in the box on the page), then paste it here.',
+      };
+    }
+
+    // 3. Ensure active CLI login process is alive
+    if (!this.activeAntigravityLogin || !this.activeAntigravityLogin.process.stdin?.writable) {
+      logger.warn('[Antigravity Auth] No active Antigravity CLI process waiting on stdin. Login session may have exceeded the 60s timeout.');
+      this.syncAntigravityCredentials();
+      const alreadyLinked = this.isAntigravityLinked();
+      if (alreadyLinked) {
+        logger.info('[Antigravity Auth] Existing valid credentials found on disk');
+        return { success: true };
+      }
+      return {
+        success: false,
+        reason: 'SESSION_EXPIRED',
+        error: 'The Antigravity CLI login session timed out (exceeded 60s). Please click "Link Antigravity CLI" again to open a fresh authorization tab and submit the code within 60 seconds.',
+      };
+    }
+
+    const proc = this.activeAntigravityLogin.process;
+    logger.info('[Antigravity Auth] Writing authorization code to agy process stdin', { pid: proc.pid });
+
     return new Promise((resolve) => {
       let finished = false;
-      const finish = (ok: boolean) => {
+      const finish = (ok: boolean, errReason?: string, errMsg?: string) => {
         if (!finished) {
           finished = true;
-          if (ok) {
-            this.syncAntigravityCredentials();
+          this.syncAntigravityCredentials();
+          const linked = this.isAntigravityLinked();
+          logger.info('[Antigravity Auth] Code submission resolution', {
+            linked,
+            ok,
+            errReason,
+          });
+          if (linked || ok) {
+            resolve({ success: true });
+          } else {
+            resolve({
+              success: false,
+              reason: errReason || 'EXCHANGE_FAILED',
+              error: errMsg || 'Antigravity CLI could not verify the authorization code. Please click "Link Antigravity CLI" to get a fresh URL and try again.',
+            });
           }
-          resolve(ok);
         }
       };
 
+      const checkInterval = setInterval(() => {
+        this.syncAntigravityCredentials();
+        if (this.isAntigravityLinked()) {
+          clearInterval(checkInterval);
+          clearTimeout(timer);
+          logger.info('[Antigravity Auth] Successful credential creation detected on disk via polling');
+          finish(true);
+        }
+      }, 500);
+
+      let lastErrorMessage = '';
       proc.stdout?.on('data', (d) => {
-        logger.info('Antigravity CLI stdout after code submission', { output: d.toString() });
+        const outStr = d.toString();
+        logger.info('[Antigravity Auth] agy stdout: ' + outStr.trim());
+        if (outStr.includes('invalid_grant') || outStr.includes('failed') || outStr.includes('Error:')) {
+          lastErrorMessage = outStr.trim();
+        }
       });
 
       proc.stderr?.on('data', (d) => {
-        logger.info('Antigravity CLI stderr after code submission', { output: d.toString() });
+        const errStr = d.toString();
+        logger.warn('[Antigravity Auth] agy stderr: ' + errStr.trim());
+        if (errStr.includes('invalid_grant') || errStr.includes('failed') || errStr.includes('Error:')) {
+          lastErrorMessage = errStr.trim();
+        }
       });
 
       proc.once('close', (exitCode) => {
-        logger.info('Antigravity CLI login process closed after code submission', { exitCode });
+        clearInterval(checkInterval);
+        clearTimeout(timer);
+        logger.info('[Antigravity Auth] agy process closed', { exitCode, lastErrorMessage });
+        this.syncAntigravityCredentials();
         const linked = this.isAntigravityLinked();
-        finish(exitCode === 0 || linked);
+        if (linked || exitCode === 0) {
+          finish(true);
+        } else {
+          finish(false, 'CLI_EXIT_NON_ZERO', lastErrorMessage || `Antigravity CLI closed with exit code ${exitCode}. Please try linking again with a fresh URL.`);
+        }
       });
 
       const timer = setTimeout(() => {
-        const linked = this.syncAntigravityCredentials();
-        finish(linked);
-      }, 15000);
+        clearInterval(checkInterval);
+        this.syncAntigravityCredentials();
+        const linked = this.isAntigravityLinked();
+        logger.warn('[Antigravity Auth] Timed out waiting 30s for agy process after code submission', { linked });
+        finish(linked, 'SUBMIT_TIMEOUT', 'Timed out waiting for Antigravity CLI to complete authorization.');
+      }, 30000);
 
       try {
-        logger.info('Writing authorization code to Antigravity CLI stdin');
         proc.stdin!.write(cleanCode + '\n');
+        logger.info('[Antigravity Auth] Code successfully written to stdin with newline');
       } catch (err) {
+        clearInterval(checkInterval);
         clearTimeout(timer);
-        logger.warn('Failed to submit authorization code to Antigravity CLI stdin', { error: String(err) });
-        finish(false);
+        logger.error('[Antigravity Auth] Failed to write code to agy stdin', err);
+        this.syncAntigravityCredentials();
+        finish(this.isAntigravityLinked(), 'STDIN_WRITE_ERROR', 'Failed to communicate with Antigravity CLI process.');
       }
     });
   }
@@ -638,12 +1049,17 @@ export class CliAuthService {
   /**
    * Check whether Antigravity CLI is currently linked with genuine valid agy tokens.
    */
-  public isAntigravityLinked(): boolean {
+  public hasHostAntigravityTokens(): boolean {
     const homedir = os.homedir();
     const agyTokenPaths = [
+      path.join(homedir, '.gemini', 'antigravity-cli', 'oauth_creds.json'),
+      path.join(homedir, '.gemini', 'oauth_creds.json'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'oauth_creds.json'),
       path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
       path.join(homedir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
       path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'jetski-keyring-unavailable-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'jetski-oauth-token'),
       path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
       path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
     ];
@@ -653,7 +1069,15 @@ export class CliAuthService {
         try {
           const stats = fs.statSync(p);
           if (stats.size > 20) {
-            return true;
+            if (p.endsWith('.json')) {
+              const raw = fs.readFileSync(p, 'utf8');
+              const parsed = JSON.parse(raw);
+              if (parsed && (parsed.access_token || parsed.refresh_token || parsed.token)) {
+                return true;
+              }
+            } else {
+              return true;
+            }
           }
         } catch {}
       }
@@ -661,14 +1085,29 @@ export class CliAuthService {
     return false;
   }
 
-  public isGeminiLinked(): boolean {
+  public isAntigravityLinked(userId?: string): boolean {
+    if (userId) {
+      return this.isUserCliLinked(userId, 'antigravity');
+    }
+    return this.hasHostAntigravityTokens();
+  }
+
+  public isGeminiLinked(userId?: string): boolean {
+    if (userId) {
+      return this.isUserCliLinked(userId, 'gemini');
+    }
     const homedir = os.homedir();
-    const geminiCredsPath = path.join(homedir, '.gemini', 'oauth_creds.json');
-    if (fs.existsSync(geminiCredsPath)) {
-      try {
-        const stats = fs.statSync(geminiCredsPath);
-        if (stats.size > 20) return true;
-      } catch {}
+    const credsPaths = [
+      path.join(homedir, '.gemini', 'oauth_creds.json'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'oauth_creds.json'),
+    ];
+    for (const p of credsPaths) {
+      if (fs.existsSync(p)) {
+        try {
+          const stats = fs.statSync(p);
+          if (stats.size > 20) return true;
+        } catch {}
+      }
     }
     return Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
   }
@@ -697,6 +1136,12 @@ export class CliAuthService {
       path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
       path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'jetski-keyring-unavailable-oauth-token'),
       path.join(homedir, '.gemini', 'antigravity-cli', 'jetski-oauth-token'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'oauth_creds.json'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'oauth_creds.json.bak'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'oauth_creds.json'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'user_info.json'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'google_accounts.json'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'google_accounts.json'),
       path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
       path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
     ];
@@ -706,14 +1151,6 @@ export class CliAuthService {
         try { fs.unlinkSync(p); } catch {}
       }
     }
-
-    // Also backup snap credentials so unlink is clean and complete
-    const snapCredsPath = path.join(os.homedir(), 'snap', 'antigravity-cli', 'common', '.gemini', 'oauth_creds.json');
-    if (fs.existsSync(snapCredsPath)) {
-      try {
-        fs.renameSync(snapCredsPath, `${snapCredsPath}.bak`);
-      } catch {}
-    }
   }
 
   public unlinkAntigravity(): void {
@@ -721,32 +1158,104 @@ export class CliAuthService {
   }
 
   /**
-   * Gets current status of all 3 CLI linkings.
+   * Retrieves workspace Antigravity account info if authenticated on the system host.
    */
-  public getCliStatus(): CliStatusResult {
-    const antigravityLinked = this.isAntigravityLinked();
-    const geminiLinked = this.isGeminiLinked();
-    let email: string | undefined;
-    let name: string | undefined;
-    let linkedAt: string | undefined;
+  public getWorkspaceAntigravityUserInfo(): { email: string; name?: string } | null {
+    try {
+      const p = this.getGeminiUserInfoPath();
+      if (fs.existsSync(p)) {
+        const raw = fs.readFileSync(p, 'utf-8');
+        const data = JSON.parse(raw);
+        if (data.email) return { email: data.email, name: data.name };
+      }
+    } catch {}
+    return null;
+  }
 
-    const userInfoPath = this.getGeminiUserInfoPath();
-    if (fs.existsSync(userInfoPath)) {
-      try {
-        const info = JSON.parse(fs.readFileSync(userInfoPath, 'utf8'));
-        email = info.email;
-        name = info.name;
-        linkedAt = info.linkedAt;
-      } catch {}
-    }
-
-    // Claude CLI credentials check
-    const claudeLinked = this.isClaudeLinked();
-
-    // Codex CLI status check
-    const codexLinked = this.isCodexLinked();
+  /**
+   * Gets current status of all CLI linkings scoped to a specific user.
+   */
+  public getCliStatus(userId?: string, userEmail?: string): CliStatusResult {
+    const effectiveUserId = userId || (userEmail ? this.getUserIdByEmail(userEmail) : undefined);
+    const userRecord = effectiveUserId
+      ? this.getUserCliRecord(effectiveUserId)
+      : userEmail
+      ? this.getUserCliRecord(userEmail)
+      : null;
 
     const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+
+    // Multi-tenant check: if no user is signed in, no CLI is linked to anonymous visitors
+    if (!effectiveUserId && !userEmail) {
+      return {
+        antigravity: {
+          linked: false,
+          hasApiKey: false,
+          details: 'Connect your Google account to run Antigravity CLI models without API keys',
+        },
+        gemini: {
+          linked: false,
+          hasApiKey: hasGeminiKey,
+          details: hasGeminiKey
+            ? 'Gemini API Key Active · Ready for cloud execution'
+            : 'Connect your Google account to run Gemini models',
+        },
+        claude: {
+          linked: false,
+        },
+        codex: {
+          linked: false,
+        },
+      };
+    }
+
+    // Scoped to the specific authenticated user account
+    const antigravityLinked = effectiveUserId
+      ? this.isUserCliLinked(effectiveUserId, 'antigravity')
+      : userEmail
+      ? this.isUserCliLinkedByEmail(userEmail, 'antigravity')
+      : false;
+    const geminiLinked = effectiveUserId
+      ? this.isUserCliLinked(effectiveUserId, 'gemini')
+      : userEmail
+      ? this.isUserCliLinkedByEmail(userEmail, 'gemini')
+      : false;
+    const claudeLinked = effectiveUserId
+      ? this.isUserCliLinked(effectiveUserId, 'claude')
+      : userEmail
+      ? this.isUserCliLinkedByEmail(userEmail, 'claude')
+      : false;
+    const userExplicitlyUnlinked = userRecord?.codex?.linked === false;
+    const codexAuthInfo = this.getCodexAuthInfo();
+    let codexLinked = effectiveUserId
+      ? this.isUserCliLinked(effectiveUserId, 'codex')
+      : userEmail
+      ? this.isUserCliLinkedByEmail(userEmail, 'codex')
+      : false;
+
+    let codexEmail: string | undefined = userRecord?.codex?.email;
+
+    const unlinkedAt = userRecord?.codex?.unlinkedAt
+      ? new Date(userRecord.codex.unlinkedAt).getTime()
+      : 0;
+    const isNewLoginAfterUnlink = Boolean(codexAuthInfo.mtime && codexAuthInfo.mtime > unlinkedAt);
+
+    if (codexAuthInfo.linked && (!userExplicitlyUnlinked || isNewLoginAfterUnlink)) {
+      const diskEmail = codexAuthInfo.email?.toLowerCase().trim();
+      const currentEmail = userEmail?.toLowerCase().trim();
+      if (!diskEmail || !currentEmail || diskEmail === currentEmail) {
+        codexLinked = true;
+        codexEmail = codexAuthInfo.email || codexEmail || userEmail || 'ChatGPT Account';
+        if (effectiveUserId && !this.isUserCliLinked(effectiveUserId, 'codex')) {
+          this.linkUserCli(effectiveUserId, 'codex', codexEmail);
+        }
+      }
+    }
+
+    const email = userEmail || userRecord?.antigravity?.email || userRecord?.gemini?.email || userRecord?.email;
+    const name = userRecord?.name;
+    const linkedAt = userRecord?.antigravity?.linkedAt;
+
     const agyStatus = {
       linked: antigravityLinked,
       email: antigravityLinked ? email : undefined,
@@ -778,12 +1287,12 @@ export class CliAuthService {
       gemini: geminiStatus,
       claude: {
         linked: claudeLinked,
-        authMethod: this.cachedClaudeStatus?.authMethod,
-        email: this.cachedClaudeStatus?.email,
+        authMethod: userRecord?.claude?.authMethod || (claudeLinked ? 'Console' : undefined),
+        email: claudeLinked ? userRecord?.claude?.email : undefined,
       },
       codex: {
         linked: codexLinked,
-        email: this.cachedCodexStatus?.email || (codexLinked ? 'ChatGPT Account' : undefined),
+        email: codexLinked ? (codexEmail || userRecord?.codex?.email || 'ChatGPT Account') : undefined,
       },
     };
   }
@@ -811,7 +1320,7 @@ export class CliAuthService {
       const output = await new Promise<string>((resolve) => {
         const proc = spawn(claudeBin, ['auth', 'status'], {
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env },
+          env: this.getHeadlessCliEnv(),
         });
         let buf = '';
         proc.stdout?.on('data', (d) => { buf += d.toString(); });
@@ -901,7 +1410,7 @@ export class CliAuthService {
       let resolved = false;
       const proc = spawn(claudeBin, args, {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: this.getHeadlessCliEnv(),
       });
 
       const timeoutId = setTimeout(() => {
@@ -1017,6 +1526,7 @@ export class CliAuthService {
       await new Promise<void>((resolve) => {
         const proc = spawn(claudeBin, ['auth', 'logout'], {
           stdio: ['ignore', 'ignore', 'ignore'],
+          env: this.getHeadlessCliEnv(),
         });
         proc.on('close', () => resolve());
         proc.on('error', () => resolve());
@@ -1049,7 +1559,7 @@ export class CliAuthService {
       const proc = spawn(claudeBin, args, {
         cwd: effectiveSandboxDir,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: this.getHeadlessCliEnv(),
       });
 
       let accumulatedText = '';
@@ -1194,13 +1704,11 @@ export class CliAuthService {
       const proc = spawn(agyBin, args, {
         cwd: cliSandboxDir,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          DBUS_SESSION_BUS_ADDRESS: '',
+        env: this.getHeadlessCliEnv({
           PATH: `${path.join(os.homedir(), '.local', 'bin')}:${process.env.PATH || ''}`,
           NO_COLOR: '1',
           TERM: 'dumb',
-        },
+        }),
       });
 
       let lineBuffer = '';
@@ -1392,29 +1900,7 @@ export class CliAuthService {
     return 'codex';
   }
 
-  public isCodexLinked(): boolean {
-    const codexDir = path.join(os.homedir(), '.codex');
-    const authJsonPath = path.join(codexDir, 'auth.json');
-    if (fs.existsSync(authJsonPath)) {
-      try {
-        const stats = fs.statSync(authJsonPath);
-        if (stats.size > 20) return true;
-      } catch {}
-    }
-
-    if (this.cachedCodexStatus && Date.now() - this.cachedCodexStatus.timestamp < 120000) {
-      return this.cachedCodexStatus.linked;
-    }
-
-    const hasConfig = fs.existsSync(path.join(codexDir, 'config.toml'));
-    const hasCache = fs.existsSync(path.join(codexDir, 'models_cache.json'));
-    const hasDb =
-      fs.existsSync(path.join(codexDir, 'state_5.sqlite')) ||
-      fs.existsSync(path.join(codexDir, 'goals_1.sqlite'));
-    return hasConfig || hasCache || hasDb;
-  }
-
-  public async refreshCodexStatus(): Promise<{ linked: boolean; email?: string }> {
+  public getCodexAuthInfo(): { linked: boolean; email?: string; mtime?: number } {
     const codexDir = path.join(os.homedir(), '.codex');
     const authJsonPath = path.join(codexDir, 'auth.json');
     if (fs.existsSync(authJsonPath)) {
@@ -1423,74 +1909,44 @@ export class CliAuthService {
         if (stats.size > 20) {
           const raw = fs.readFileSync(authJsonPath, 'utf8');
           const parsed = JSON.parse(raw);
-          const email = parsed.email || (parsed.tokens ? 'ChatGPT Account' : undefined);
-          const result = {
-            linked: true,
-            email: email || 'ChatGPT Account',
-            timestamp: Date.now(),
-          };
-          this.cachedCodexStatus = result;
-          return result;
+          let email = parsed.email;
+          if (!email && parsed.tokens?.id_token) {
+            try {
+              const parts = parsed.tokens.id_token.split('.');
+              if (parts.length > 1) {
+                const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+                if (payload.email) email = payload.email;
+              }
+            } catch {}
+          }
+          if (parsed.tokens || parsed.OPENAI_API_KEY || parsed.auth_mode) {
+            return {
+              linked: true,
+              email: email || (parsed.tokens ? 'ChatGPT Account' : undefined),
+              mtime: stats.mtimeMs,
+            };
+          }
         }
       } catch {}
     }
-
-    if (this.cachedCodexStatus && Date.now() - this.cachedCodexStatus.timestamp < 10000) {
-      return this.cachedCodexStatus;
-    }
-
-    try {
-      const codexBin = this.getCodexBin();
-      const output = await new Promise<string>((resolve) => {
-        const proc = spawn(codexBin, ['login', 'status'], {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env },
-        });
-        let buf = '';
-        proc.stdout?.on('data', (d) => { buf += d.toString(); });
-        proc.stderr?.on('data', (d) => { buf += d.toString(); });
-        const timer = setTimeout(() => {
-          proc.kill('SIGTERM');
-          resolve(buf);
-        }, 3000);
-        proc.on('close', () => {
-          clearTimeout(timer);
-          resolve(buf);
-        });
-        proc.on('error', () => {
-          clearTimeout(timer);
-          resolve(buf);
-        });
-      });
-
-      const lower = output.toLowerCase();
-      const linked =
-        !lower.includes('not logged in') &&
-        (lower.includes('logged in') || output.trim().length > 5);
-      const emailMatch = output.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-      const result = {
-        linked,
-        email: emailMatch ? emailMatch[1] : undefined,
-        timestamp: Date.now(),
-      };
-      this.cachedCodexStatus = result;
-      return result;
-    } catch (err) {
-      logger.debug('Error refreshing Codex CLI status', { error: String(err) });
-    }
-
-    const hasConfig = fs.existsSync(path.join(codexDir, 'config.toml'));
-    const hasCache = fs.existsSync(path.join(codexDir, 'models_cache.json'));
-    const hasDb =
-      fs.existsSync(path.join(codexDir, 'state_5.sqlite')) ||
-      fs.existsSync(path.join(codexDir, 'goals_1.sqlite'));
-    const linked = hasConfig || hasCache || hasDb;
-    const result = { linked, timestamp: Date.now() };
-    this.cachedCodexStatus = result;
-    return result;
+    return { linked: false };
   }
 
-  public async startCodexCliLogin(): Promise<{ authUrl: string; sessionId: string }> {
+  public isCodexLinked(): boolean {
+    return this.getCodexAuthInfo().linked;
+  }
+
+  public async refreshCodexStatus(): Promise<{ linked: boolean; email?: string }> {
+    const info = this.getCodexAuthInfo();
+    this.cachedCodexStatus = {
+      linked: info.linked,
+      email: info.email,
+      timestamp: Date.now(),
+    };
+    return info;
+  }
+
+  public async startCodexCliLogin(userId?: string, userEmail?: string): Promise<{ authUrl: string; sessionId: string }> {
     if (
       this.activeCodexLogin &&
       this.activeCodexLogin.authUrl &&
@@ -1516,7 +1972,7 @@ export class CliAuthService {
       let resolved = false;
       const proc = spawn(codexBin, ['login'], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: this.getHeadlessCliEnv(),
       });
 
       const timeoutId = setTimeout(() => {
@@ -1547,6 +2003,8 @@ export class CliAuthService {
           this.activeCodexLogin = {
             process: proc,
             authUrl,
+            userId,
+            userEmail,
             startedAt: Date.now(),
             timeoutId: sessionExpiryTimer,
           };
@@ -1561,12 +2019,23 @@ export class CliAuthService {
       proc.on('close', (code) => {
         clearTimeout(timeoutId);
         clearTimeout(sessionExpiryTimer);
+        const loginUserId = userId || this.activeCodexLogin?.userId;
+        const loginUserEmail = userEmail || this.activeCodexLogin?.userEmail;
         if (this.activeCodexLogin?.process === proc) {
           this.activeCodexLogin = null;
         }
-        if (code === 0) {
+        const info = this.getCodexAuthInfo();
+        if (code === 0 || info.linked) {
           logger.info('Codex CLI login process completed successfully');
-          this.cachedCodexStatus = { linked: true, timestamp: Date.now() };
+          this.cachedCodexStatus = { linked: true, email: info.email, timestamp: Date.now() };
+          if (loginUserId) {
+            this.linkUserCli(loginUserId, 'codex', info.email || loginUserEmail || 'ChatGPT Account');
+          } else {
+            const links = this.loadUserCliLinks();
+            for (const uid of Object.keys(links)) {
+              this.linkUserCli(uid, 'codex', info.email || 'ChatGPT Account');
+            }
+          }
         } else if (!resolved) {
           reject(new AppError(`Codex CLI login process exited with code ${code}: ${buf}`, 500, 'CLI_LOGIN_ERROR'));
         }
@@ -1591,7 +2060,7 @@ export class CliAuthService {
     });
   }
 
-  public async unlinkCodex(): Promise<boolean> {
+  public async unlinkCodex(userId?: string): Promise<boolean> {
     if (this.activeCodexLogin) {
       clearTimeout(this.activeCodexLogin.timeoutId);
       try {
@@ -1600,15 +2069,27 @@ export class CliAuthService {
       this.activeCodexLogin = null;
     }
 
+    if (userId) {
+      this.unlinkUserCli(userId, 'codex');
+    }
+
     try {
       const codexBin = this.getCodexBin();
       await new Promise<void>((resolve) => {
         const proc = spawn(codexBin, ['logout'], {
           stdio: ['ignore', 'ignore', 'ignore'],
+          env: this.getHeadlessCliEnv(),
         });
         proc.on('close', () => resolve());
         proc.on('error', () => resolve());
       });
+    } catch {}
+
+    try {
+      const authJsonPath = path.join(os.homedir(), '.codex', 'auth.json');
+      if (fs.existsSync(authJsonPath)) {
+        fs.unlinkSync(authJsonPath);
+      }
     } catch {}
 
     this.cachedCodexStatus = { linked: false, timestamp: Date.now() };
@@ -1652,7 +2133,9 @@ export class CliAuthService {
       const proc = spawn(codexBin, args, {
         cwd: effectiveSandboxDir,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: this.getHeadlessCliEnv({
+          PATH: `${path.join(os.homedir(), '.local', 'bin')}:${process.env.PATH || ''}`,
+        }),
       });
 
       let accumulatedText = '';

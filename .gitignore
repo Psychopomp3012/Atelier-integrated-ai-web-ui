@@ -27,6 +27,8 @@ client_secret*.json
 google_accounts.json
 *-oauth-token
 *keyring-unavailable*
+user_cli_links.json
+backend/data/
 secrets/
 private/
 
@@ -116,4 +118,7 @@ ehthumbs.db
 
 
 test_suite/
-sandbox/
+sandbox/.agents/
+
+
+.agents/

@@ -389,23 +389,23 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => fetchFiles(true)}
-              disabled={isRefreshing}
-              className="flex items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant bg-surface-container hover:bg-surface-container-high px-2 py-0.5 rounded border border-outline-variant/20 cursor-pointer transition-colors"
-              title="Re-sync file tree from cloud sandbox"
+              onClick={() => {
+                fetchUsage();
+                fetchFiles(false);
+              }}
+              disabled={isLoading || isRefreshing}
+              className="flex items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant hover:text-on-surface bg-surface-container hover:bg-surface-container-high px-2 py-1 rounded-lg border border-outline-variant/30 cursor-pointer transition-colors shadow-2xs active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Reload sandbox files & telemetry"
             >
               <span
-                className={`inline-block w-1.5 h-1.5 rounded-full bg-secondary ${
-                  isRefreshing ? 'animate-ping' : ''
-                }`}
-              />
-              <span className="text-[11px] font-medium">{isRefreshing ? 'SYNCING...' : 'LIVE SYNC'}</span>
-              <span
-                className={`material-symbols-outlined text-[13px] text-outline transition-transform ${
-                  isRefreshing ? 'animate-spin' : ''
+                className={`material-symbols-outlined text-[14px] ${
+                  isLoading || isRefreshing ? 'text-primary animate-spin' : 'text-outline'
                 }`}
               >
-                refresh
+                sync
+              </span>
+              <span className="text-[11px] font-medium">
+                {isLoading || isRefreshing ? 'RELOADING...' : 'RELOAD'}
               </span>
             </button>
 
@@ -660,16 +660,57 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
           /* File Tree Explorer Content */
           <div className="flex-1 bg-surface-container-lowest p-space-md font-code-sm text-code-sm overflow-y-auto">
             <div className="text-outline border-b border-outline-variant/10 pb-space-xs mb-space-sm font-label-sm text-label-sm flex items-center justify-between">
-              <span>WORKSPACE ROOT</span>
+              <div className="flex items-center gap-1.5">
+                <span>WORKSPACE ROOT</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    fetchUsage();
+                    fetchFiles(false);
+                  }}
+                  disabled={isLoading || isRefreshing}
+                  className="p-0.5 rounded text-outline hover:text-primary transition-colors cursor-pointer disabled:cursor-not-allowed"
+                  title={isLoading || isRefreshing ? 'Syncing workspace files...' : 'Reload workspace files'}
+                >
+                  <span
+                    className={`material-symbols-outlined text-[13px] ${
+                      isLoading || isRefreshing ? 'text-primary animate-spin' : 'hover:scale-110'
+                    }`}
+                  >
+                    sync
+                  </span>
+                </button>
+              </div>
               <span className="text-[10px] text-outline font-mono">/workspace</span>
             </div>
 
-            {isLoading ? (
-              <div className="flex flex-col items-center justify-center py-12 text-outline gap-2">
-                <span className="material-symbols-outlined animate-spin text-[24px] text-primary">
-                  progress_activity
-                </span>
-                <span className="text-xs">Inspecting sandbox workspace...</span>
+            {(isLoading || isRefreshing) && files.length > 0 && (
+              <div className="flex items-center justify-between px-2 py-1 mb-2 rounded bg-primary/10 border border-primary/20 text-primary text-[10px] animate-pulse">
+                <div className="flex items-center gap-1.5">
+                  <span className="material-symbols-outlined text-[12px] animate-spin">sync</span>
+                  <span className="font-medium">Reloading workspace files...</span>
+                </div>
+              </div>
+            )}
+
+            {(isLoading || isRefreshing) && files.length === 0 ? (
+              <div className="space-y-2.5 px-space-xs py-4">
+                <div className="flex items-center gap-2.5 p-2 rounded-lg bg-surface-container/60 border border-outline-variant/15 animate-pulse">
+                  <div className="w-4 h-4 rounded bg-primary/30 shrink-0" />
+                  <div className="h-3.5 bg-outline-variant/30 rounded w-2/3" />
+                </div>
+                <div className="flex items-center gap-2.5 p-2 rounded-lg bg-surface-container/40 border border-outline-variant/10 animate-pulse delay-75">
+                  <div className="w-4 h-4 rounded bg-outline-variant/20 shrink-0" />
+                  <div className="h-3.5 bg-outline-variant/20 rounded w-1/2" />
+                </div>
+                <div className="flex items-center gap-2.5 p-2 rounded-lg bg-surface-container/30 border border-outline-variant/10 animate-pulse delay-150">
+                  <div className="w-4 h-4 rounded bg-outline-variant/20 shrink-0" />
+                  <div className="h-3.5 bg-outline-variant/20 rounded w-3/4" />
+                </div>
+                <div className="flex items-center justify-center gap-1.5 pt-3 text-primary/80">
+                  <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
+                  <span className="text-[11px] font-medium tracking-wide">Syncing workspace files...</span>
+                </div>
               </div>
             ) : errorMessage ? (
               <div className="py-6 px-3 text-center text-outline">
@@ -699,7 +740,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
                   className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary text-xs font-semibold shadow-xs transition-all cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-[15px]">login</span>
-                  <span>Sign in with Google</span>
+                  <span className="hidden sm:inline">Sign in with Google</span>
+                  <span className="sm:hidden">Sign In</span>
                 </button>
               </div>
             ) : !currentSandbox ? (

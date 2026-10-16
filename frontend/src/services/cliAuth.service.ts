@@ -71,6 +71,7 @@ export async function refreshAuthToken(): Promise<CliLoginResult | null> {
     const res = await apiFetch('/api/v1/auth/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -104,42 +105,86 @@ export async function getAntigravityAuthUrl(): Promise<{ authUrl: string; sessio
   return data.data;
 }
 
-export async function submitAntigravityAuthCode(code: string): Promise<boolean> {
+export async function submitAntigravityAuthCode(code: string): Promise<{ success: boolean; error?: string }> {
   try {
     const res = await apiFetch('/api/v1/auth/cli/antigravity/code', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code }),
     });
-    const data = await res.json();
-    return Boolean(data.success || data.data?.success);
-  } catch {
-    return false;
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success && data.data?.success !== false) {
+      return { success: true };
+    }
+    const msg = data.error?.message || data.data?.error || 'Failed to verify authorization code';
+    return { success: false, error: msg };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Network error submitting authorization code';
+    return { success: false, error: msg };
   }
 }
 
-export async function openAntigravityCliLoginPopup(): Promise<{ success: boolean; authUrl?: string }> {
-  try {
-    const { authUrl } = await getAntigravityAuthUrl();
-    const width = 550;
-    const height = 700;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
+let antigravityPopupRef: Window | null = null;
 
-    window.open(
-      authUrl,
-      'antigravity_cli_oauth',
-      `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`
-    );
+export function openAntigravityCliLoginPopup(): { success: boolean; authUrl?: string; popup?: Window | null } {
+  const width = 550;
+  const height = 700;
+  const left = window.screenX + (window.outerWidth - width) / 2;
+  const top = window.screenY + (window.outerHeight - height) / 2;
 
-    return { success: true, authUrl };
-  } catch (err: unknown) {
-    console.error('Failed to open Antigravity login:', err);
-    throw err;
+  // If a previous popup is open, close it cleanly first
+  if (antigravityPopupRef) {
+    try {
+      if (!antigravityPopupRef.closed) {
+        antigravityPopupRef.close();
+      }
+    } catch {
+      try {
+        antigravityPopupRef.close();
+      } catch {}
+    }
+    antigravityPopupRef = null;
   }
+
+  // Open popup synchronously during the user gesture to preserve script-closable control
+  // and completely avoid browser popup blockers or detached tab conversions
+  const popup = window.open(
+    '/api/v1/auth/cli/antigravity/login',
+    'antigravity_cli_oauth',
+    `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`
+  );
+
+  if (popup) {
+    antigravityPopupRef = popup;
+  }
+
+  return { success: Boolean(popup), popup };
+}
+
+export function closeAntigravityCliLoginPopup(): boolean {
+  let closed = false;
+  if (antigravityPopupRef) {
+    try {
+      if (!antigravityPopupRef.closed) {
+        antigravityPopupRef.close();
+        closed = true;
+      }
+    } catch {
+      // In case accessing .closed throws cross-origin DOMException, call .close() directly
+      try {
+        antigravityPopupRef.close();
+        closed = true;
+      } catch (err) {
+        console.warn('[CLI Auth] Could not close Antigravity popup window directly:', err);
+      }
+    }
+    antigravityPopupRef = null;
+  }
+  return closed;
 }
 
 export const openGeminiCliLoginPopup = openAntigravityCliLoginPopup;
+export const closeGeminiCliLoginPopup = closeAntigravityCliLoginPopup;
 
 export function openClaudeCliLoginPopup(
   mode: 'claudeai' | 'console' = 'console'
@@ -229,8 +274,11 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
     const left = window.screenX + (window.outerWidth - width) / 2;
     const top = window.screenY + (window.outerHeight - height) / 2;
 
+    const token = localStorage.getItem('token') || '';
+    const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
+
     const popup = window.open(
-      '/api/v1/auth/cli/codex/login',
+      `/api/v1/auth/cli/codex/login${tokenQuery}`,
       'codex_cli_oauth',
       `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`
     );

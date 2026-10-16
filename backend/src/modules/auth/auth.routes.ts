@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { authController } from './auth.controller.js';
 import { cliAuthController } from './cli-auth.controller.js';
+import { logger } from '../../utils/logger.util.js';
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   // Public Client Auth Config
@@ -43,7 +44,36 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // Platform Login & Account Linking
   app.post('/api/v1/auth/login', authController.login.bind(authController));
   app.get('/api/v1/auth/me', authController.getMe.bind(authController));
+  app.post('/api/v1/auth/profile', authController.syncProfile.bind(authController));
   app.post('/api/v1/auth/connect', authController.connectPlatform.bind(authController));
   app.post('/api/v1/auth/logout', authController.logout.bind(authController));
+
+  // Diagnostic Logging Control (Toggle file logging to test_suite/app_debug.log)
+  app.get('/api/v1/debug/logging', async (_req, reply) => {
+    return reply.status(200).send({
+      success: true,
+      data: {
+        enabled: logger.isFileLoggingEnabled(),
+        logFile: logger.getLogFilePath(),
+      },
+    });
+  });
+
+  app.post('/api/v1/debug/logging', async (req, reply) => {
+    const body = req.body as { enabled?: boolean; clear?: boolean };
+    if (typeof body?.enabled === 'boolean') {
+      logger.setFileLoggingEnabled(body.enabled);
+    }
+    if (body?.clear) {
+      logger.clearLogFile();
+    }
+    return reply.status(200).send({
+      success: true,
+      data: {
+        enabled: logger.isFileLoggingEnabled(),
+        logFile: logger.getLogFilePath(),
+      },
+    });
+  });
 }
 

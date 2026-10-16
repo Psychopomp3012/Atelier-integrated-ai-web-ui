@@ -28,6 +28,9 @@ Antigravity(Useful settings):
 2. Sandbox Mode: on | off
 3. Tool Permission: request-review | proceed-in-sandbox | always proceed | strict
 
+Current principle:
+"Every user turn spawns a new one-shot process"
+"Problem is that all clis has a different way of caching messages"
 
 Scenarios:
 potentially read their own ~/.gemini/oauth_creds.json inside the VM.
@@ -55,3 +58,9 @@ xdg-open backend/visualizations/index.html
 # Hosting
 ## Deploy the backend folder to Heroku
 git subtree push --prefix backend heroku main
+
+
+
+agy:
+agy is a Go terminal binary that uses a raw terminal reader and opens /dev/tty directly. When Node.js spawns it with standard anonymous pipes (stdio: ['pipe', 'pipe', 'pipe']), agy's terminal reader ignores anonymous pipes and blocks waiting on a real pseudo-terminal (PTY) until its 60-second internal timeout expires!
+- It allocates a pseudo-terminal (openpty), connects agy to the PTY slave, and bi-directionally bridges Node's pipe stdin/stdout into the PTY master.

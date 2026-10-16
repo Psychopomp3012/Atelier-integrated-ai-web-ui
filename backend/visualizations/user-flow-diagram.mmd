@@ -18,24 +18,30 @@
 }}%%
 flowchart TD
     subgraph Client["🖥️ User & Client Browser (React 19)"]
-        A([fa:fa-globe Open Atelier Web App]) --> B[fa:fa-adjust Auto-Detect Theme]
+        A([fa:fa-globe Open Atelier Web App]) --> B[fa:fa-adjust Auto-Detect OS Theme]
         B --> C{fa:fa-key Valid 7-Day JWT?}
         D[fa:fa-google Google OAuth Login] --> E[fa:fa-id-card Receive 7-Day JWT]
         E --> F[fa:fa-th-large Load Chat Dashboard]
         C -->|Yes / Active| F
         F --> G{fa:fa-link Subscription Linked?}
         H(fa:fa-shield Subscriptions Menu) --> I[fa:fa-user-check Authorize Provider]
-        I --> J[fa:fa-save Profile Token Saved]
+        I --> J[fa:fa-save Save Credential to Firestore]
         G -->|No| H
-        G -->|Yes| K[fa:fa-cube Select / Create VM]
+        G -->|Yes| K{fa:fa-cubes Sandbox Action?}
         J --> K
-        S[fa:fa-sliders Choose Model & Effort] --> T[fa:fa-paper-plane Dispatch Prompt]
-        Z[fa:fa-stream Stream SSE Tokens & Badges] --> AB([fa:fa-desktop Cloud Inspector Explorer])
+        K -->|Manage / Delete| KD[fa:fa-trash-alt Custom Red Delete Modal]
+        KD -->|Confirm| KDR[fa:fa-minus-circle Release Quota Slot in Firestore]
+        K -->|Attach Existing| KA[fa:fa-link Share Workspace with Active Chat]
+        K -->|Create New| KN[fa:fa-plus-circle Request MicroVM Allocation]
+        S[fa:fa-sliders Choose Model & Effort] --> T[fa:fa-paper-plane Dispatch User Prompt]
+        Z[fa:fa-stream Stream SSE Tokens & Steps] --> AB([fa:fa-desktop Cloud Inspector Explorer])
     end
 
     subgraph Cloud["☁️ Backend Orchestrator & E2B MicroVM"]
         C -->|No / Expired| D
-        K --> L{fa:fa-server Sandbox Active?}
+        KDR --> K
+        KA --> S
+        KN --> L{fa:fa-server Sandbox Active?}
         L -->|No / New| M[fa:fa-cloud Launch Firecracker VM]
         M --> N[fa:fa-microchip Allocate 1GB Swap]
         N --> O[fa:fa-lock Set agent-runner DAC Boundary]
@@ -44,13 +50,16 @@ flowchart TD
         L -->|Yes / Reconnect| R[fa:fa-play Resume MicroVM]
         Q --> S
         R --> S
-        T --> U{fa:fa-sync Linked Post-Boot?}
+        T --> TH[fa:fa-database Fetch History from Firestore]
+        TH --> TC[fa:fa-compress-arrows-alt Context Compactor: One-Shot Prompt Stitching]
+        TC --> U{fa:fa-sync Linked Post-Boot?}
         U -->|Yes / Hot-Swap| V[fa:fa-bolt Dynamic Live Credential Injection]
         U -->|No / Pre-Warmed| W[fa:fa-check-circle Pre-Flight Credential Verification]
-        V --> X[fa:fa-terminal Run Native CLI inside MicroVM]
+        V --> X[fa:fa-terminal Execute One-Shot CLI inside MicroVM]
         W --> X
         X --> Y{fa:fa-question-circle CLI Exit Code == 0?}
-        Y -->|Yes| Z
+        Y -->|Yes| FS[fa:fa-save Save Response Turn to Firestore]
+        FS --> Z
         Y -->|No / Auth Err| AA[fa:fa-exclamation-triangle Prompt Auth Relink or Diagnostic]
         AA --> Z
     end

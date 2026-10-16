@@ -30,16 +30,14 @@ export const UserMenu: React.FC<UserMenuProps> = ({
     return (
       <button
         onClick={onOpenAuthModal}
-        className="flex items-center gap-space-xs px-space-md py-1.5 rounded-lg bg-primary text-on-primary hover:bg-primary-fixed-dim font-label-md text-label-md font-semibold transition-all shadow-sm cursor-pointer"
+        className="flex items-center gap-1.5 px-2.5 sm:px-space-md py-1.5 rounded-lg bg-primary text-on-primary hover:bg-primary-fixed-dim font-label-md text-xs sm:text-label-md font-semibold transition-all shadow-sm cursor-pointer whitespace-nowrap shrink-0"
       >
         <span className="material-symbols-outlined text-[16px]">login</span>
-        <span>Sign in with Google</span>
+        <span className="hidden sm:inline">Sign in with Google</span>
+        <span className="sm:hidden">Sign In</span>
       </button>
     );
   }
-
-  const hasAnthropic = user.linkedPlatforms.some((p) => p.platform === 'anthropic' && p.hasValidSession);
-  const hasOpenAI = user.linkedPlatforms.some((p) => p.platform === 'openai' && p.hasValidSession);
 
   return (
     <div className="relative" ref={menuRef}>
@@ -53,15 +51,11 @@ export const UserMenu: React.FC<UserMenuProps> = ({
           <span className="font-label-md text-label-md text-on-surface font-semibold leading-none">
             {user.name}
           </span>
-          <div className="flex items-center gap-1 mt-0.5">
-            {hasAnthropic && (
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#F59E0B]" title="Anthropic Active" />
-            )}
-            {hasOpenAI && (
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#10A37F]" title="OpenAI Active" />
-            )}
-            <span className="font-code-sm text-[10px] text-outline">Dual AI</span>
-          </div>
+          {user.email && (
+            <span className="font-code-sm text-[10px] text-outline truncate max-w-[130px] mt-0.5">
+              {user.email}
+            </span>
+          )}
         </div>
       </button>
 
