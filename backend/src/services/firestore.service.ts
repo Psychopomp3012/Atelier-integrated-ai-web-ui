@@ -43,7 +43,13 @@ export class FirestoreBackendService {
         let certObj: any = null;
         if (serviceAccountEnv) {
           try {
-            const trimmed = serviceAccountEnv.trim();
+            let trimmed = serviceAccountEnv.trim();
+            if (
+              (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+              (trimmed.startsWith('"') && trimmed.endsWith('"'))
+            ) {
+              trimmed = trimmed.substring(1, trimmed.length - 1).trim();
+            }
             if (trimmed.startsWith('{')) {
               certObj = JSON.parse(trimmed);
             } else if (fs.existsSync(trimmed)) {
