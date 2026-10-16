@@ -24,6 +24,8 @@ auth.json
 oauth_creds.json
 credentials.json
 client_secret*.json
+*firebase-adminsdk*.json
+*-adminsdk-*.json
 google_accounts.json
 *-oauth-token
 *keyring-unavailable*
