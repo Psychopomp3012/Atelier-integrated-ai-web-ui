@@ -355,6 +355,8 @@ export interface ChatSession {
   model: ModelType;
   messageCount?: number;
   pagination?: PaginationMeta;
+  overwriteMessages?: boolean;
+  truncateAfterMessageId?: string;
 }
 
 export interface PaginatedMessagesResponse {

@@ -107,9 +107,39 @@ export class FirestoreBackendService {
 
   // --- Message Merging and Pagination Helpers ---
 
-  public mergeMessages(existing: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  public mergeMessages(
+    existing: ChatMessage[],
+    incoming: ChatMessage[],
+    options?: { overwrite?: boolean; truncateAfterMessageId?: string }
+  ): ChatMessage[] {
+    if (options?.overwrite) {
+      return Array.isArray(incoming) ? incoming : [];
+    }
+
     if (!existing || existing.length === 0) return Array.isArray(incoming) ? incoming : [];
     if (!incoming || incoming.length === 0) return Array.isArray(existing) ? existing : [];
+
+    let baseExisting = existing;
+    if (options?.truncateAfterMessageId) {
+      const cutIdx = existing.findIndex((m) => m && m.id === options.truncateAfterMessageId);
+      if (cutIdx >= 0) {
+        baseExisting = existing.slice(0, cutIdx + 1);
+      }
+    } else if (existing[0]?.id && incoming[0]?.id && existing[0].id === incoming[0].id) {
+      // If incoming starts from the very first message of the session (root message),
+      // any messages in existing that follow the last common message in incoming
+      // were deleted/pruned during an edit.
+      const incomingIdSet = new Set(incoming.map((m) => m.id).filter(Boolean));
+      let lastCommonIdxInExisting = -1;
+      for (let i = 0; i < existing.length; i++) {
+        if (incomingIdSet.has(existing[i].id)) {
+          lastCommonIdxInExisting = i;
+        }
+      }
+      if (lastCommonIdxInExisting >= 0 && lastCommonIdxInExisting < existing.length - 1) {
+        baseExisting = existing.slice(0, lastCommonIdxInExisting + 1);
+      }
+    }
 
     const incomingMap = new Map<string, ChatMessage>();
     for (const m of incoming) {
@@ -119,7 +149,7 @@ export class FirestoreBackendService {
     const result: ChatMessage[] = [];
     const seenIds = new Set<string>();
 
-    for (const m of existing) {
+    for (const m of baseExisting) {
       if (!m || !m.id) continue;
       if (incomingMap.has(m.id)) {
         result.push(incomingMap.get(m.id)!);
@@ -236,7 +266,11 @@ export class FirestoreBackendService {
 
     const mergedMessages = this.mergeMessages(
       existingMessages,
-      Array.isArray(session.messages) ? session.messages : []
+      Array.isArray(session.messages) ? session.messages : [],
+      {
+        overwrite: session.overwriteMessages,
+        truncateAfterMessageId: session.truncateAfterMessageId,
+      }
     );
 
     const cleanSession: ChatSession = {

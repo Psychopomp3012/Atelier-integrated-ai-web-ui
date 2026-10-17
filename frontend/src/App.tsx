@@ -131,15 +131,9 @@ export const App: React.FC = () => {
   });
 
   // Full-page initialization and post-sign-in loading screen
-  const [isPageLoading, setIsPageLoading] = useState<boolean>(() => {
-    try {
-      return Boolean(localStorage.getItem('auth_token'));
-    } catch {
-      return false;
-    }
-  });
+  const [isPageLoading, setIsPageLoading] = useState<boolean>(true);
   const [loadingMessage, setLoadingMessage] = useState('Initializing Atelier Workspace');
-  const [loadingSubMessage, setLoadingSubMessage] = useState('Connecting to cloud microVMs & models...');
+  const [loadingSubMessage, setLoadingSubMessage] = useState('Verifying secure session & environment...');
 
   // Paginated chat history state
   const [hasMoreEarlierMessages, setHasMoreEarlierMessages] = useState<boolean>(false);
@@ -514,6 +508,7 @@ export const App: React.FC = () => {
   const inFlightQuotaPromiseRef = useRef<Promise<void> | null>(null);
   const authMeInFlightRef = useRef<Promise<any> | null>(null);
   const authMeCompletedRef = useRef<boolean>(false);
+  const initialLoadCompletedRef = useRef<boolean>(false);
 
   const fetchGeminiQuota = async (sessId?: string, force = false) => {
     const now = Date.now();
@@ -828,7 +823,10 @@ export const App: React.FC = () => {
     const token = localStorage.getItem('auth_token');
     if (!token) {
       performUserCleanup();
-      setIsPageLoading(false);
+      setTimeout(() => {
+        setIsPageLoading(false);
+        initialLoadCompletedRef.current = true;
+      }, 350);
       return;
     }
 
@@ -837,12 +835,13 @@ export const App: React.FC = () => {
     }
 
     setLoadingMessage('Initializing Atelier Workspace');
-    setLoadingSubMessage('Connecting to cloud microVMs & models...');
+    setLoadingSubMessage('Verifying cloud credentials & session...');
 
-    // Safety timeout ensures loading screen never blocks the user indefinitely if backend takes longer
+    // Fallback safety timeout ensures loading screen never blocks the user indefinitely (e.g. slow network)
     const safetyTimeout = setTimeout(() => {
       setIsPageLoading(false);
-    }, 4000);
+      initialLoadCompletedRef.current = true;
+    }, 7000);
 
     authMeInFlightRef.current = apiFetch('/api/v1/auth/me')
       .then((res) => {
@@ -861,21 +860,27 @@ export const App: React.FC = () => {
               localStorage.setItem('auth_token', refreshed.token);
             }
           });
+          // Do NOT dismiss loading screen yet!
+          // We wait until sidebar sessions & active session messages are fetched.
         } else {
           performUserCleanup();
+          setTimeout(() => {
+            setIsPageLoading(false);
+            initialLoadCompletedRef.current = true;
+            clearTimeout(safetyTimeout);
+          }, 350);
         }
       })
-      .catch((err: any) => {
-        if (err?.message === 'Unauthenticated') {
-          performUserCleanup();
-        }
+      .catch(() => {
+        performUserCleanup();
+        setTimeout(() => {
+          setIsPageLoading(false);
+          initialLoadCompletedRef.current = true;
+          clearTimeout(safetyTimeout);
+        }, 350);
       })
       .finally(() => {
         authMeInFlightRef.current = null;
-        setTimeout(() => {
-          setIsPageLoading(false);
-          clearTimeout(safetyTimeout);
-        }, 350);
       });
 
     return () => clearTimeout(safetyTimeout);
@@ -958,7 +963,9 @@ export const App: React.FC = () => {
       setRemainingMessageCount(0);
     }
 
-    syncSessions().then((merged) => {
+    setLoadingSubMessage('Loading your chat sessions & workspace...');
+
+    syncSessions().then(async (merged) => {
       // Guard: if user logged out or changed in the meantime, discard!
       if (!currentUserRef.current?.id || currentUserRef.current.id !== currentUser.id) return;
       if (!merged || merged.length === 0) {
@@ -967,6 +974,10 @@ export const App: React.FC = () => {
         setCurrentSessionId(null);
         setHasMoreEarlierMessages(false);
         setRemainingMessageCount(0);
+        if (!initialLoadCompletedRef.current) {
+          initialLoadCompletedRef.current = true;
+          setTimeout(() => setIsPageLoading(false), 300);
+        }
         return;
       }
       try {
@@ -977,7 +988,9 @@ export const App: React.FC = () => {
           if (target.model && target.model !== 'none') {
             setSelectedModel(target.model);
           }
-          sessionSyncService.getSession(target.id, { limit: 25 }).then((data) => {
+          setLoadingSubMessage('Fetching messages for active session...');
+          try {
+            const data = await sessionSyncService.getSession(target.id, { limit: 25 });
             if (data && currentUserRef.current?.id === currentUser.id) {
               setMessages(data.messages || []);
               if (data.pagination) {
@@ -988,9 +1001,18 @@ export const App: React.FC = () => {
                 setRemainingMessageCount(0);
               }
             }
-          }).catch(() => {});
+          } catch (err) {
+            console.error('Failed to fetch session messages during initial load', err);
+          }
         }
-      } catch {}
+      } catch (err) {
+        console.error('Error during initial session target hydration', err);
+      } finally {
+        if (!initialLoadCompletedRef.current) {
+          initialLoadCompletedRef.current = true;
+          setTimeout(() => setIsPageLoading(false), 300);
+        }
+      }
     });
   }, [currentUser?.id, syncSessions]);
 
@@ -1325,7 +1347,7 @@ export const App: React.FC = () => {
     setEditMessageContent('');
 
     // Truncate: keep all messages up to (and including) the edited one, updating its content.
-    // All subsequent assistant turns are discarded.
+    // All subsequent assistant turns and subsequent user prompts are discarded.
     const msgIdx = messages.findIndex((m) => m.id === msgId);
     if (msgIdx === -1) return;
 
@@ -1337,14 +1359,44 @@ export const App: React.FC = () => {
     const truncatedHistory = [...messages.slice(0, msgIdx), updatedUserMsg];
     setMessages(truncatedHistory);
 
+    const activeSessionId = currentSessionId || `sess_${Date.now()}`;
+    if (!currentSessionId) {
+      setCurrentSessionId(activeSessionId);
+    }
+
+    // Immediately update sessions state and storage so the truncated state is immediately reflected
+    setSessions((prev) => {
+      const idx = prev.findIndex((s) => s.id === activeSessionId);
+      if (idx >= 0) {
+        const updated = [...prev];
+        const targetSession: ChatSession = {
+          ...updated[idx],
+          updatedAt: new Date().toISOString(),
+          messages: truncatedHistory,
+          messageCount: truncatedHistory.length,
+          model: selectedModel,
+          overwriteMessages: !hasMoreEarlierMessages,
+          truncateAfterMessageId: msgId,
+        };
+        updated[idx] = targetSession;
+        sessionSyncService.saveSession(targetSession, currentUser?.id).catch(() => {});
+        return updated;
+      }
+      return prev;
+    });
+
     // Re-send using the truncated history (no extra user message appended)
-    await handleSendMessage(newPrompt, truncatedHistory);
+    await handleSendMessage(newPrompt, truncatedHistory, undefined, {
+      isTruncated: true,
+      truncateAfterMessageId: msgId,
+    });
   };
 
   const handleSendMessage = async (
     promptText: string,
     customHistory?: ChatMessage[],
-    attachedFiles?: AttachedFile[]
+    attachedFiles?: AttachedFile[],
+    editOptions?: { isTruncated?: boolean; truncateAfterMessageId?: string }
   ) => {
     if (!currentUser) {
       setIsAuthModalOpen(true);
@@ -1423,6 +1475,9 @@ export const App: React.FC = () => {
 
     const syncSession = (msgs: ChatMessage[]) => {
       const sessionTitle = promptText.length > 36 ? promptText.slice(0, 36) + '...' : promptText;
+      const isTruncated = Boolean(editOptions?.isTruncated || customHistory);
+      const truncateAfterId = editOptions?.truncateAfterMessageId;
+
       setSessions((prev) => {
         const idx = prev.findIndex((s) => s.id === activeSessionId);
         let updated: ChatSession[];
@@ -1433,7 +1488,10 @@ export const App: React.FC = () => {
             ...updated[idx],
             updatedAt: new Date().toISOString(),
             messages: msgs,
+            messageCount: msgs.length,
             model: selectedModel,
+            overwriteMessages: isTruncated || !hasMoreEarlierMessages,
+            truncateAfterMessageId: truncateAfterId,
           };
           updated[idx] = targetSession;
         } else {
@@ -1443,7 +1501,10 @@ export const App: React.FC = () => {
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
             messages: msgs,
+            messageCount: msgs.length,
             model: selectedModel,
+            overwriteMessages: isTruncated || !hasMoreEarlierMessages,
+            truncateAfterMessageId: truncateAfterId,
           };
           updated = [targetSession, ...prev];
         }
@@ -1841,7 +1902,7 @@ export const App: React.FC = () => {
 
   return (
     <div className="bg-background font-body-md text-body-md text-on-surface antialiased min-h-screen transition-colors duration-300">
-      {/* Full-Page Initial & Post-Sign-In Loading Screen with 3D Rotating Square */}
+      {/* Full-Page Initial & Post-Sign-In Loading Screen with 3D Rotating Isometric Cube */}
       {isPageLoading && (
         <LoadingScreen
           message={loadingMessage}

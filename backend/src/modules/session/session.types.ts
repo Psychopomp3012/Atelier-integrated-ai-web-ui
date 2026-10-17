@@ -54,6 +54,8 @@ export interface ChatSession {
   model: string;
   messageCount?: number;
   pagination?: PaginationMeta;
+  overwriteMessages?: boolean;
+  truncateAfterMessageId?: string;
 }
 
 export interface SessionSummary {

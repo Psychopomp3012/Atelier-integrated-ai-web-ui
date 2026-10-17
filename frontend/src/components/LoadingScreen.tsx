@@ -18,20 +18,31 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({
       {/* Background ambient decorative glow */}
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 rounded-full bg-gradient-to-tr from-primary/20 via-sky-500/15 to-purple-500/20 blur-3xl pointer-events-none animate-pulse-glow" />
 
-      {/* Center 3D rotating square container */}
-      <div className="relative flex items-center justify-center w-28 h-28 mb-8">
-        {/* Outer glowing aura */}
-        <div className="absolute inset-0 rounded-2xl bg-gradient-to-tr from-sky-500/30 to-purple-600/30 blur-lg animate-pulse" />
-
-        {/* Outer rotating 3D square */}
-        <div className="w-20 h-20 rounded-2xl border-2 border-transparent bg-gradient-to-br from-sky-400 via-indigo-500 to-purple-500 p-[2px] animate-rotate-3d-square shadow-[0_0_25px_rgba(56,189,248,0.35)]">
-          <div className="w-full h-full rounded-[14px] bg-[#0d1322]/90 backdrop-blur-sm flex items-center justify-center">
-            {/* Inner counter-rotating square */}
-            <div className="w-10 h-10 rounded-lg border border-sky-400/60 bg-sky-500/10 animate-rotate-3d-inner flex items-center justify-center shadow-[inset_0_0_10px_rgba(56,189,248,0.2)]">
-              {/* Core pulsing accent dot */}
-              <div className="w-2.5 h-2.5 rounded-sm bg-gradient-to-tr from-sky-400 to-indigo-300 animate-pulse shadow-[0_0_8px_#38bdf8]" />
+      {/* Center 3D rotating isometric cube container */}
+      <div className="relative flex flex-col items-center justify-center mb-6">
+        <div className="cube-viewport">
+          <div className="cube-3d">
+            <div className="cube-face cube-face-front">
+              <div className="cube-facet-dot" />
             </div>
+            <div className="cube-face cube-face-back">
+              <div className="cube-facet-dot" />
+            </div>
+            <div className="cube-face cube-face-right">
+              <div className="cube-facet-dot" />
+            </div>
+            <div className="cube-face cube-face-left">
+              <div className="cube-facet-dot" />
+            </div>
+            <div className="cube-face cube-face-top">
+              <div className="cube-facet-dot" />
+            </div>
+            <div className="cube-face cube-face-bottom">
+              <div className="cube-facet-dot" />
+            </div>
+            <div className="cube-core" />
           </div>
+          <div className="cube-shadow" />
         </div>
       </div>
 
