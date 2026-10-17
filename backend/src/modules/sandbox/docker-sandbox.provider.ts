@@ -10,6 +10,7 @@ import type {
   SandboxCliExecutionRequest,
   SandboxCliExecutionResponse,
   SandboxFileNode,
+  SandboxUsageInfo,
   TerminalLogEntry,
 } from '../../types/sandbox.types.js';
 import { generateId } from '../../utils/id.util.js';
@@ -803,15 +804,7 @@ console.log(JSON.stringify(getTree('/workspace')));
   public getSandboxUsage(userId?: string): {
     used: number;
     max: number;
-    sandboxes: Array<{
-      sandboxId: string;
-      name: string;
-      sessionId?: string;
-      lastActiveAt: number;
-      createdAt: number;
-      attachedSessionCount: number;
-      attachedSessionIds: string[];
-    }>;
+    sandboxes: SandboxUsageInfo[];
   } {
     if (!userId || userId === 'default_user' || userId.trim() === '') {
       return {
@@ -835,6 +828,8 @@ console.log(JSON.stringify(getTree('/workspace')));
       createdAt: Date.now(),
       attachedSessionCount: sessions.length,
       attachedSessionIds: sessions,
+      lastUpdateCheckAt: Date.now(),
+      isUpdating: false,
     }));
 
     return {

@@ -17,6 +17,8 @@ interface SandboxUsageData {
     createdAt: number;
     attachedSessionCount: number;
     attachedSessionIds: string[];
+    lastUpdateCheckAt?: number;
+    isUpdating?: boolean;
   }>;
 }
 
@@ -84,6 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [sandboxPendingDelete, setSandboxPendingDelete] = useState<SandboxPendingDelete | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const sandboxRef = useRef<HTMLDivElement>(null);
+  const mobileSandboxModalRef = useRef<HTMLDivElement>(null);
 
   const validSessionSet = useMemo(() => new Set(validSessionIds || []), [validSessionIds]);
   const sandboxUsage = propSandboxUsage !== undefined ? propSandboxUsage : internalSandboxUsage;
@@ -120,10 +123,16 @@ export const Header: React.FC<HeaderProps> = ({
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (popoverRef.current && !popoverRef.current.contains(target)) {
         setShowLimitsPopover(false);
       }
-      if (sandboxRef.current && !sandboxRef.current.contains(e.target as Node)) {
+      if (
+        sandboxRef.current &&
+        !sandboxRef.current.contains(target) &&
+        (!mobileSandboxModalRef.current || !mobileSandboxModalRef.current.contains(target)) &&
+        !(target as HTMLElement)?.closest?.('[role="dialog"]')
+      ) {
         setShowSandboxDropdown(false);
       }
     };
@@ -601,6 +610,8 @@ export const Header: React.FC<HeaderProps> = ({
                       return (
                         <div
                           key={sb.sandboxId}
+                          role="button"
+                          tabIndex={0}
                           onClick={() => {
                             if (!isCurrent && !isSwitching) {
                               handleSwitchSandbox(sb.sandboxId);
@@ -608,10 +619,20 @@ export const Header: React.FC<HeaderProps> = ({
                               setShowSandboxDropdown(false);
                             }
                           }}
-                          className={`p-2.5 rounded-lg border transition-all ${
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              if (!isCurrent && !isSwitching) {
+                                handleSwitchSandbox(sb.sandboxId);
+                              } else if (isCurrent) {
+                                setShowSandboxDropdown(false);
+                              }
+                            }
+                          }}
+                          className={`p-2.5 rounded-lg border transition-all select-none active:scale-[0.99] ${
                             isCurrent
                               ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
-                              : 'bg-surface-container-low hover:bg-surface-container hover:border-primary/40 border-outline-variant/20 cursor-pointer'
+                              : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
                           }`}
                           title={isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
                         >
@@ -629,6 +650,12 @@ export const Header: React.FC<HeaderProps> = ({
                               </span>
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
+                              {sb.isUpdating && (
+                                <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/30 px-1.5 py-0.5 rounded font-medium flex items-center gap-1" title="24h maintenance in progress: updating sandbox CLIs">
+                                  <span className="material-symbols-outlined text-[11px] animate-spin">sync</span>
+                                  Updating CLIs
+                                </span>
+                              )}
                               {isCurrent && (
                                 <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
                                   Active Chat
@@ -727,6 +754,10 @@ export const Header: React.FC<HeaderProps> = ({
                   }}
                 >
                   <div
+                    ref={mobileSandboxModalRef}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="cloud-sandboxes-title"
                     className="w-full max-w-sm bg-surface-container-lowest border border-outline-variant/30 rounded-2xl shadow-2xl p-4 animate-in fade-in zoom-in-95 duration-150 max-h-[85vh] flex flex-col"
                     onClick={(e) => e.stopPropagation()}
                   >
@@ -735,7 +766,7 @@ export const Header: React.FC<HeaderProps> = ({
                       <div className="flex items-center gap-2">
                         <span className="material-symbols-outlined text-[20px] text-primary">cloud_queue</span>
                         <div>
-                          <h3 className="text-sm font-bold text-on-surface tracking-wide">Cloud Sandboxes</h3>
+                          <h3 id="cloud-sandboxes-title" className="text-sm font-bold text-on-surface tracking-wide">Cloud Sandboxes</h3>
                           <p className="text-[10px] text-outline">Share workspaces across multiple chat sessions</p>
                         </div>
                       </div>
@@ -833,6 +864,8 @@ export const Header: React.FC<HeaderProps> = ({
                           return (
                             <div
                               key={sb.sandboxId}
+                              role="button"
+                              tabIndex={0}
                               onClick={() => {
                                 if (!isCurrent && !isSwitching) {
                                   handleSwitchSandbox(sb.sandboxId);
@@ -840,10 +873,20 @@ export const Header: React.FC<HeaderProps> = ({
                                   setShowSandboxDropdown(false);
                                 }
                               }}
-                              className={`p-2.5 rounded-lg border transition-all ${
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  if (!isCurrent && !isSwitching) {
+                                    handleSwitchSandbox(sb.sandboxId);
+                                  } else if (isCurrent) {
+                                    setShowSandboxDropdown(false);
+                                  }
+                                }
+                              }}
+                              className={`p-2.5 rounded-lg border transition-all select-none active:scale-[0.99] ${
                                 isCurrent
                                   ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
-                                  : 'bg-surface-container-low hover:bg-surface-container hover:border-primary/40 border-outline-variant/20 cursor-pointer'
+                                  : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
                               }`}
                               title={isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
                             >
@@ -861,6 +904,12 @@ export const Header: React.FC<HeaderProps> = ({
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-1 shrink-0">
+                                  {sb.isUpdating && (
+                                    <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/30 px-1.5 py-0.5 rounded font-medium flex items-center gap-1" title="24h maintenance in progress: updating sandbox CLIs">
+                                      <span className="material-symbols-outlined text-[11px] animate-spin">sync</span>
+                                      Updating CLIs
+                                    </span>
+                                  )}
                                   {isCurrent && (
                                     <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
                                       Active Chat

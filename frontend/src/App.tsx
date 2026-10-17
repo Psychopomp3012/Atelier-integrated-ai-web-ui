@@ -189,6 +189,8 @@ export const App: React.FC = () => {
       createdAt: number;
       attachedSessionCount: number;
       attachedSessionIds: string[];
+      lastUpdateCheckAt?: number;
+      isUpdating?: boolean;
     }>;
   } | null>(null);
   const [isStartingSandbox, setIsStartingSandbox] = useState(false);

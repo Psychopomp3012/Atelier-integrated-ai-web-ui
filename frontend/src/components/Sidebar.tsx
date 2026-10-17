@@ -37,9 +37,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Sidebar Drawer Container */}
       <aside
-        className={`fixed left-0 top-0 bottom-0 w-[260px] bg-surface-container-lowest border-r border-outline-variant/30 flex flex-col z-50 transition-transform duration-300 ease-in-out ${
-          isOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
-        }`}
+        className={`fixed left-0 top-0 bottom-0 w-[260px] bg-surface-container-lowest border-r border-outline-variant/30 flex flex-col z-50 transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
+          }`}
       >
         {/* Brand Header */}
         <div className="h-14 px-margin flex items-center justify-between border-b border-outline-variant/20">
@@ -108,9 +107,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 title={isSyncing ? 'Syncing cloud sessions...' : 'Reload cloud sessions'}
               >
                 <span
-                  className={`material-symbols-outlined text-[13px] ${
-                    isSyncing ? 'text-primary animate-spin' : 'hover:scale-110'
-                  }`}
+                  className={`material-symbols-outlined text-[13px] ${isSyncing ? 'text-primary animate-spin' : 'hover:scale-110'
+                    }`}
                 >
                   sync
                 </span>
@@ -157,11 +155,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 return (
                   <div
                     key={session.id}
-                    className={`group relative flex items-center justify-between rounded-lg transition-colors ${
-                      isActive
-                        ? 'bg-surface-container text-on-surface border-l-2 border-primary font-medium'
-                        : 'text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface'
-                    }`}
+                    className={`group relative flex items-center justify-between rounded-lg transition-colors ${isActive
+                      ? 'bg-surface-container text-on-surface border-l-2 border-primary font-medium'
+                      : 'text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface'
+                      }`}
                   >
                     <button
                       onClick={() => {
@@ -172,9 +169,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       title={session.title}
                     >
                       <span
-                        className={`material-symbols-outlined text-[15px] shrink-0 ${
-                          isActive ? 'text-primary' : 'text-outline'
-                        }`}
+                        className={`material-symbols-outlined text-[15px] shrink-0 ${isActive ? 'text-primary' : 'text-outline'
+                          }`}
                       >
                         chat_bubble
                       </span>
@@ -207,7 +203,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               Atelier Studio
             </span>
             <div className="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/25 text-primary text-[10px] font-mono font-semibold tracking-wider shadow-[0_0_8px_rgba(99,102,241,0.15)] group-hover:shadow-[0_0_12px_rgba(99,102,241,0.3)] transition-all">
-              v0.01
+              v0.0.2
             </div>
           </div>
         </div>

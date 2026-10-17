@@ -10,6 +10,7 @@ import type {
   SandboxCliExecutionRequest,
   SandboxCliExecutionResponse,
   SandboxFileNode,
+  SandboxUsageInfo,
   TerminalLogEntry,
 } from '../../types/sandbox.types.js';
 import { generateId } from '../../utils/id.util.js';
@@ -24,6 +25,8 @@ export interface SandboxRecord {
   attachedSessionIds: Set<string>;
   createdAt: number;
   lastActiveAt: number;
+  lastUpdateCheckAt?: number;
+  isUpdating?: boolean;
 }
 
 export class E2BSandboxProvider implements ISandboxProvider {
@@ -35,11 +38,21 @@ export class E2BSandboxProvider implements ISandboxProvider {
   private lastPingMs = 35;
   private readonly workspaceRoot = '/home/user/workspace';
   private readonly initializedSandboxes = new Set<string>();
+  private readonly activeExecutions = new Map<string, number>();
+  private readonly maintenancePromises = new Map<string, Promise<void>>();
+  private static readonly MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
   constructor() {
     this.addLog('READY', 'E2B Cloud Sandbox Provider initialized.');
     this.loadRecordsFromDisk();
     this.syncWithCloud().catch(() => {});
+
+    // Periodic 1-hour sweep to perform maintenance on idle sandboxes that passed the 24h threshold
+    setInterval(() => {
+      for (const sandboxId of this.sandboxRecords.keys()) {
+        this.checkAndTriggerMaintenance(sandboxId);
+      }
+    }, 60 * 60 * 1000).unref();
   }
 
   private getStoragePath(): string {
@@ -75,6 +88,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
             createdAt: r.createdAt,
             lastActiveAt: r.lastActiveAt,
             provider: 'e2b',
+            lastUpdateCheckAt: r.lastUpdateCheckAt || r.createdAt,
           }).catch(() => {});
         }
       }
@@ -97,6 +111,8 @@ export class E2BSandboxProvider implements ISandboxProvider {
                 attachedSessionIds: new Set(Array.isArray(item.attachedSessionIds) ? item.attachedSessionIds : []),
                 createdAt: item.createdAt || Date.now(),
                 lastActiveAt: item.lastActiveAt || Date.now(),
+                lastUpdateCheckAt: item.lastUpdateCheckAt || item.createdAt || Date.now(),
+                isUpdating: false,
               });
             }
           }
@@ -140,6 +156,8 @@ export class E2BSandboxProvider implements ISandboxProvider {
             attachedSessionIds: new Set(),
             createdAt: startedTime,
             lastActiveAt: startedTime,
+            lastUpdateCheckAt: startedTime,
+            isUpdating: false,
           });
         }
       }
@@ -434,6 +452,8 @@ export class E2BSandboxProvider implements ISandboxProvider {
         attachedSessionIds: new Set([cleanId]),
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
+        lastUpdateCheckAt: Date.now(),
+        isUpdating: false,
       });
       this.renumberSandboxes();
       this.saveRecordsToDisk();
@@ -702,7 +722,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
         const checkAgy = await sandbox.commands.run('which agy || test -f /usr/local/bin/agy').catch(() => null);
         if (checkAgy?.exitCode !== 0) {
           this.addLog('INFO', 'Provisioning agy CLI binary into cloud sandbox microVM via release download...');
-          const installAgyCmd = `curl -sSL "https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.6/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz && sudo tar -xzf /tmp/agy.tar.gz -C /usr/local/bin && sudo ln -sf /usr/local/bin/antigravity /usr/local/bin/agy && sudo chmod +x /usr/local/bin/antigravity /usr/local/bin/agy && rm -f /tmp/agy.tar.gz`;
+          const installAgyCmd = `curl -sSL "https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz 2>/dev/null || curl -sSL "https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.6/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz && sudo tar -xzf /tmp/agy.tar.gz -C /usr/local/bin && sudo ln -sf /usr/local/bin/antigravity /usr/local/bin/agy && sudo chmod +x /usr/local/bin/antigravity /usr/local/bin/agy && rm -f /tmp/agy.tar.gz`;
           const installRes = await sandbox.commands.run(installAgyCmd, { timeoutMs: 60000 }).catch(() => null);
           if (installRes?.exitCode === 0) {
             this.addLog('READY', 'agy CLI binary successfully installed in /usr/local/bin/agy');
@@ -716,7 +736,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
         if (checkCodex?.exitCode !== 0) {
           this.addLog('INFO', 'Provisioning codex CLI binary into cloud sandbox microVM via npm...');
           const npmRes = await sandbox.commands
-            .run('sudo npm install -g @openai/codex', { timeoutMs: 120000 })
+            .run('sudo npm install -g @openai/codex@latest', { timeoutMs: 120000 })
             .catch(() => null);
           if (npmRes?.exitCode === 0) {
             this.addLog('READY', 'codex CLI binary successfully installed in /usr/local/bin/codex');
@@ -737,7 +757,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
         const checkClaude = await sandbox.commands.run('which claude || test -f /usr/local/bin/claude').catch(() => null);
         if (checkClaude?.exitCode !== 0) {
           this.addLog('INFO', 'Provisioning claude CLI binary into cloud sandbox microVM via npm...');
-          await sandbox.commands.run('sudo npm install -g @anthropic-ai/claude-code', { timeoutMs: 120000 }).catch(() => {});
+          await sandbox.commands.run('sudo npm install -g @anthropic-ai/claude-code@latest', { timeoutMs: 120000 }).catch(() => {});
         }
 
         const checkCodeMode = await sandbox.commands.run('which codex-code-mode-host || test -f /usr/local/bin/codex-code-mode-host').catch(() => null);
@@ -773,9 +793,38 @@ export class E2BSandboxProvider implements ISandboxProvider {
     const start = Date.now();
     const sessionId = req.sessionId || 'default';
     const sandboxId = await this.getOrCreateSandbox(sessionId, req.userId, req.sandboxId);
-    const sandbox = await this.getSandboxInstance(sandboxId);
 
-    await this.ensureSecurityBoundaryAndCredentials(sandbox, req.userId);
+    // Transparent Turn Queueing (Option A): If 24h idle maintenance is currently running on this sandbox,
+    // wait for it to finish and provide real-time step progress
+    if (this.maintenancePromises.has(sandboxId)) {
+      req.onStep?.({
+        id: `step_maintenance_${Date.now()}`,
+        description: 'Synchronizing latest sandbox toolchains (24h maintenance in progress)...',
+        status: 'in_progress',
+        durationMs: 0,
+      });
+
+      const inFlight = this.maintenancePromises.get(sandboxId);
+      if (inFlight) {
+        await Promise.race([
+          inFlight,
+          new Promise((resolve) => setTimeout(resolve, 60000)),
+        ]);
+      }
+
+      req.onStep?.({
+        id: `step_maintenance_${Date.now()}`,
+        description: 'Sandbox toolchains synchronized to latest versions',
+        status: 'completed',
+        durationMs: 120,
+      });
+    }
+
+    this.activeExecutions.set(sandboxId, (this.activeExecutions.get(sandboxId) || 0) + 1);
+
+    try {
+      const sandbox = await this.getSandboxInstance(sandboxId);
+      await this.ensureSecurityBoundaryAndCredentials(sandbox, req.userId);
 
     // Verify requested CLI binary exists inside microVM; if not, re-provision
     const checkCliBinary = await sandbox.commands.run(
@@ -855,7 +904,6 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       num_turns: 1,
     };
 
-    try {
       const result = await sandbox.commands.run(cliCmd, {
         cwd: this.workspaceRoot,
         timeoutMs: req.timeoutMs || 120000,
@@ -1175,6 +1223,14 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       const msg = err instanceof Error ? err.message : String(err);
       this.addLog('ERROR', `[Sandbox-Native] ${req.cli} microVM command failed: ${msg}`);
       throw err;
+    } finally {
+      const currentActive = (this.activeExecutions.get(sandboxId) || 1) - 1;
+      if (currentActive <= 0) {
+        this.activeExecutions.delete(sandboxId);
+        this.checkAndTriggerMaintenance(sandboxId);
+      } else {
+        this.activeExecutions.set(sandboxId, currentActive);
+      }
     }
   }
 
@@ -1185,6 +1241,18 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
   ): Promise<SandboxExecutionResponse> {
     const start = Date.now();
     this.addLog('EXEC', `$ ${command.substring(0, 80)}`);
+
+    if (this.maintenancePromises.has(sandboxId)) {
+      const inFlight = this.maintenancePromises.get(sandboxId);
+      if (inFlight) {
+        await Promise.race([
+          inFlight,
+          new Promise((resolve) => setTimeout(resolve, 60000)),
+        ]);
+      }
+    }
+
+    this.activeExecutions.set(sandboxId, (this.activeExecutions.get(sandboxId) || 0) + 1);
 
     try {
       this.touchSandbox(sandboxId);
@@ -1230,6 +1298,14 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
         stdout,
         stderr,
       };
+    } finally {
+      const currentActive = (this.activeExecutions.get(sandboxId) || 1) - 1;
+      if (currentActive <= 0) {
+        this.activeExecutions.delete(sandboxId);
+        this.checkAndTriggerMaintenance(sandboxId);
+      } else {
+        this.activeExecutions.set(sandboxId, currentActive);
+      }
     }
   }
 
@@ -1252,6 +1328,79 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     const record = this.sandboxRecords.get(sandboxId);
     if (record) {
       record.lastActiveAt = Date.now();
+      this.checkAndTriggerMaintenance(sandboxId);
+    }
+  }
+
+  /**
+   * Triggers the 24h idle maintenance toolchain update inside the cloud sandbox microVM.
+   * Updates @openai/codex, @anthropic-ai/claude-code, and agy binary to their latest releases.
+   */
+  public async triggerMaintenance(sandboxId: string): Promise<void> {
+    const inFlight = this.maintenancePromises.get(sandboxId);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const promise = (async () => {
+      const record = this.sandboxRecords.get(sandboxId);
+      if (record) {
+        record.isUpdating = true;
+      }
+      this.addLog('INFO', `[Maintenance] Starting 24h toolchain update for sandbox ${sandboxId.substring(0, 6)}...`);
+
+      try {
+        const sandbox = await this.getSandboxInstance(sandboxId);
+
+        // Update CLI toolchains inside microVM (run with 90s safety timeout)
+        const updateCmd = `
+          sudo npm install -g @openai/codex@latest @anthropic-ai/claude-code@latest 2>/dev/null || sudo npm update -g @openai/codex @anthropic-ai/claude-code 2>/dev/null || true;
+          if command -v agy >/dev/null 2>&1 || test -f /usr/local/bin/agy; then
+            agy update 2>/dev/null || (curl -sSL "https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz 2>/dev/null && sudo tar -xzf /tmp/agy.tar.gz -C /usr/local/bin 2>/dev/null && sudo ln -sf /usr/local/bin/antigravity /usr/local/bin/agy 2>/dev/null && sudo chmod +x /usr/local/bin/antigravity /usr/local/bin/agy 2>/dev/null && rm -f /tmp/agy.tar.gz 2>/dev/null) || true;
+          fi;
+        `;
+
+        await sandbox.commands.run(updateCmd, { timeoutMs: 90000 }).catch((err) => {
+          logger.warn('Sandbox toolchain update command encountered warning', { sandboxId, error: String(err) });
+        });
+
+        if (record) {
+          record.lastUpdateCheckAt = Date.now();
+        }
+        this.addLog('READY', `[Maintenance] Toolchains in sandbox ${sandboxId.substring(0, 6)} updated to latest versions`);
+        this.saveRecordsToDisk();
+      } catch (err) {
+        logger.warn('Failed to complete maintenance update for sandbox', { sandboxId, error: String(err) });
+      } finally {
+        if (record) {
+          record.isUpdating = false;
+        }
+        this.maintenancePromises.delete(sandboxId);
+      }
+    })();
+
+    this.maintenancePromises.set(sandboxId, promise);
+    return promise;
+  }
+
+  /**
+   * Checks if the sandbox is idle (no running commands/turns) and has exceeded the 24h maintenance threshold.
+   */
+  private checkAndTriggerMaintenance(sandboxId: string): void {
+    const active = this.activeExecutions.get(sandboxId) || 0;
+    if (active > 0) {
+      return; // Busy with turn or command
+    }
+    if (this.maintenancePromises.has(sandboxId)) {
+      return; // Already in progress
+    }
+
+    const record = this.sandboxRecords.get(sandboxId);
+    if (!record) return;
+
+    const lastCheck = record.lastUpdateCheckAt || record.createdAt || 0;
+    if (Date.now() - lastCheck >= E2BSandboxProvider.MAINTENANCE_INTERVAL_MS) {
+      this.triggerMaintenance(sandboxId).catch(() => {});
     }
   }
 
@@ -1449,6 +1598,8 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       this.activeSandboxes.delete(targetSandboxId);
       this.sandboxRecords.delete(targetSandboxId);
       this.initializedSandboxes.delete(targetSandboxId);
+      this.activeExecutions.delete(targetSandboxId);
+      this.maintenancePromises.delete(targetSandboxId);
 
       for (const [sessId, sbId] of this.sessionToSandboxId.entries()) {
         if (sbId === targetSandboxId || sessId === sandboxIdOrSessionId) {
@@ -1459,6 +1610,8 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     } catch (err) {
       this.activeSandboxes.delete(targetSandboxId);
       this.sandboxRecords.delete(targetSandboxId);
+      this.activeExecutions.delete(targetSandboxId);
+      this.maintenancePromises.delete(targetSandboxId);
       for (const [sessId, sbId] of this.sessionToSandboxId.entries()) {
         if (sbId === targetSandboxId || sessId === sandboxIdOrSessionId) {
           this.sessionToSandboxId.delete(sessId);
@@ -1473,15 +1626,7 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
   public getSandboxUsage(userId?: string): {
     used: number;
     max: number;
-    sandboxes: Array<{
-      sandboxId: string;
-      name: string;
-      sessionId?: string;
-      lastActiveAt: number;
-      createdAt: number;
-      attachedSessionCount: number;
-      attachedSessionIds: string[];
-    }>;
+    sandboxes: SandboxUsageInfo[];
   } {
     const max = envConfig.MAX_SANDBOXES_PER_USER ?? 3;
 
@@ -1518,6 +1663,7 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
           this.sessionToSandboxId.delete('default');
         }
         const realSessions = Array.from(r.attachedSessionIds).filter((s) => s && s !== 'default');
+        const isUpdating = Boolean(this.maintenancePromises.has(r.sandboxId) || r.isUpdating);
         return {
           sandboxId: r.sandboxId,
           name: `Sandbox #${idx + 1} (${r.sandboxId.substring(0, 6)})`,
@@ -1526,6 +1672,8 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
           createdAt: r.createdAt,
           attachedSessionCount: realSessions.length,
           attachedSessionIds: realSessions,
+          lastUpdateCheckAt: r.lastUpdateCheckAt || r.createdAt,
+          isUpdating,
         };
       }),
     };

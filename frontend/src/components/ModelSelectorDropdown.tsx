@@ -91,6 +91,7 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const column2Ref = useRef<HTMLDivElement>(null);
   const effortFlyoutRef = useRef<HTMLDivElement>(null);
+  const mobileModalRef = useRef<HTMLDivElement>(null);
 
   const activeCliStatus = cliStatusProp || internalCliStatus;
 
@@ -148,7 +149,13 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   // Close when clicking outside or pressing Escape
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(target) &&
+        (!mobileModalRef.current || !mobileModalRef.current.contains(target)) &&
+        !(target as HTMLElement)?.closest?.('[role="dialog"]')
+      ) {
         setIsOpen(false);
         setHoveredProvider(null);
         setHoveredModel(null);
@@ -801,6 +808,10 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
             }}
           >
             <div
+              ref={mobileModalRef}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="select-model-title"
               className="w-full max-w-sm bg-surface-container-lowest border border-outline-variant/30 rounded-2xl shadow-2xl p-4 animate-in fade-in zoom-in-95 duration-150 max-h-[85vh] flex flex-col"
               onClick={(e) => e.stopPropagation()}
             >
@@ -809,7 +820,7 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="material-symbols-outlined text-[20px] text-primary">psychology</span>
                   <div>
-                    <h3 className="text-sm font-bold text-on-surface tracking-wide">Select AI Model</h3>
+                    <h3 id="select-model-title" className="text-sm font-bold text-on-surface tracking-wide">Select AI Model</h3>
                     <p className="text-[10px] text-outline">Choose provider, model & reasoning effort</p>
                   </div>
                 </div>

@@ -433,6 +433,7 @@ export class FirestoreBackendService {
     createdAt: number;
     lastActiveAt: number;
     provider?: string;
+    lastUpdateCheckAt?: number;
   }): Promise<void> {
     if (this.isAvailable && this.db && userId) {
       try {

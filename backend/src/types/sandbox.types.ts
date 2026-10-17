@@ -64,6 +64,8 @@ export interface SandboxUsageInfo {
   createdAt: number;
   attachedSessionCount: number;
   attachedSessionIds: string[];
+  lastUpdateCheckAt?: number;
+  isUpdating?: boolean;
 }
 
 export interface SandboxCliExecutionRequest {

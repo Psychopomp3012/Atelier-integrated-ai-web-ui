@@ -9,6 +9,7 @@ import type {
   SandboxCliExecutionRequest,
   SandboxCliExecutionResponse,
   SandboxFileNode,
+  SandboxUsageInfo,
   TerminalLogEntry,
 } from '../../types/sandbox.types.js';
 import { DockerSandboxProvider } from './docker-sandbox.provider.js';
@@ -248,15 +249,7 @@ export class SandboxService {
   public getSandboxUsage(userId?: string): {
     used: number;
     max: number;
-    sandboxes: Array<{
-      sandboxId: string;
-      name: string;
-      sessionId?: string;
-      lastActiveAt: number;
-      createdAt: number;
-      attachedSessionCount: number;
-      attachedSessionIds: string[];
-    }>;
+    sandboxes: SandboxUsageInfo[];
   } {
     if (this.provider.getSandboxUsage) {
       return this.provider.getSandboxUsage(userId);
