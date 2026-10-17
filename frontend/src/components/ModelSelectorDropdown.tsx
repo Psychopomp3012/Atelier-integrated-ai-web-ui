@@ -8,6 +8,18 @@ import {
 } from '../services/cliAuth.service';
 import { checkModelQuotaExhausted } from '../utils/quota.util';
 
+interface SandboxUsageData {
+  used: number;
+  max: number;
+  sandboxes: Array<{
+    sandboxId: string;
+    name: string;
+    sessionId?: string;
+    attachedSessionCount?: number;
+    attachedSessionIds?: string[];
+  }>;
+}
+
 interface ModelSelectorDropdownProps {
   selectedModel: ModelType;
   onSelectModel: (model: ModelType) => void;
@@ -18,6 +30,13 @@ interface ModelSelectorDropdownProps {
   codexQuota?: CodexQuotaStats | null;
   availableModels?: ModelOption[];
   onOpenAuthModal?: () => void;
+  activeSandbox?: { sandboxId: string; name: string } | null;
+  sandboxUsage?: SandboxUsageData | null;
+  onStartSandboxVM?: () => void;
+  onAttachExistingSandbox?: (sandboxId: string) => void;
+  isStartingSandbox?: boolean;
+  isAttachingSandbox?: string | null;
+  onRefreshModels?: () => void;
 }
 
 interface ProviderMeta {
@@ -81,6 +100,13 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   codexQuota,
   availableModels = AVAILABLE_MODELS,
   onOpenAuthModal,
+  activeSandbox,
+  sandboxUsage,
+  onStartSandboxVM,
+  onAttachExistingSandbox,
+  isStartingSandbox = false,
+  isAttachingSandbox = null,
+  onRefreshModels,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [hoveredProvider, setHoveredProvider] = useState<ModelProvider | null>(null);
@@ -183,6 +209,13 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
     };
   }, [isOpen]);
 
+  // If dropdown is opened and a sandbox microVM is attached but models haven't loaded yet, auto-trigger refresh
+  useEffect(() => {
+    if (isOpen && activeSandbox?.sandboxId && availableModels.length === 0 && onRefreshModels) {
+      onRefreshModels();
+    }
+  }, [isOpen, activeSandbox?.sandboxId, availableModels.length, onRefreshModels]);
+
   const displayInfo = getModelDisplayInfo(selectedModel, availableModels);
   const activeProvider = displayInfo.provider;
 
@@ -227,6 +260,9 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
         return m.provider === displayProvider;
       })
     : [];
+
+  const hasAnySandbox = Boolean(sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0);
+  const isSandboxAttached = Boolean(activeSandbox?.sandboxId);
 
   // Helper to check if a specific quota group has any bucket with remaining_fraction <= 0
   const isGroupExhausted = (matchFn: (group: QuotaGroup) => boolean): boolean => {
@@ -590,8 +626,87 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                     </div>
                   )}
 
-                  {/* Scrollable Model List or Discovery Visual Cue */}
-                  {providerModels.length === 0 ? (
+                  {/* Sandbox VM Status & Model Discovery */}
+                  {!hasAnySandbox ? (
+                    <div className="flex flex-col items-center justify-center py-7 px-4 text-center my-auto space-y-3 bg-surface-container-low/70 rounded-xl border border-outline-variant/20 mx-1">
+                      <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center shadow-xs">
+                        <span className="material-symbols-outlined text-[22px]">rocket_launch</span>
+                      </div>
+                      <div className="space-y-1">
+                        <h4 className="text-xs font-bold text-on-surface">Sandbox VM Required</h4>
+                        <p className="text-[11px] text-outline leading-snug">
+                          No cloud microVM is running. Start a sandbox VM to discover and execute models for {currentProviderMeta.title}.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={onStartSandboxVM}
+                        disabled={isStartingSandbox}
+                        className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {isStartingSandbox ? (
+                          <>
+                            <span className="material-symbols-outlined text-[15px] animate-spin">progress_activity</span>
+                            <span>Starting MicroVM...</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="material-symbols-outlined text-[15px]">bolt</span>
+                            <span>Start Sandbox VM</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  ) : !isSandboxAttached ? (
+                    <div className="flex flex-col py-3 px-3 text-left space-y-2.5 bg-surface-container-low/70 rounded-xl border border-outline-variant/20 mx-1">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0">
+                          <span className="material-symbols-outlined text-[17px]">link_off</span>
+                        </div>
+                        <div className="min-w-0">
+                          <h4 className="text-xs font-bold text-on-surface truncate">Attach Sandbox VM</h4>
+                          <p className="text-[10px] text-outline">Connect workspace to load models</p>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-on-surface-variant leading-snug">
+                        Please attach an active sandbox VM to load live {currentProviderMeta.shortLabel} models:
+                      </p>
+                      <div className="space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar">
+                        {sandboxUsage?.sandboxes.map((sb, idx) => (
+                          <button
+                            key={sb.sandboxId}
+                            type="button"
+                            onClick={() => onAttachExistingSandbox?.(sb.sandboxId)}
+                            disabled={isAttachingSandbox === sb.sandboxId}
+                            className="w-full flex items-center justify-between p-2 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 hover:border-primary/40 text-xs transition-all cursor-pointer"
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="material-symbols-outlined text-[15px] text-primary shrink-0">
+                                {isAttachingSandbox === sb.sandboxId ? 'sync' : 'link'}
+                              </span>
+                              <span className="font-medium text-on-surface truncate">
+                                {sb.name || `Sandbox #${idx + 1}`}
+                              </span>
+                            </div>
+                            <span className="text-[10px] font-semibold text-primary shrink-0">
+                              {isAttachingSandbox === sb.sandboxId ? 'Attaching...' : 'Attach'}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      {sandboxUsage && sandboxUsage.used < sandboxUsage.max && (
+                        <button
+                          type="button"
+                          onClick={onStartSandboxVM}
+                          disabled={isStartingSandbox}
+                          className="w-full flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg border border-dashed border-outline-variant/40 hover:border-primary/50 text-[11px] text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-all cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[13px]">add</span>
+                          <span>{isStartingSandbox ? 'Starting...' : 'Or start new Sandbox VM'}</span>
+                        </button>
+                      )}
+                    </div>
+                  ) : providerModels.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-10 px-4 text-center my-auto space-y-3">
                       <div className="relative flex items-center justify-center">
                         <span className="absolute w-10 h-10 rounded-full bg-primary/10 animate-ping" />
@@ -611,9 +726,19 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                       <div className="space-y-0.5">
                         <p className="text-xs font-semibold text-on-surface">Discovering models...</p>
                         <p className="text-[11px] text-outline">
-                          Querying {currentProviderMeta.shortLabel} CLI for hosted models
+                          Querying {currentProviderMeta.shortLabel} CLI in Sandbox microVM ({activeSandbox?.name || 'attached'})
                         </p>
                       </div>
+                      {onRefreshModels && (
+                        <button
+                          type="button"
+                          onClick={() => onRefreshModels()}
+                          className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 text-on-surface transition-colors cursor-pointer inline-flex items-center gap-1"
+                        >
+                          <span className="material-symbols-outlined text-[13px]">refresh</span>
+                          <span>Refresh Models</span>
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <div className="flex flex-col gap-1 overflow-y-auto max-h-72 pr-0.5">
@@ -886,10 +1011,65 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
 
               {/* Scrollable Models & Reasoning Effort List */}
               <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[140px]">
-                {providerModels.length === 0 ? (
+                {!hasAnySandbox ? (
+                  <div className="flex flex-col items-center justify-center py-6 px-3 text-center space-y-2.5 bg-surface-container-low rounded-xl border border-outline-variant/20">
+                    <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary mx-auto flex items-center justify-center shadow-xs">
+                      <span className="material-symbols-outlined text-[20px]">rocket_launch</span>
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-bold text-on-surface">Sandbox VM Required</h4>
+                      <p className="text-[11px] text-outline leading-snug">
+                        Start a sandbox VM to load and run models for {currentProviderMeta?.title || 'this provider'}.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onStartSandboxVM?.();
+                        setIsOpen(false);
+                      }}
+                      disabled={isStartingSandbox}
+                      className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-medium text-xs shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      <span className="material-symbols-outlined text-[15px]">bolt</span>
+                      <span>Start Sandbox VM</span>
+                    </button>
+                  </div>
+                ) : !isSandboxAttached ? (
+                  <div className="flex flex-col py-3 px-3 text-left space-y-2 bg-surface-container-low rounded-xl border border-outline-variant/20">
+                    <div className="flex items-center gap-2">
+                      <div className="w-6 h-6 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0">
+                        <span className="material-symbols-outlined text-[15px]">link_off</span>
+                      </div>
+                      <div className="min-w-0">
+                        <h4 className="text-xs font-bold text-on-surface truncate">Attach Sandbox VM</h4>
+                        <p className="text-[10px] text-outline">Connect to load models</p>
+                      </div>
+                    </div>
+                    <div className="space-y-1 max-h-36 overflow-y-auto custom-scrollbar">
+                      {sandboxUsage?.sandboxes.map((sb, idx) => (
+                        <button
+                          key={sb.sandboxId}
+                          type="button"
+                          onClick={() => {
+                            onAttachExistingSandbox?.(sb.sandboxId);
+                            setIsOpen(false);
+                          }}
+                          disabled={isAttachingSandbox === sb.sandboxId}
+                          className="w-full flex items-center justify-between p-2 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 text-xs transition-all cursor-pointer"
+                        >
+                          <span className="font-medium text-on-surface truncate">{sb.name || `Sandbox #${idx + 1}`}</span>
+                          <span className="text-[10px] font-semibold text-primary">Attach</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : providerModels.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-8 text-center space-y-2">
                     <div className="w-6 h-6 rounded-full border-2 border-primary/20 border-t-primary animate-spin" />
-                    <p className="text-xs font-medium text-outline">Discovering models...</p>
+                    <p className="text-xs font-medium text-outline">
+                      Executing {currentProviderMeta?.shortLabel || ''} CLI in Sandbox microVM...
+                    </p>
                   </div>
                 ) : (
                   providerModels.map((m) => {

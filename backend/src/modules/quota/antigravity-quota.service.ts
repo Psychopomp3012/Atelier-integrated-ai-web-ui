@@ -1,12 +1,8 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { AntigravityQuotaStats, GeminiQuotaStats, RecordTurnInput, CliQuotaLimits, QuotaGroup } from './quota.types.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 import { logger } from '../../utils/logger.util.js';
-
-const execFileAsync = promisify(execFile);
 
 interface CliTelemetryPersistence {
   totalTurns: number;
@@ -128,36 +124,56 @@ export class AntigravityQuotaService {
   }
 
   /**
-   * Queries live authentic Antigravity quota from Google's Code Assist backend via CLI.
-   * Queries the active cloud sandbox microVM first, then falls back to local CLI on dev.
+   * Resolves an active cloud sandbox microVM ID for a user.
    */
-  private async queryLiveGoogleQuota(): Promise<CliQuotaLimits | null> {
+  private resolveSandboxId(userId?: string, sessionId?: string): string | null {
+    if (sessionId) {
+      const active = sandboxService.getActiveSandboxId(sessionId, userId);
+      if (active) return active;
+    }
+    if (userId) {
+      const usage = sandboxService.getSandboxUsage(userId);
+      if (usage.sandboxes && usage.sandboxes.length > 0) {
+        return usage.sandboxes[0].sandboxId;
+      }
+    }
+    const defaultActive = sandboxService.getActiveSandboxId('default');
+    if (defaultActive) return defaultActive;
+
+    const globalUsage = sandboxService.getSandboxUsage();
+    if (globalUsage.sandboxes && globalUsage.sandboxes.length > 0) {
+      return globalUsage.sandboxes[0].sandboxId;
+    }
+    return null;
+  }
+
+  /**
+   * Queries live authentic Antigravity quota from Google's Code Assist backend via CLI.
+   * Executes strictly in the user's active cloud sandbox microVM without host CLI dependency.
+   */
+  private async queryLiveGoogleQuota(userId?: string, sessionId?: string): Promise<CliQuotaLimits | null> {
     try {
-      let stdout = '';
-      const activeSandboxId = sandboxService.getActiveSandboxId('default');
-      if (activeSandboxId) {
-        try {
-          const cmdRes = await sandboxService.executeInSandbox({
-            command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" agy -p /quota --output-format json',
-            code: '',
-            language: 'bash',
-            sandboxId: activeSandboxId,
-            timeoutMs: 15000,
-          });
-          if (cmdRes && cmdRes.stdout) {
-            stdout = cmdRes.stdout;
-          }
-        } catch (err) {
-          logger.warn('[Antigravity Quota] Failed to live-query quota from cloud microVM', { error: String(err) });
-        }
+      const activeSandboxId = this.resolveSandboxId(userId, sessionId);
+      if (!activeSandboxId) {
+        return null;
       }
 
-      if (!stdout) {
-        try {
-          const bin = cliAuthService.getAntigravityBin();
-          const { stdout: localOut } = await execFileAsync(bin, ['-p', '/quota', '--output-format', 'json'], { timeout: 15000 });
-          if (localOut) stdout = localOut;
-        } catch {}
+      let stdout = '';
+      try {
+        const cmdRes = await sandboxService.executeInSandbox({
+          command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" agy -p /quota --output-format json',
+          code: '',
+          language: 'bash',
+          sandboxId: activeSandboxId,
+          userId,
+          sessionId,
+          timeoutMs: 15000,
+        });
+        if (cmdRes && cmdRes.stdout) {
+          stdout = cmdRes.stdout;
+        }
+      } catch (err) {
+        logger.warn('[Antigravity Quota] Failed to live-query quota from cloud microVM', { error: String(err) });
       }
 
       if (!stdout || stdout.trim().length === 0) return null;
@@ -205,7 +221,9 @@ export class AntigravityQuotaService {
   private async fetchCliQuotaLimits(
     userKey: string,
     persistence: CliTelemetryPersistence,
-    userEmail?: string
+    userEmail?: string,
+    sessionId?: string,
+    userId?: string
   ): Promise<CliQuotaLimits> {
     const cached = this.cachedQuotaLimitsMap.get(userKey);
     const now = Date.now();
@@ -213,8 +231,8 @@ export class AntigravityQuotaService {
       return cached.limits;
     }
 
-    // Live Google Code Assist CLI live fetch
-    const liveLimits = await this.queryLiveGoogleQuota();
+    // Live Google Code Assist CLI live fetch via cloud sandbox
+    const liveLimits = await this.queryLiveGoogleQuota(userId, sessionId);
     if (liveLimits && liveLimits.groups.length > 0) {
       this.cachedQuotaLimitsMap.set(userKey, { limits: liveLimits, timestamp: now });
       return liveLimits;
@@ -312,7 +330,7 @@ export class AntigravityQuotaService {
         ? Math.round(effectiveTotalLatency / totalTurnsCount)
         : 0;
 
-    const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, email);
+    const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, email, sessionId, effectiveUserId);
 
     logger.info('[Antigravity Quota] Resolved user quota status', {
       userId,

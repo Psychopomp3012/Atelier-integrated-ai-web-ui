@@ -441,8 +441,8 @@ export const App: React.FC = () => {
     );
   }, [cliStatus]);
 
-  useEffect(() => {
-    fetchAvailableModels()
+  const refreshModels = useCallback((force = true) => {
+    fetchAvailableModels(force, currentSessionId || undefined, currentUser?.id)
       .then((models) => {
         if (models && models.length > 0) {
           setAvailableModels(models);
@@ -483,10 +483,16 @@ export const App: React.FC = () => {
               }
             }
           }
+        } else if (models && models.length === 0) {
+          setAvailableModels([]);
         }
       })
       .catch(() => {});
-  }, []);
+  }, [currentSessionId, currentUser?.id, selectedModel]);
+
+  useEffect(() => {
+    refreshModels(false);
+  }, [refreshModels]);
 
   const tokenUsage = useMemo(
     () =>
@@ -575,6 +581,26 @@ export const App: React.FC = () => {
     fetchGeminiQuota(currentSessionId || undefined, true);
     fetchCodexQuota(currentSessionId || undefined, true);
   }, [currentSessionId, currentUser?.email]);
+
+  // Re-fetch dynamic models and quota whenever activeSandbox changes
+  useEffect(() => {
+    if (activeSandbox?.sandboxId) {
+      refreshModels(true);
+      handleRefreshQuota();
+    } else {
+      refreshModels(false);
+    }
+  }, [activeSandbox?.sandboxId, refreshModels, handleRefreshQuota]);
+
+  // Auto-retry discovering models if a sandbox is active but models list is still empty
+  useEffect(() => {
+    if (activeSandbox?.sandboxId && availableModels.length === 0) {
+      const retryTimer = setTimeout(() => {
+        refreshModels(true);
+      }, 2500);
+      return () => clearTimeout(retryTimer);
+    }
+  }, [activeSandbox?.sandboxId, availableModels.length, refreshModels]);
 
   const handleCliStatusChange = useCallback((newStatus: CliStatus) => {
     setCliStatus(newStatus);
@@ -2321,6 +2347,12 @@ export const App: React.FC = () => {
                   codexQuota={codexQuota}
                   availableModels={availableModels}
                   activeSandbox={activeSandbox}
+                  sandboxUsage={sandboxUsage}
+                  onStartSandboxVM={handleStartSandboxVM}
+                  onAttachExistingSandbox={handleAttachExistingSandbox}
+                  isStartingSandbox={isStartingSandbox}
+                  isAttachingSandbox={isAttachingSandbox}
+                  onRefreshModels={() => refreshModels(true)}
                   onOpenAuthModal={() => setIsAuthModalOpen(true)}
                 />
               </div>

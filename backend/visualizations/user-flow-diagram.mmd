@@ -23,24 +23,37 @@ flowchart TD
         D[fa:fa-google Google OAuth Login] --> E[fa:fa-id-card Receive 7-Day JWT]
         E --> F[fa:fa-th-large Load Chat Dashboard]
         C -->|Yes / Active| F
-        F --> G{fa:fa-link Subscription Linked?}
-        H(fa:fa-shield Subscriptions Menu) --> I[fa:fa-user-check Authorize Provider]
+
+        F --> MP[fa:fa-layer-group Open Model & Provider Selector]
+        MP --> G{fa:fa-link Provider Linked?}
+        G -->|No / Locked| H[fa:fa-shield Prompt Subscriptions Auth]
+        H --> I[fa:fa-user-check Authorize Provider OAuth]
         I --> J[fa:fa-save Save Credential to Firestore]
-        G -->|No| H
-        G -->|Yes| K{fa:fa-cubes Sandbox Action?}
-        J --> K
-        K -->|Manage / Delete| KD[fa:fa-trash-alt Custom Red Delete Modal]
+        J --> MP
+
+        G -->|Yes / Unlocked| SBState{fa:fa-server Sandbox Attached?}
+        
+        SBState -->|No VM Running| VMReq[fa:fa-rocket Prompt: Sandbox VM Required]
+        VMReq -->|Click 'Start Sandbox VM'| KN[fa:fa-plus-circle Request MicroVM Allocation]
+
+        SBState -->|VM Active but Detached| VMAttach[fa:fa-link-slash Prompt: Attach Sandbox VM]
+        VMAttach -->|Select Existing VM| KA[fa:fa-link Attach Workspace to Session]
+
+        SBState -->|VM Attached| QueryVM[fa:fa-microchip Live MicroVM Query in Progress]
+
+        K{fa:fa-cubes Sandbox Manager} -->|Manage / Delete| KD[fa:fa-trash-alt Custom Red Delete Modal]
         KD -->|Confirm| KDR[fa:fa-minus-circle Release Quota Slot in Firestore]
-        K -->|Attach Existing| KA[fa:fa-link Share Workspace with Active Chat]
-        K -->|Create New| KN[fa:fa-plus-circle Request MicroVM Allocation]
-        S[fa:fa-sliders Choose Model & Effort] --> T[fa:fa-paper-plane Dispatch User Prompt]
+
+        MD[fa:fa-list-check Dynamic Models & Effort List] --> S[fa:fa-sliders Choose Model & Effort Level]
+        S --> T[fa:fa-paper-plane Dispatch User Prompt]
         Z[fa:fa-stream Stream SSE Tokens & Steps] --> AB([fa:fa-desktop Cloud Inspector Explorer])
     end
 
     subgraph Cloud["☁️ Backend Orchestrator & E2B MicroVM"]
         C -->|No / Expired| D
         KDR --> K
-        KA --> S
+
+        KA --> RunCliLive
         KN --> L{fa:fa-server Sandbox Active?}
         L -->|No / New| M[fa:fa-cloud Launch Firecracker VM]
         M --> N[fa:fa-microchip Allocate 1GB Swap]
@@ -48,8 +61,16 @@ flowchart TD
         O --> P[fa:fa-download Pre-Install CLIs: agy/codex/claude]
         P --> Q[fa:fa-key Pre-Seed Linked Credentials]
         L -->|Yes / Reconnect| R[fa:fa-play Resume MicroVM]
-        Q --> S
-        R --> S
+        Q --> RunCliLive[fa:fa-terminal Execute Live CLI Discovery inside VM]
+        R --> RunCliLive
+
+        QueryVM --> RunCliLive
+        RunCliLive --> CLIModels[fa:fa-search Live CLI Discovery: agy models / codex debug models]
+        RunCliLive --> CLIQuota[fa:fa-tachometer-alt Live Telemetry Quota: 5h/Weekly & Rolling Limits]
+        CLIModels --> ZeroHardcode[fa:fa-shield-alt Zero-Hardcode & Zero-Firestore Volatile Rule]
+        CLIQuota --> ZeroHardcode
+        ZeroHardcode --> MD
+
         T --> TH[fa:fa-database Fetch History from Firestore]
         TH --> TC[fa:fa-compress-arrows-alt Context Compactor: One-Shot Prompt Stitching]
         TC --> U{fa:fa-sync Linked Post-Boot?}

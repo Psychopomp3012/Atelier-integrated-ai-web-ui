@@ -48,7 +48,12 @@ Built strictly with Mermaid's native **`architecture-beta`** syntax matching the
 
 Built with Mermaid's **`flowchart TD`** visual decision engine featuring native FontAwesome iconography and condition branches:
 - **Session & Identity**: OS theme auto-detection (`fa:fa-adjust`) and 7-day JWT auth check (`fa:fa-key`) with Google OAuth fallback.
-- **Subscription Linking Flow**: Zero-key account linking via provider OAuth (`fa:fa-shield`, `fa:fa-user-check`), persisted directly in Firestore.
+- **Subscription Linking Flow**: Zero-key account linking via provider OAuth (`fa:fa-shield`, `fa:fa-user-check`), unlocking AI providers in the model menu.
+- **Sandbox-Coupled Model Discovery**:
+  - **No VM Running**: Prompts user that a Sandbox VM is required (`fa:fa-rocket`) with one-click creation.
+  - **VM Active but Detached**: Prompts user to select and attach an existing sandbox microVM (`fa:fa-link-slash`) to the current chat session.
+  - **VM Attached**: Automatically executes live CLI discovery inside the microVM (`agy models`, `codex debug models`, and live quota queries) strictly adhering to the zero-hardcode and zero-Firestore volatile limit rules.
+  - **Dynamic Model Selection**: Renders discovered models with supported reasoning effort levels (`fa:fa-sliders`) and live quota gauges (5h rolling & weekly window for Antigravity, rolling limit for Codex).
 - **Multi-Sandbox Pooling & Sharing**: Sandbox decision branch (`fa:fa-cubes`):
   - **Manage / Delete**: Custom Red Delete Modal (`fa:fa-trash-alt`) prompting quota slot release and workspace cleanup in Firestore (`fa:fa-minus-circle`).
   - **Attach Existing**: Multiplexes and shares active microVM workspace across multiple chats (`fa:fa-link`).

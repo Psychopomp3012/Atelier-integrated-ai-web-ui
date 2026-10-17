@@ -1,12 +1,8 @@
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { CodexQuotaStats, RecordTurnInput, CliQuotaLimits, QuotaGroup } from './quota.types.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 import { logger } from '../../utils/logger.util.js';
-
-const execFileAsync = promisify(execFile);
 
 interface CliTelemetryPersistence {
   totalTurns: number;
@@ -40,10 +36,34 @@ export class CodexQuotaService {
   }
 
   /**
-   * Queries Codex CLI version dynamically via cloud sandbox microVM or local CLI without touching any files.
+   * Resolves an active cloud sandbox microVM ID for a user.
    */
-  private async queryCodexVersion(): Promise<string> {
-    const activeSandboxId = sandboxService.getActiveSandboxId('default');
+  private resolveSandboxId(userId?: string, sessionId?: string): string | null {
+    if (sessionId) {
+      const active = sandboxService.getActiveSandboxId(sessionId, userId);
+      if (active) return active;
+    }
+    if (userId) {
+      const usage = sandboxService.getSandboxUsage(userId);
+      if (usage.sandboxes && usage.sandboxes.length > 0) {
+        return usage.sandboxes[0].sandboxId;
+      }
+    }
+    const defaultActive = sandboxService.getActiveSandboxId('default');
+    if (defaultActive) return defaultActive;
+
+    const globalUsage = sandboxService.getSandboxUsage();
+    if (globalUsage.sandboxes && globalUsage.sandboxes.length > 0) {
+      return globalUsage.sandboxes[0].sandboxId;
+    }
+    return null;
+  }
+
+  /**
+   * Queries Codex CLI version dynamically via cloud sandbox microVM without touching local backend host.
+   */
+  private async queryCodexVersion(userId?: string, sessionId?: string): Promise<string> {
+    const activeSandboxId = this.resolveSandboxId(userId, sessionId);
     if (activeSandboxId) {
       try {
         const cmdRes = await sandboxService.executeInSandbox({
@@ -51,6 +71,8 @@ export class CodexQuotaService {
           code: '',
           language: 'bash',
           sandboxId: activeSandboxId,
+          userId,
+          sessionId,
           timeoutMs: 10000,
         });
         if (cmdRes && cmdRes.stdout) {
@@ -59,15 +81,6 @@ export class CodexQuotaService {
         }
       } catch {}
     }
-
-    try {
-      const codexBin = cliAuthService.getCodexBin();
-      const { stdout } = await execFileAsync(codexBin, ['--version'], { timeout: 10000 });
-      if (stdout) {
-        const match = stdout.match(/codex(?:-cli)?\s+([0-9.]+)/i);
-        if (match) return match[1];
-      }
-    } catch {}
 
     return '0.163.0';
   }
@@ -131,10 +144,10 @@ export class CodexQuotaService {
 
   /**
    * Queries authentic live OpenAI Codex rate limits and account quota directly from Codex CLI daemon.
-   * Executes via cloud sandbox microVM first, then falls back to local CLI on dev.
+   * Executes strictly in cloud sandbox microVM without running codex on backend host.
    */
-  private async queryLiveCodexQuota(): Promise<{ rateLimits?: any; account?: any } | null> {
-    const activeSandboxId = sandboxService.getActiveSandboxId('default');
+  private async queryLiveCodexQuota(userId?: string, sessionId?: string): Promise<{ rateLimits?: any; account?: any } | null> {
+    const activeSandboxId = this.resolveSandboxId(userId, sessionId);
     if (activeSandboxId) {
       try {
         const script = `node -e 'const { spawn } = require("child_process"); const proc = spawn("codex", ["app-server", "--stdio"]); let buffer = ""; let rateLimits = null; let account = null; const timer = setTimeout(() => { try { proc.kill(); } catch {} process.stdout.write(JSON.stringify({ rateLimits, account })); process.exit(0); }, 4000); proc.stdout.on("data", (chunk) => { buffer += chunk.toString(); const lines = buffer.split("\\n"); buffer = lines.pop() || ""; for (const line of lines) { const trimmed = line.trim(); if (!trimmed) continue; try { const json = JSON.parse(trimmed); if (json.id === 2 && json.result?.rateLimits) rateLimits = json.result.rateLimits; if (json.id === 3 && json.result?.account) account = json.result.account; if (rateLimits && account) { clearTimeout(timer); try { proc.kill(); } catch {} process.stdout.write(JSON.stringify({ rateLimits, account })); process.exit(0); } } catch {} } }); proc.on("error", () => { clearTimeout(timer); process.exit(0); }); proc.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: { name: "atelier-ui", title: "Atelier", version: "1.0.0" }, capabilities: null } }) + "\\n"); setTimeout(() => { try { proc.stdin.write(JSON.stringify({ id: 2, method: "account/rateLimits/read", params: {} }) + "\\n"); proc.stdin.write(JSON.stringify({ id: 3, method: "account/read", params: {} }) + "\\n"); } catch {} }, 200);'`;
@@ -143,6 +156,8 @@ export class CodexQuotaService {
           code: '',
           language: 'bash',
           sandboxId: activeSandboxId,
+          userId,
+          sessionId,
           timeoutMs: 6000,
         });
         if (cmdRes && cmdRes.stdout) {
@@ -156,72 +171,7 @@ export class CodexQuotaService {
       }
     }
 
-    // Direct CLI live execution via app-server JSON-RPC protocol
-    try {
-      const codexBin = cliAuthService.getCodexBin();
-      return await new Promise<{ rateLimits?: any; account?: any } | null>((resolve) => {
-        const proc = spawn(codexBin, ['app-server', '--stdio']);
-        let buffer = '';
-        let rateLimits: any = null;
-        let account: any = null;
-
-        const timer = setTimeout(() => {
-          try { proc.kill(); } catch {}
-          resolve(rateLimits ? { rateLimits, account } : null);
-        }, 5000);
-
-        proc.stdout.on('data', (chunk) => {
-          buffer += chunk.toString();
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-            try {
-              const json = JSON.parse(trimmed);
-              if (json.id === 2 && json.result?.rateLimits) {
-                rateLimits = json.result.rateLimits;
-              }
-              if (json.id === 3 && json.result?.account) {
-                account = json.result.account;
-              }
-              if (rateLimits && account) {
-                clearTimeout(timer);
-                try { proc.kill(); } catch {}
-                resolve({ rateLimits, account });
-                return;
-              }
-            } catch {}
-          }
-        });
-
-        proc.on('error', (err) => {
-          clearTimeout(timer);
-          logger.warn('[Codex Quota] Local Codex app-server process error', { error: String(err) });
-          resolve(null);
-        });
-
-        const init = JSON.stringify({
-          id: 1,
-          method: 'initialize',
-          params: {
-            clientInfo: { name: 'atelier-ui', title: 'Atelier', version: '1.0.0' },
-            capabilities: null,
-          },
-        }) + '\n';
-        proc.stdin.write(init);
-
-        setTimeout(() => {
-          try {
-            proc.stdin.write(JSON.stringify({ id: 2, method: 'account/rateLimits/read', params: {} }) + '\n');
-            proc.stdin.write(JSON.stringify({ id: 3, method: 'account/read', params: {} }) + '\n');
-          } catch {}
-        }, 200);
-      });
-    } catch (err) {
-      logger.warn('[Codex Quota] Failed to live-query quota via Codex app-server', { error: String(err) });
-      return null;
-    }
+    return null;
   }
 
   /**
@@ -230,7 +180,8 @@ export class CodexQuotaService {
    */
   public async fetchCodexQuotaLimits(
     userKey?: string,
-    userEmail?: string
+    userEmail?: string,
+    sessionId?: string
   ): Promise<CliQuotaLimits | null> {
     const cacheKey = userKey || userEmail || 'default';
     const cached = this.cachedQuotaLimitsMap.get(cacheKey);
@@ -239,8 +190,8 @@ export class CodexQuotaService {
       return cached.limits;
     }
 
-    const version = await this.queryCodexVersion();
-    const liveData = await this.queryLiveCodexQuota();
+    const version = await this.queryCodexVersion(userKey, sessionId);
+    const liveData = await this.queryLiveCodexQuota(userKey, sessionId);
     const activeRateLimits = liveData?.rateLimits;
 
     try {
@@ -396,7 +347,7 @@ export class CodexQuotaService {
         : 0;
 
     // Fresh live fetch of authentic limits (no Firestore read)
-    const quotaLimits = await this.fetchCodexQuotaLimits(userKey, userEmail);
+    const quotaLimits = await this.fetchCodexQuotaLimits(userKey, userEmail, sessionId);
     const singleBucket = quotaLimits?.groups[0]?.buckets?.[0];
 
     logger.info('[Codex Quota] Resolved user quota status', {

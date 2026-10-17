@@ -1,6 +1,5 @@
 import { apiFetch } from '../utils/api.util';
 import type { ModelOption } from '../types';
-import { AVAILABLE_MODELS } from '../types';
 
 /**
  * Fetches available AI models dynamically discovered from Antigravity CLI.
@@ -20,7 +19,7 @@ export function invalidateModelsCache(): void {
  * Fetches available AI models dynamically discovered from installed CLIs.
  * In-flight promise sharing and short-term deduplication prevents burst duplicate calls.
  */
-export async function fetchAvailableModels(force = false): Promise<ModelOption[]> {
+export async function fetchAvailableModels(force = false, sessionId?: string, userId?: string): Promise<ModelOption[]> {
   const now = Date.now();
   if (!force && lastModels && now - lastModelsFetchTime < MODELS_CACHE_TTL) {
     return lastModels;
@@ -31,9 +30,14 @@ export async function fetchAvailableModels(force = false): Promise<ModelOption[]
 
   inFlightModelsPromise = (async () => {
     try {
-      const res = await apiFetch('/api/v1/agent/models');
+      const params = new URLSearchParams();
+      if (sessionId) params.set('sessionId', sessionId);
+      if (userId) params.set('userId', userId);
+      const qStr = params.toString() ? `?${params.toString()}` : '';
+
+      const res = await apiFetch(`/api/v1/agent/models${qStr}`);
       if (!res.ok) {
-        return lastModels || AVAILABLE_MODELS;
+        return lastModels || [];
       }
       const json = await res.json();
       if (Array.isArray(json.data) && json.data.length > 0) {
@@ -41,9 +45,9 @@ export async function fetchAvailableModels(force = false): Promise<ModelOption[]
         lastModelsFetchTime = Date.now();
         return lastModels;
       }
-      return lastModels || AVAILABLE_MODELS;
+      return lastModels || [];
     } catch {
-      return lastModels || AVAILABLE_MODELS;
+      return lastModels || [];
     } finally {
       inFlightModelsPromise = null;
     }

@@ -1204,6 +1204,84 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
               ) : telemetryTab === 'quota' ? (
                 /* Tab 1: Authentic Models & Quota Visual */
+                !activeSandbox ? (
+                  <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 text-center space-y-3">
+                    <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center mx-auto border border-primary/20">
+                      <span className="material-symbols-outlined text-[20px]">dns</span>
+                    </div>
+                    <div>
+                      <div className="font-semibold text-xs text-on-surface">
+                        Sandbox VM Required for Telemetry
+                      </div>
+                      <p className="text-[11px] text-on-surface-variant mt-1 leading-relaxed">
+                        Please start a sandbox/VM and select it to see quota for CLI telemetry. All CLIs run strictly in your isolated microVM.
+                      </p>
+                    </div>
+
+                    {sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0 ? (
+                      <div className="space-y-2 pt-1 text-left">
+                        <div className="text-[10px] font-mono uppercase tracking-wider text-outline px-1">
+                          Select Sandbox VM to Attach:
+                        </div>
+                        <div className="space-y-1.5 max-h-36 overflow-y-auto custom-scrollbar">
+                          {sandboxUsage.sandboxes.map((sb, idx) => (
+                            <button
+                              key={sb.sandboxId}
+                              type="button"
+                              onClick={() => {
+                                handleSwitchSandbox(sb.sandboxId);
+                                onRefreshQuota?.();
+                              }}
+                              disabled={switchingSandboxId === sb.sandboxId}
+                              className="w-full flex items-center justify-between p-2 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 hover:border-primary/40 text-xs transition-all cursor-pointer text-left"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="material-symbols-outlined text-[16px] text-primary shrink-0">
+                                  {switchingSandboxId === sb.sandboxId ? 'sync' : 'link'}
+                                </span>
+                                <span className="font-medium text-on-surface truncate">
+                                  {sb.name || `Sandbox #${idx + 1}`}
+                                </span>
+                              </div>
+                              <span className="text-[10px] text-primary font-semibold shrink-0">
+                                {switchingSandboxId === sb.sandboxId ? 'Attaching...' : 'Attach'}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                        {sandboxUsage.used < sandboxUsage.max && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await handleCreateSandbox();
+                              onRefreshQuota?.();
+                            }}
+                            disabled={isCreatingSandbox}
+                            className="w-full mt-1 py-1.5 px-2 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/30 text-on-surface-variant hover:text-on-surface text-[11px] font-medium transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                          >
+                            <span className="material-symbols-outlined text-[13px]">add_circle</span>
+                            <span>{isCreatingSandbox ? 'Launching...' : '+ Start New Sandbox VM'}</span>
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await handleCreateSandbox();
+                          onRefreshQuota?.();
+                        }}
+                        disabled={isCreatingSandbox}
+                        className="w-full py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                      >
+                        <span className="material-symbols-outlined text-[15px]">
+                          {isCreatingSandbox ? 'sync' : 'bolt'}
+                        </span>
+                        <span>{isCreatingSandbox ? 'Booting Cloud MicroVM...' : 'Start Sandbox VM'}</span>
+                      </button>
+                    )}
+                  </div>
+                ) : (
                 <div className="space-y-4">
                   {/* Quota Groups */}
                   {isCodex ? (
@@ -1377,6 +1455,7 @@ export const Header: React.FC<HeaderProps> = ({
                     </p>
                   )}
                 </div>
+              )
               ) : (
                 /* Tab 2: Session Token Telemetry */
                 <div className="space-y-3">

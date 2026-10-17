@@ -345,6 +345,26 @@ export class E2BSandboxProvider implements ISandboxProvider {
     targetSandboxId?: string,
     replaceOldest?: boolean
   ): Promise<string> {
+    // If targetSandboxId is an existing sandbox, resolve owner if userId was not explicitly passed
+    if ((!userId || userId === 'default_user') && targetSandboxId && targetSandboxId !== 'new') {
+      const targetRecord = this.sandboxRecords.get(targetSandboxId);
+      if (targetRecord?.userId) {
+        userId = targetRecord.userId;
+      }
+    }
+
+    // Also resolve from session if session is already attached to a known sandbox
+    if (!userId || userId === 'default_user') {
+      const cleanId = this.sanitizeSessionId(sessionId);
+      const existingSbId = this.sessionToSandboxId.get(cleanId);
+      if (existingSbId) {
+        const record = this.sandboxRecords.get(existingSbId);
+        if (record?.userId) {
+          userId = record.userId;
+        }
+      }
+    }
+
     if (!userId || userId === 'default_user') {
       throw new Error('Authentication required: You must be signed in to create or access cloud sandboxes.');
     }

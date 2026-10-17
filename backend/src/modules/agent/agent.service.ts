@@ -1,10 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 import {
   AgentMessage,
   AgentStep,
@@ -99,42 +95,76 @@ function getModelVisuals(modelId: string, modelName: string): {
 }
 
 export class AgentService {
-  private cachedModels: DynamicModelOption[] | null = null;
-  private lastModelsFetchTime: number = 0;
-  private pendingModelsPromise: Promise<DynamicModelOption[]> | null = null;
+  private readonly sandboxModelsCache: Map<string, { models: DynamicModelOption[]; timestamp: number }> = new Map();
   private antigravityModelIds: Set<string> = new Set();
   private codexModelIds: Set<string> = new Set();
 
   constructor() {
-    this.getAvailableModels().catch(() => {});
+    // Dynamic live initialization: CLIs execute live in cloud sandboxes
   }
 
-  private async discoverAntigravityModels(): Promise<DynamicModelOption[]> {
-    let stdout = '';
-    const activeSandboxId = sandboxService.getActiveSandboxId('default');
-    if (activeSandboxId) {
-      try {
-        const cmdRes = await sandboxService.executeInSandbox({
-          command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" agy models',
-          code: '',
-          language: 'bash',
-          sandboxId: activeSandboxId,
-          timeoutMs: 15000,
-        });
-        if (cmdRes && cmdRes.stdout) {
-          stdout = cmdRes.stdout;
-        }
-      } catch (err) {
-        logger.warn('Failed to query models from active cloud microVM', { error: String(err) });
+  /**
+   * Resolves an active cloud sandbox microVM ID for a user.
+   */
+  private resolveSandboxId(userId?: string, sessionId?: string): string | null {
+    if (sessionId) {
+      const active = sandboxService.getActiveSandboxId(sessionId, userId);
+      if (active) return active;
+    }
+    if (userId) {
+      const usage = sandboxService.getSandboxUsage(userId);
+      if (usage.sandboxes && usage.sandboxes.length > 0) {
+        return usage.sandboxes[0].sandboxId;
       }
     }
+    const defaultActive = sandboxService.getActiveSandboxId('default');
+    if (defaultActive) return defaultActive;
 
-    if (!stdout) {
-      try {
-        const bin = cliAuthService.getAntigravityBin();
-        const { stdout: localOut } = await execFileAsync(bin, ['models'], { timeout: 15000 });
-        if (localOut) stdout = localOut;
-      } catch {}
+    const globalUsage = sandboxService.getSandboxUsage();
+    if (globalUsage.sandboxes && globalUsage.sandboxes.length > 0) {
+      return globalUsage.sandboxes[0].sandboxId;
+    }
+    return null;
+  }
+
+  private async discoverAntigravityModels(
+    sandboxId?: string | null,
+    userId?: string,
+    sessionId?: string
+  ): Promise<DynamicModelOption[]> {
+    if (!sandboxId) return [];
+    let stdout = '';
+    try {
+      logger.info('[Model Discovery] Querying Antigravity models from sandbox microVM', {
+        sandboxId,
+        userId,
+        sessionId,
+      });
+      const cmdRes = await sandboxService.executeInSandbox({
+        command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" agy models',
+        code: '',
+        language: 'bash',
+        sandboxId,
+        userId,
+        sessionId,
+        timeoutMs: 15000,
+      });
+      if (cmdRes && cmdRes.stdout) {
+        stdout = cmdRes.stdout;
+        logger.info('[Model Discovery] Antigravity CLI output received', {
+          sandboxId,
+          exitCode: cmdRes.exitCode,
+          outputLength: stdout.length,
+          preview: stdout.slice(0, 100),
+        });
+      } else if (cmdRes?.stderr) {
+        logger.warn('[Model Discovery] Antigravity CLI returned stderr', {
+          sandboxId,
+          stderr: cmdRes.stderr,
+        });
+      }
+    } catch (err) {
+      logger.warn('Failed to query models from active cloud microVM', { error: String(err) });
     }
 
     try {
@@ -153,9 +183,6 @@ export class AgentService {
       }
 
       if (parsedRaw.length === 0) {
-        if (this.cachedModels && this.cachedModels.length > 0) {
-          return this.cachedModels.filter((m) => m.provider === 'gemini');
-        }
         return [];
       }
 
@@ -289,39 +316,49 @@ export class AgentService {
     }
   }
 
-  private async discoverCodexModels(): Promise<DynamicModelOption[]> {
+  private async discoverCodexModels(
+    sandboxId?: string | null,
+    userId?: string,
+    sessionId?: string
+  ): Promise<DynamicModelOption[]> {
+    if (!sandboxId) return [];
     const result: DynamicModelOption[] = [];
     let stdout = '';
 
-    // 1. Live query from active cloud sandbox microVM
-    const activeSandboxId = sandboxService.getActiveSandboxId('default');
-    if (activeSandboxId) {
-      try {
-        const cmdRes = await sandboxService.executeInSandbox({
-          command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" codex debug models',
-          code: '',
-          language: 'bash',
-          sandboxId: activeSandboxId,
-          timeoutMs: 15000,
+    try {
+      logger.info('[Model Discovery] Querying Codex models from sandbox microVM', {
+        sandboxId,
+        userId,
+        sessionId,
+      });
+      const cmdRes = await sandboxService.executeInSandbox({
+        command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" codex debug models',
+        code: '',
+        language: 'bash',
+        sandboxId,
+        userId,
+        sessionId,
+        timeoutMs: 15000,
+      });
+      if (cmdRes && cmdRes.stdout) {
+        stdout = cmdRes.stdout;
+        logger.info('[Model Discovery] Codex CLI output received', {
+          sandboxId,
+          exitCode: cmdRes.exitCode,
+          outputLength: stdout.length,
+          preview: stdout.slice(0, 100),
         });
-        if (cmdRes && cmdRes.stdout) {
-          stdout = cmdRes.stdout;
-        }
-      } catch (err) {
-        logger.warn('Failed to live-query Codex models from cloud sandbox microVM', { error: String(err) });
+      } else if (cmdRes?.stderr) {
+        logger.warn('[Model Discovery] Codex CLI returned stderr', {
+          sandboxId,
+          stderr: cmdRes.stderr,
+        });
       }
+    } catch (err) {
+      logger.warn('Failed to live-query Codex models from cloud sandbox microVM', { error: String(err) });
     }
 
-    // 2. Live query from local CLI if available
-    if (!stdout) {
-      try {
-        const codexBin = cliAuthService.getCodexBin();
-        const { stdout: localOut } = await execFileAsync(codexBin, ['debug', 'models'], { timeout: 15000 });
-        if (localOut) stdout = localOut;
-      } catch {}
-    }
-
-    // 3. Parse live JSON output from Codex CLI
+    // Parse live JSON output from Codex CLI
     if (stdout) {
       try {
         const jsonStart = stdout.indexOf('{');
@@ -380,57 +417,51 @@ export class AgentService {
       }
     }
 
-    if (this.cachedModels && this.cachedModels.length > 0) {
-      return this.cachedModels.filter((m) => m.provider === 'codex');
-    }
-
     return result;
   }
 
-  private async fetchDynamicModelsFromCli(): Promise<DynamicModelOption[]> {
+  private async fetchDynamicModelsFromCli(
+    sandboxId?: string | null,
+    userId?: string,
+    sessionId?: string
+  ): Promise<DynamicModelOption[]> {
+    if (!sandboxId) return [];
+
     const [agyRes, codexRes] = await Promise.allSettled([
-      this.discoverAntigravityModels(),
-      this.discoverCodexModels(),
+      this.discoverAntigravityModels(sandboxId, userId, sessionId),
+      this.discoverCodexModels(sandboxId, userId, sessionId),
     ]);
 
     const agyModels = agyRes.status === 'fulfilled' ? agyRes.value : [];
     const codexModels = codexRes.status === 'fulfilled' ? codexRes.value : [];
     const combined = [...agyModels, ...codexModels];
 
-    if (combined.length === 0 && this.cachedModels && this.cachedModels.length > 0) {
-      return this.cachedModels;
-    }
-
-    logger.info('Successfully discovered models dynamically from installed CLIs', {
+    logger.info('Successfully discovered models dynamically from installed CLIs in sandbox', {
+      sandboxId,
+      userId,
       count: combined.length,
       modelIds: combined.map((r) => r.id),
     });
     return combined;
   }
 
-  public async getAvailableModels(): Promise<DynamicModelOption[]> {
+  public async getAvailableModels(userId?: string, sessionId?: string): Promise<DynamicModelOption[]> {
+    const sandboxId = this.resolveSandboxId(userId, sessionId);
+    if (!sandboxId) {
+      return [];
+    }
+
     const now = Date.now();
-    if (this.cachedModels && now - this.lastModelsFetchTime < 300_000) {
-      return this.cachedModels;
+    const cached = this.sandboxModelsCache.get(sandboxId);
+    if (cached && now - cached.timestamp < 300_000 && cached.models.length > 0) {
+      return cached.models;
     }
 
-    if (this.pendingModelsPromise) {
-      return this.pendingModelsPromise;
+    const models = await this.fetchDynamicModelsFromCli(sandboxId, userId, sessionId);
+    if (models.length > 0) {
+      this.sandboxModelsCache.set(sandboxId, { models, timestamp: Date.now() });
     }
-
-    this.pendingModelsPromise = this.fetchDynamicModelsFromCli()
-      .then((models) => {
-        this.cachedModels = models;
-        this.lastModelsFetchTime = Date.now();
-        this.pendingModelsPromise = null;
-        return models;
-      })
-      .catch(() => {
-        this.pendingModelsPromise = null;
-        return this.cachedModels || [];
-      });
-
-    return this.pendingModelsPromise;
+    return models;
   }
 
   private extractCodeBlocks(text: string): CodeArtifactFile[] {

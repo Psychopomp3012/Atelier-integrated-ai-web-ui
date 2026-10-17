@@ -3,6 +3,8 @@ import { PromptExecutionInputSchema } from './agent.schema.js';
 import { agentService } from './agent.service.js';
 import { rateLimitService } from '../rate-limit/rate-limit.service.js';
 import { createSuccessResponse, createErrorResponse } from '../../utils/response.util.js';
+import { tokenUtil } from '../../utils/token.util.js';
+import { authService } from '../auth/auth.service.js';
 import { AppError } from '../../utils/error.util.js';
 
 export class AgentController {
@@ -16,8 +18,24 @@ export class AgentController {
     return `ip:${ip || '127.0.0.1'}`;
   }
 
-  public async getModels(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const models = await agentService.getAvailableModels();
+  public async getModels(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const query = req.query as { userId?: string; sessionId?: string };
+    const authHeader = req.headers.authorization;
+    let userId = query?.userId;
+    if (!userId && authHeader?.startsWith('Bearer ')) {
+      const token = authHeader.slice(7);
+      const verified = tokenUtil.verifyJwt(token);
+      if (verified.valid && verified.payload) {
+        userId = (verified.payload as any).userId || verified.payload.sub;
+      }
+      if (!userId) {
+        const session = await authService.getSession(token);
+        if (session?.user?.id) {
+          userId = session.user.id;
+        }
+      }
+    }
+    const models = await agentService.getAvailableModels(userId, query?.sessionId);
     return reply.status(200).send(createSuccessResponse(models));
   }
 

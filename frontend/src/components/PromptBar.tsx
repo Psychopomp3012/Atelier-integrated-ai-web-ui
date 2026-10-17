@@ -36,6 +36,12 @@ interface PromptBarProps {
   codexQuota?: CodexQuotaStats | null;
   availableModels?: ModelOption[];
   activeSandbox?: { sandboxId: string; name: string } | null;
+  sandboxUsage?: any;
+  onStartSandboxVM?: () => void;
+  onAttachExistingSandbox?: (sandboxId: string) => void;
+  isStartingSandbox?: boolean;
+  isAttachingSandbox?: string | null;
+  onRefreshModels?: () => void;
   onOpenAuthModal?: () => void;
 }
 
@@ -54,6 +60,12 @@ export const PromptBar: React.FC<PromptBarProps> = ({
   codexQuota,
   availableModels,
   activeSandbox,
+  sandboxUsage,
+  onStartSandboxVM,
+  onAttachExistingSandbox,
+  isStartingSandbox = false,
+  isAttachingSandbox = null,
+  onRefreshModels,
   onOpenAuthModal,
 }) => {
   const [prompt, setPrompt] = useState('');
@@ -761,6 +773,13 @@ export const PromptBar: React.FC<PromptBarProps> = ({
               codexQuota={codexQuota}
               availableModels={availableModels}
               onOpenAuthModal={onOpenAuthModal}
+              activeSandbox={activeSandbox}
+              sandboxUsage={sandboxUsage}
+              onStartSandboxVM={onStartSandboxVM}
+              onAttachExistingSandbox={onAttachExistingSandbox}
+              isStartingSandbox={isStartingSandbox}
+              isAttachingSandbox={isAttachingSandbox}
+              onRefreshModels={onRefreshModels}
             />
 
             {/* Dynamic Slash Commands Quick Button */}
