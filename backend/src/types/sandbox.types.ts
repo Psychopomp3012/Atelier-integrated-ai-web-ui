@@ -94,6 +94,8 @@ export interface SandboxCliExecutionResponse {
   };
   exitCode?: number;
   sandboxId?: string;
+  rateLimits?: any;
+  cli?: 'agy' | 'claude' | 'codex';
 }
 
 export interface ISandboxProvider {

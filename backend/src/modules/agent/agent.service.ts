@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import {
   AgentMessage,
   AgentStep,
@@ -20,7 +24,6 @@ import { codexQuotaService } from '../quota/codex-quota.service.js';
 import type { CliUsageTelemetry } from '../quota/quota.types.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { compactConversationHistory } from '../../utils/context-compactor.util.js';
-import { autonomousExecutor } from './autonomous-executor.service.js';
 import { AppError } from '../../utils/error.util.js';
 
 export interface DynamicModelOption {
@@ -126,6 +129,14 @@ export class AgentService {
       }
     }
 
+    if (!stdout) {
+      try {
+        const bin = cliAuthService.getAntigravityBin();
+        const { stdout: localOut } = await execFileAsync(bin, ['models'], { timeout: 15000 });
+        if (localOut) stdout = localOut;
+      } catch {}
+    }
+
     try {
       const cleanOutput = stdout
         .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '')
@@ -145,71 +156,7 @@ export class AgentService {
         if (this.cachedModels && this.cachedModels.length > 0) {
           return this.cachedModels.filter((m) => m.provider === 'gemini');
         }
-        const flashVis = getModelVisuals('gemini-3.8-flash-high', 'Gemini 3.8 Flash');
-        const sonnetVis = getModelVisuals('claude-sonnet-4-6', 'Claude 3.7 Sonnet');
-        const opusVis = getModelVisuals('claude-opus-4-6-thinking', 'Claude 3.7 Opus');
-        const ossVis = getModelVisuals('gpt-oss-120b-medium', 'GPT-OSS 120B');
-
-        return [
-          {
-            id: 'gemini-3.8-flash-high',
-            provider: 'gemini',
-            hostedBy: 'antigravity',
-            name: 'Gemini 3.8 Flash',
-            displayName: 'Gemini 3.8 Flash',
-            badge: 'Fast & Frontier',
-            description: 'Latest high-frequency release with rapid agentic reasoning and code execution',
-            latencyEstimate: '80ms',
-            icon: flashVis.icon,
-            iconColor: flashVis.iconColor,
-            iconSvg: flashVis.iconSvg,
-            defaultEffort: 'high',
-            effortOptions: [
-              { effort: 'high', modelId: 'gemini-3.8-flash-high', label: 'High', badge: 'Max Quality', description: 'Deep multi-step reasoning' },
-              { effort: 'medium', modelId: 'gemini-3.8-flash-medium', label: 'Medium', badge: 'Balanced', description: 'Balanced speed and synthesis depth' },
-              { effort: 'low', modelId: 'gemini-3.8-flash-low', label: 'Low', badge: 'Fastest', description: 'Ultra-fast inference with minimal latency' },
-            ],
-          },
-          {
-            id: 'claude-sonnet-4-6',
-            provider: 'gemini',
-            hostedBy: 'antigravity',
-            name: 'Claude 3.7 Sonnet',
-            displayName: 'Claude 3.7 Sonnet',
-            badge: 'Thinking / Code',
-            description: 'Advanced Anthropic reasoning model with thinking tokens',
-            latencyEstimate: '160ms',
-            icon: sonnetVis.icon,
-            iconColor: sonnetVis.iconColor,
-            iconSvg: sonnetVis.iconSvg,
-          },
-          {
-            id: 'claude-opus-4-6-thinking',
-            provider: 'gemini',
-            hostedBy: 'antigravity',
-            name: 'Claude 3.7 Opus',
-            displayName: 'Claude 3.7 Opus',
-            badge: 'Deep Reasoning',
-            description: 'Maximum depth reasoning for complex multi-file engineering problems',
-            latencyEstimate: '280ms',
-            icon: opusVis.icon,
-            iconColor: opusVis.iconColor,
-            iconSvg: opusVis.iconSvg,
-          },
-          {
-            id: 'gpt-oss-120b-medium',
-            provider: 'gemini',
-            hostedBy: 'antigravity',
-            name: 'GPT-OSS 120B',
-            displayName: 'GPT-OSS 120B',
-            badge: 'Open Weights 120B',
-            description: 'Large-scale open weights model with medium reasoning effort',
-            latencyEstimate: '120ms',
-            icon: ossVis.icon,
-            iconColor: ossVis.iconColor,
-            iconSvg: ossVis.iconSvg,
-          },
-        ];
+        return [];
       }
 
       // Register all discovered raw model IDs for Antigravity CLI routing
@@ -344,57 +291,99 @@ export class AgentService {
 
   private async discoverCodexModels(): Promise<DynamicModelOption[]> {
     const result: DynamicModelOption[] = [];
-    try {
-      const codexCachePath = path.join(os.homedir(), '.codex', 'models_cache.json');
-      if (fs.existsSync(codexCachePath)) {
-        const codexData = JSON.parse(fs.readFileSync(codexCachePath, 'utf8'));
-        if (Array.isArray(codexData.models)) {
-          const visibleModels = codexData.models
-            .filter((cm: any) => cm.visibility !== 'hide')
-            .sort((a: any, b: any) => (a.priority ?? 99) - (b.priority ?? 99));
+    let stdout = '';
 
-          for (const cm of visibleModels) {
-            const slug = cm.slug || cm.id;
-            if (!slug) continue;
-            this.codexModelIds.add(slug);
+    // 1. Live query from active cloud sandbox microVM
+    const activeSandboxId = sandboxService.getActiveSandboxId('default');
+    if (activeSandboxId) {
+      try {
+        const cmdRes = await sandboxService.executeInSandbox({
+          command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" codex debug models',
+          code: '',
+          language: 'bash',
+          sandboxId: activeSandboxId,
+          timeoutMs: 15000,
+        });
+        if (cmdRes && cmdRes.stdout) {
+          stdout = cmdRes.stdout;
+        }
+      } catch (err) {
+        logger.warn('Failed to live-query Codex models from cloud sandbox microVM', { error: String(err) });
+      }
+    }
 
-            const effortOptions = Array.isArray(cm.supported_reasoning_levels)
-              ? cm.supported_reasoning_levels.map((lvl: any) => {
-                  const effortId = `${slug}-${lvl.effort}`;
-                  this.codexModelIds.add(effortId);
-                  return {
-                    effort: lvl.effort as 'high' | 'medium' | 'low',
-                    modelId: effortId,
-                    label: String(lvl.effort).charAt(0).toUpperCase() + String(lvl.effort).slice(1),
-                    badge: lvl.effort === 'max' ? 'Max' : lvl.effort === 'high' ? 'High' : 'Fast',
-                    description: lvl.description || `${lvl.effort} reasoning effort`,
-                  };
-                })
-              : undefined;
+    // 2. Live query from local CLI if available
+    if (!stdout) {
+      try {
+        const codexBin = cliAuthService.getCodexBin();
+        const { stdout: localOut } = await execFileAsync(codexBin, ['debug', 'models'], { timeout: 15000 });
+        if (localOut) stdout = localOut;
+      } catch {}
+    }
 
-            const visuals = getModelVisuals(slug, cm.display_name || slug);
+    // 3. Parse live JSON output from Codex CLI
+    if (stdout) {
+      try {
+        const jsonStart = stdout.indexOf('{');
+        if (jsonStart !== -1) {
+          const codexData = JSON.parse(stdout.substring(jsonStart));
+          if (Array.isArray(codexData.models)) {
+            const visibleModels = codexData.models
+              .filter((cm: any) => cm.visibility !== 'hide')
+              .sort((a: any, b: any) => (a.priority ?? 99) - (b.priority ?? 99));
 
-            result.push({
-              id: slug,
-              provider: 'codex',
-              hostedBy: 'codex',
-              name: cm.display_name || slug,
-              displayName: cm.display_name || slug,
-              badge: cm.default_reasoning_level ? `${cm.default_reasoning_level} reasoning` : 'OpenAI Codex',
-              description: cm.description || 'OpenAI Codex model via ChatGPT Account',
-              latencyEstimate: '110ms',
-              icon: visuals.icon,
-              iconColor: visuals.iconColor,
-              iconSvg: visuals.iconSvg,
-              defaultEffort: cm.default_reasoning_level,
-              effortOptions,
-            });
+            for (const cm of visibleModels) {
+              const slug = cm.slug || cm.id;
+              if (!slug) continue;
+              this.codexModelIds.add(slug);
+
+              const effortOptions = Array.isArray(cm.supported_reasoning_levels)
+                ? cm.supported_reasoning_levels.map((lvl: any) => {
+                    const effortId = `${slug}-${lvl.effort}`;
+                    this.codexModelIds.add(effortId);
+                    return {
+                      effort: lvl.effort as 'high' | 'medium' | 'low',
+                      modelId: effortId,
+                      label: String(lvl.effort).charAt(0).toUpperCase() + String(lvl.effort).slice(1),
+                      badge: lvl.effort === 'max' ? 'Max' : lvl.effort === 'high' ? 'High' : 'Fast',
+                      description: lvl.description || `${lvl.effort} reasoning effort`,
+                    };
+                  })
+                : undefined;
+
+              const visuals = getModelVisuals(slug, cm.display_name || slug);
+
+              result.push({
+                id: slug,
+                provider: 'codex',
+                hostedBy: 'codex',
+                name: cm.display_name || slug,
+                displayName: cm.display_name || slug,
+                badge: cm.default_reasoning_level ? `${cm.default_reasoning_level} reasoning` : 'OpenAI Codex',
+                description: cm.description || 'OpenAI Codex model via ChatGPT Account',
+                latencyEstimate: '110ms',
+                icon: visuals.icon,
+                iconColor: visuals.iconColor,
+                iconSvg: visuals.iconSvg,
+                defaultEffort: cm.default_reasoning_level,
+                effortOptions,
+              });
+            }
           }
         }
+
+        if (result.length > 0) {
+          return result;
+        }
+      } catch (err) {
+        logger.warn('Failed to parse live Codex models JSON', { error: String(err) });
       }
-    } catch (err) {
-      logger.warn('Failed to dynamically discover Codex models', { error: String(err) });
     }
+
+    if (this.cachedModels && this.cachedModels.length > 0) {
+      return this.cachedModels.filter((m) => m.provider === 'codex');
+    }
+
     return result;
   }
 
@@ -506,7 +495,7 @@ export class AgentService {
     onStep?: (step: AgentStep) => void,
     userId?: string,
     sandboxId?: string
-  ): Promise<{ text: string; durationMs: number; usage?: CliUsageTelemetry; failureReason?: string } | null> {
+  ): Promise<{ text: string; durationMs: number; usage?: CliUsageTelemetry; failureReason?: string; cli?: string; rateLimits?: any } | null> {
     const start = Date.now();
     let lastFailureReason: string | undefined;
     const effectiveHistory = history.length > 0 ? history : [{ role: 'user' as const, content: prompt }];
@@ -573,353 +562,28 @@ export class AgentService {
           });
 
         if (sandboxResult?.text && (sandboxResult.exitCode === 0 || sandboxResult.exitCode === undefined)) {
-          return sandboxResult;
-        }
-      } catch (err: any) {
-        lastFailureReason = err?.message || String(err);
-        logger.warn('Sandbox-native CLI execution failed, checking fallback', { error: String(err) });
-      }
-    }
-
-    // 2. Autonomous Agent Execution Loop when Cloud Sandbox is Active (Fallback)
-    if (isSandboxActive) {
-      try {
-        const callInference = async (
-          messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
-        ): Promise<string> => {
-          const oauthAccessToken = await cliAuthService.getValidGeminiAccessToken().catch(() => null);
-          const geminiKey = customKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-          if (oauthAccessToken || geminiKey) {
-            try {
-              const geminiModelId = modelUsed && (modelUsed.includes('gemini') || modelUsed.includes('flash') || modelUsed.includes('pro'))
-                ? (modelUsed.match(/gemini-[\d.]+-[\w]+/i)?.[0] || 'gemini-2.0-flash')
-                : 'gemini-2.0-flash';
-              const url = geminiKey
-                ? `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent?key=${geminiKey}`
-                : `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent`;
-              const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-              if (oauthAccessToken && !geminiKey) {
-                headers['Authorization'] = `Bearer ${oauthAccessToken}`;
-              }
-              const contents = messages
-                .map((m) => ({
-                  role: m.role === 'assistant' ? 'model' : 'user',
-                  parts: [{ text: m.content }],
-                }));
-              const res = await fetch(url, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({
-                  contents,
-                }),
-              });
-              if (res.ok) {
-                const data = (await res.json()) as any;
-                const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (text) return text;
-              }
-            } catch {}
-          }
-
-          // Direct API fallback using standard provider keys if available
-          const openAiKey = customKey || process.env.OPENAI_API_KEY;
-          if (openAiKey) {
-            try {
-              const res = await fetch('https://api.openai.com/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${openAiKey}`,
-                },
-                body: JSON.stringify({
-                  model: 'gpt-4o-mini',
-                  messages,
-                }),
-              });
-              if (res.ok) {
-                const data = (await res.json()) as any;
-                const text = data?.choices?.[0]?.message?.content;
-                if (text && text.trim()) return text.trim();
-              }
-            } catch (err) {
-              logger.warn('Direct OpenAI inference attempt failed', { error: String(err) });
-            }
-          }
-
-          const anthropicKey = customKey || process.env.ANTHROPIC_API_KEY;
-          if (anthropicKey) {
-            try {
-              const res = await fetch('https://api.anthropic.com/v1/messages', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-api-key': anthropicKey,
-                  'anthropic-version': '2023-06-01',
-                },
-                body: JSON.stringify({
-                  model: 'claude-3-5-sonnet-20241022',
-                  max_tokens: 4096,
-                  messages: messages.filter((m) => m.role !== 'system'),
-                  system: messages.find((m) => m.role === 'system')?.content,
-                }),
-              });
-              if (res.ok) {
-                const data = (await res.json()) as any;
-                const text = data?.content?.[0]?.text;
-                if (text && text.trim()) return text.trim();
-              }
-            } catch (err) {
-              logger.warn('Direct Anthropic inference attempt failed', { error: String(err) });
-            }
-          }
-
-          throw new AppError(
-            'Inference failed: No active model provider or API key is available. Please link an AI subscription or configure an API key in settings.',
-            401,
-            'AUTH_REQUIRED'
-          );
-        };
-
-        const autoResult = await autonomousExecutor.executeAutonomousLoop(
-          prompt,
-          sessionId || 'default',
-          userId,
-          modelUsed,
-          effectiveHistory,
-          callInference,
-          onStep,
-          onToken
-        );
-
-        if (autoResult.text) {
-          await this.streamTextToCallback(autoResult.text, onToken);
           return {
-            text: autoResult.text,
-            durationMs: autoResult.durationMs,
+            ...sandboxResult,
+            cli: sandboxResult.cli || targetCli,
           };
         }
       } catch (err: any) {
-        logger.warn('Autonomous execution loop failed, falling back to direct completion', {
-          error: String(err),
-        });
-      }
-    }
-
-    // 2. Google Antigravity CLI Execution (agy)
-    const isAntigravityTarget =
-      this.antigravityModelIds.has(modelUsed) ||
-      modelUsed.startsWith('gemini-') ||
-      modelUsed.startsWith('antigravity-') ||
-      (modelUsed === 'auto' && cliAuthService.isAntigravityLinked() && !cliAuthService.isCodexLinked() && !cliAuthService.isClaudeLinked());
-
-    if (isAntigravityTarget) {
-      if (isSandboxActive && cliAuthService.isAntigravityLinked()) {
-        try {
-          // Sandbox-Native Execution: runs CLI inside the microVM under agent-runner
-          const sandboxResult = await sandboxService
-            .executeCliInSandbox({
-              sessionId,
-              userId,
-              sandboxId: activeSandboxId,
-              cli: 'agy',
-              prompt: cliPrompt,
-              model: modelUsed,
-              onToken,
-              onStep,
-            })
-            .catch(() => null);
-
-          if (sandboxResult?.text && (sandboxResult.exitCode === 0 || sandboxResult.exitCode === undefined)) {
-            return sandboxResult;
-          }
-        } catch (err: any) {
-          lastFailureReason = err?.message || String(err);
-          logger.warn('Antigravity CLI execution in sandbox failed, checking API key fallback', { error: String(err) });
-        }
-      }
-
-      // 1. Linked Google/Antigravity OAuth Token OR Configured Key
-      const oauthAccessToken = await cliAuthService.getValidGeminiAccessToken();
-      const geminiKey = customKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-
-      if (oauthAccessToken || geminiKey) {
-        try {
-          const geminiModelId = modelUsed && (modelUsed.includes('gemini') || modelUsed.includes('flash') || modelUsed.includes('pro'))
-            ? (modelUsed.match(/gemini-[\d.]+-[\w]+/i)?.[0] || 'gemini-2.0-flash')
-            : 'gemini-2.0-flash';
-          const url = geminiKey
-            ? `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent?key=${geminiKey}`
-            : `https://generativelanguage.googleapis.com/v1beta/models/${geminiModelId}:generateContent`;
-
-          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-          if (oauthAccessToken && !geminiKey) {
-            headers['Authorization'] = `Bearer ${oauthAccessToken}`;
-          }
-
-          const normalizedContents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
-          for (const m of effectiveHistory) {
-            const role = m.role === 'assistant' ? 'model' : 'user';
-            const last = normalizedContents[normalizedContents.length - 1];
-            if (last && last.role === role) {
-              last.parts[0].text += '\n\n' + m.content;
-            } else {
-              normalizedContents.push({ role, parts: [{ text: m.content }] });
-            }
-          }
-          const res = await fetch(url, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              contents: normalizedContents,
-            }),
-          });
-          if (res.ok) {
-            const data = (await res.json()) as any;
-            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (text) {
-              await this.streamTextToCallback(text, onToken);
-              return { text, durationMs: Date.now() - start };
-            }
-          } else {
-            const errBody = await res.text().catch(() => '');
-            logger.warn('Google Gemini API returned non-OK status', { status: res.status, errBody: errBody.substring(0, 200) });
-          }
-        } catch (err) {
-          logger.warn('Gemini live API call failed, falling back to local orchestrator', { error: String(err) });
-        }
-      }
-    }
-
-    // 2. OpenAI / Codex Provider
-    const isCodexTarget =
-      !isAntigravityTarget &&
-      (this.codexModelIds.has(modelUsed) ||
-        modelUsed.startsWith('codex-') ||
-        modelUsed.startsWith('gpt-') ||
-        modelUsed.startsWith('o1') ||
-        modelUsed.startsWith('o3') ||
-        (modelUsed === 'auto' && cliAuthService.isCodexLinked()));
-
-    if (isCodexTarget) {
-      if (isSandboxActive && cliAuthService.isCodexLinked()) {
-        try {
-          // Sandbox-Native Execution: runs Codex CLI in sandbox microVM
-          const sandboxResult = await sandboxService
-            .executeCliInSandbox({
-              sessionId,
-              userId,
-              cli: 'codex',
-              prompt: cliPrompt,
-              model: modelUsed,
-              onToken,
-              onStep,
-            })
-            .catch(() => null);
-
-          if (sandboxResult?.text && (sandboxResult.exitCode === 0 || sandboxResult.exitCode === undefined)) {
-            return sandboxResult;
-          }
-        } catch (err: any) {
-          lastFailureReason = err?.message || String(err);
-          logger.warn('Codex CLI in sandbox encountered issue, falling back to API / provider', { error: String(err) });
-        }
-      }
-
-      const openAiKey = customKey || process.env.OPENAI_API_KEY;
-      if (openAiKey) {
-        try {
-          const targetOpenAiModel = modelUsed.replace(/-(high|medium|low)$/i, '');
-          const res = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${openAiKey}`,
-            },
-            body: JSON.stringify({
-              model: targetOpenAiModel,
-              messages: effectiveHistory,
-            }),
-          });
-          if (res.ok) {
-            const data = (await res.json()) as any;
-            const text = data?.choices?.[0]?.message?.content;
-            if (text) {
-              await this.streamTextToCallback(text, onToken);
-              return { text, durationMs: Date.now() - start };
-            }
-          }
-        } catch (err) {
-          logger.warn('OpenAI live API call failed, falling back to local orchestrator', { error: String(err) });
-        }
-      }
-    }
-
-    // 3. Anthropic Claude Provider
-    if (modelUsed.startsWith('claude-') || (modelUsed === 'auto' && cliAuthService.isClaudeLinked())) {
-      if (isSandboxActive && cliAuthService.isClaudeLinked()) {
-        try {
-          // Sandbox-Native Execution: runs Claude CLI inside microVM
-          const sandboxResult = await sandboxService
-            .executeCliInSandbox({
-              sessionId,
-              userId,
-              cli: 'claude',
-              prompt: cliPrompt,
-              model: modelUsed,
-              onToken,
-            })
-            .catch(() => null);
-
-          if (sandboxResult?.text && (sandboxResult.exitCode === 0 || sandboxResult.exitCode === undefined)) {
-            return sandboxResult;
-          }
-        } catch (err) {
-          logger.warn('Claude CLI execution in sandbox failed, falling back to API / provider', { error: String(err) });
-        }
-      }
-
-      const anthropicKey = customKey || process.env.ANTHROPIC_API_KEY;
-      if (anthropicKey) {
-        try {
-          const targetClaudeModel = modelUsed.replace(/-(high|medium|low)$/i, '');
-          const res = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': anthropicKey,
-              'anthropic-version': '2023-06-01',
-            },
-            body: JSON.stringify({
-              model: targetClaudeModel,
-              max_tokens: 4096,
-              messages: effectiveHistory,
-            }),
-          });
-          if (res.ok) {
-            const data = (await res.json()) as any;
-            const text = data?.content?.[0]?.text;
-            if (text) {
-              await this.streamTextToCallback(text, onToken);
-              return { text, durationMs: Date.now() - start };
-            }
-          }
-        } catch (err) {
-          logger.warn('Claude live API call failed, falling back to local orchestrator', { error: String(err) });
-        }
+        lastFailureReason = err?.message || String(err);
+        logger.warn('Sandbox-native CLI execution failed', { error: String(err) });
       }
     }
 
     if (lastFailureReason) {
-      logger.warn('All configured AI providers failed for model request', { modelUsed, lastFailureReason });
+      logger.warn('Sandbox CLI execution failed for model request', { modelUsed, lastFailureReason });
       return {
-        text: `### Provider Execution Notice\n\nThe requested model (\`${modelUsed}\`) could not be executed by the cloud sandbox microVM.\n\n**Reason**: ${lastFailureReason}\n\n**Resolution Options**:\n- **Antigravity CLI (agy)**: Connect your Google account under Subscriptions (no developer API key required).\n- **OpenAI Codex**: Linked and ready via \`auth.json\`. Switch your model to OpenAI Codex.\n- **Claude Code**: Link Claude CLI via subscription login or set \`ANTHROPIC_API_KEY\`.`,
+        text: `### CLI Execution Notice\n\nThe requested model (\`${modelUsed}\`) could not be executed by the cloud sandbox microVM.\n\n**Reason**: ${lastFailureReason}\n\n**Resolution Options**:\n- **Antigravity CLI (agy)**: Connect your Google account under Subscriptions.\n- **OpenAI Codex**: Ensure your ChatGPT / Codex subscription is linked.\n- **Claude Code**: Ensure Claude CLI is linked.`,
         durationMs: Date.now() - start,
         failureReason: lastFailureReason,
       };
     }
 
     throw new AppError(
-      `No available model provider could execute model "${modelUsed}". Please link your subscription or configure an API key in settings.`,
+      `No available model provider could execute model "${modelUsed}". Please link your subscription in Subscriptions menu.`,
       400,
       'MODEL_EXECUTION_FAILED'
     );
@@ -1201,12 +865,19 @@ export class AgentService {
           latencyMs: liveResult.durationMs,
         };
         const isCodex =
-          modelUsed.startsWith('codex-') ||
+          (liveResult as any).cli === 'codex' ||
+          this.codexModelIds.has(modelUsed) ||
+          modelUsed === 'codex' ||
+          modelUsed.startsWith('codex') ||
           modelUsed.startsWith('gpt-') ||
           modelUsed.startsWith('o1') ||
           modelUsed.startsWith('o3');
         if (isCodex) {
-          await codexQuotaService.recordTurn(turnData);
+          await codexQuotaService.recordTurn({
+            ...turnData,
+            userId,
+            rateLimits: (liveResult as any).rateLimits,
+          });
         } else {
           await antigravityQuotaService.recordTurn(turnData);
         }
@@ -1299,7 +970,7 @@ export class AgentService {
       steps,
       codeFiles,
       executionResult: {
-        sandboxId: 'dev-vm-8',
+        sandboxId: activeSbId || 'none',
         durationMs: 45,
         status: 'HTTP 503 Service Unavailable',
         details: 'Execution aborted due to missing AI backend',

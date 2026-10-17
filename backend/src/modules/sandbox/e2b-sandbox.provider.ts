@@ -894,6 +894,7 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     let accumulatedText = '';
     let rawStdout = '';
     let lineBuffer = '';
+    let latestRateLimits: any = null;
     let cliUsage = {
       input_tokens: 0,
       output_tokens: 0,
@@ -920,6 +921,17 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
               // Strip ANSI escape codes from pty/script wrapper if present
               const cleanLine = trimmed.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
               const event = JSON.parse(cleanLine);
+
+              // Capture authentic rate limits if present in event payload
+              if (
+                (event.type === 'event_msg' && (event.payload?.rate_limits || event.payload?.info?.rate_limits)) ||
+                event.rate_limits
+              ) {
+                const rl = event.payload?.rate_limits || event.payload?.info?.rate_limits || event.rate_limits;
+                if (rl) {
+                  latestRateLimits = rl;
+                }
+              }
 
               // Handle standard delta/token events
               if (event.type === 'token' || event.type === 'delta') {
@@ -981,12 +993,13 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
                   exitCode: event.item.exit_code ?? 0,
                 });
               } else if (event.type === 'turn.completed' && event.usage) {
+                const u = event.usage;
                 cliUsage = {
-                  input_tokens: event.usage.input_tokens || 0,
-                  output_tokens: event.usage.output_tokens || 0,
-                  thinking_tokens: event.usage.thinking_tokens || 0,
-                  cache_read_tokens: event.usage.cache_read_tokens || 0,
-                  total_tokens: (event.usage.input_tokens || 0) + (event.usage.output_tokens || 0),
+                  input_tokens: Number(u.input_tokens) || 0,
+                  output_tokens: Number(u.output_tokens) || 0,
+                  thinking_tokens: Number(u.reasoning_output_tokens) || Number(u.thinking_tokens) || 0,
+                  cache_read_tokens: Number(u.cached_input_tokens) || Number(u.cache_read_tokens) || 0,
+                  total_tokens: (Number(u.input_tokens) || 0) + (Number(u.output_tokens) || 0),
                   duration_seconds: Math.round((Date.now() - start) / 1000),
                   num_turns: 1,
                 };
@@ -1217,6 +1230,8 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
         usage: cliUsage,
         exitCode: result.exitCode,
         sandboxId,
+        rateLimits: latestRateLimits,
+        cli: req.cli,
       };
     } catch (err: unknown) {
       const durationMs = Date.now() - start;

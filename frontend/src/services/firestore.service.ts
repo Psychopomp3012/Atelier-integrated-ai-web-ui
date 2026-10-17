@@ -7,28 +7,51 @@ import type { UserProfile, LinkedAIPlatformAccount, ChatMessage, ChatSession } f
  * write operations (e.g. direct Firestore writes). All persistence is authenticated
  * with the user's weekly JWT and handled by the Fastify backend.
  */
+let inFlightProfileSyncPromise: Promise<void> | null = null;
+let lastSyncedProfileJson = '';
+let lastSyncedProfileTime = 0;
+const PROFILE_SYNC_TTL = 5000;
+
 export const firestoreService = {
   /**
    * Syncs the user profile to the cloud backend via POST /api/v1/auth/profile.
    */
   async syncUserProfile(user: UserProfile, _fbUid?: string): Promise<void> {
-    try {
-      await apiFetch('/api/v1/auth/profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          avatarUrl: user.avatarUrl,
-          primaryPlatform: user.primaryPlatform,
-          linkedPlatforms: user.linkedPlatforms,
-        }),
-      });
-      console.log(`[Backend API] Synchronized user profile for ${user.email} (${user.id})`);
-    } catch (error) {
-      console.warn('[Backend API] Failed to sync user profile:', error);
+    const payload = JSON.stringify({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      avatarUrl: user.avatarUrl,
+      primaryPlatform: user.primaryPlatform,
+      linkedPlatforms: user.linkedPlatforms,
+    });
+
+    const now = Date.now();
+    if (payload === lastSyncedProfileJson && now - lastSyncedProfileTime < PROFILE_SYNC_TTL) {
+      return;
     }
+    if (inFlightProfileSyncPromise) {
+      return inFlightProfileSyncPromise;
+    }
+
+    inFlightProfileSyncPromise = (async () => {
+      try {
+        await apiFetch('/api/v1/auth/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+        });
+        lastSyncedProfileJson = payload;
+        lastSyncedProfileTime = Date.now();
+        console.log(`[Backend API] Synchronized user profile for ${user.email} (${user.id})`);
+      } catch (error) {
+        console.warn('[Backend API] Failed to sync user profile:', error);
+      } finally {
+        inFlightProfileSyncPromise = null;
+      }
+    })();
+
+    return inFlightProfileSyncPromise;
   },
 
   /**

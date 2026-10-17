@@ -1,10 +1,12 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { CodexQuotaStats, RecordTurnInput, CliQuotaLimits, QuotaGroup } from './quota.types.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
+import { sandboxService } from '../sandbox/sandbox.service.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 import { logger } from '../../utils/logger.util.js';
+
+const execFileAsync = promisify(execFile);
 
 interface CliTelemetryPersistence {
   totalTurns: number;
@@ -15,7 +17,6 @@ interface CliTelemetryPersistence {
   cacheReadTokens: number;
   lastLatencyMs?: number;
   totalLatencyMs?: number;
-  rateLimits?: CodexScannedRateLimits;
 }
 
 interface SessionStats {
@@ -29,116 +30,207 @@ interface SessionStats {
   totalLatencyMs: number;
 }
 
-interface CodexRateLimitWindow {
-  used_percent?: number;
-  window_minutes?: number;
-  resets_at?: number;
-}
-
-interface CodexScannedRateLimits {
-  limit_id?: string;
-  primary?: CodexRateLimitWindow;
-  secondary?: CodexRateLimitWindow;
-  plan_type?: string;
-}
-
 export class CodexQuotaService {
-  private readonly storagePath: string;
+  private readonly inMemoryTelemetryMap: Map<string, CliTelemetryPersistence> = new Map();
   private readonly sessionStatsMap: Map<string, SessionStats> = new Map();
   private readonly cachedQuotaLimitsMap: Map<string, { limits: CliQuotaLimits; timestamp: number }> = new Map();
-  private cachedQuotaLimits: CliQuotaLimits | null = null;
-  private lastQuotaFetchTime: number = 0;
-  private scannedRateLimits: CodexScannedRateLimits | null = null;
 
   constructor() {
-    this.storagePath = path.join(os.homedir(), '.codex', 'cli_usage_telemetry.json');
-    this.scanSessionsTelemetry();
-    this.fetchCodexQuotaLimits().catch(() => {});
+    // Dynamic live initialization: no local file scanning or storage.
   }
 
   /**
-   * Scans ~/.codex/sessions directory for authentic CLI rollout token usage and rate limit events
+   * Queries Codex CLI version dynamically via cloud sandbox microVM or local CLI without touching any files.
    */
-  public scanSessionsTelemetry(): CliTelemetryPersistence {
-    const sessionsDir = path.join(os.homedir(), '.codex', 'sessions');
-    let totalTurns = 0;
-    let totalTokens = 0;
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let thinkingTokens = 0;
-    let cacheReadTokens = 0;
-    let latestRateLimitTime = 0;
-
-    const findJsonlFiles = (dir: string): string[] => {
-      const files: string[] = [];
-      if (!fs.existsSync(dir)) return files;
+  private async queryCodexVersion(): Promise<string> {
+    const activeSandboxId = sandboxService.getActiveSandboxId('default');
+    if (activeSandboxId) {
       try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          const fullPath = path.join(dir, entry.name);
-          if (entry.isDirectory()) {
-            files.push(...findJsonlFiles(fullPath));
-          } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-            files.push(fullPath);
-          }
+        const cmdRes = await sandboxService.executeInSandbox({
+          command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" codex --version',
+          code: '',
+          language: 'bash',
+          sandboxId: activeSandboxId,
+          timeoutMs: 10000,
+        });
+        if (cmdRes && cmdRes.stdout) {
+          const match = cmdRes.stdout.match(/codex(?:-cli)?\s+([0-9.]+)/i);
+          if (match) return match[1];
         }
       } catch {}
-      return files;
-    };
-
-    try {
-      const files = findJsonlFiles(sessionsDir);
-      for (const file of files) {
-        try {
-          const content = fs.readFileSync(file, 'utf8');
-          const lines = content.split('\n');
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const data = JSON.parse(line);
-              if (data.type === 'token_usage_record' && data.payload?.usage) {
-                totalTurns += 1;
-                const u = data.payload.usage;
-                totalTokens += Number(u.total_tokens) || 0;
-                promptTokens += Number(u.input_tokens) || 0;
-                completionTokens += Number(u.output_tokens) || 0;
-                thinkingTokens += Number(u.reasoning_output_tokens) || 0;
-                cacheReadTokens += Number(u.cached_input_tokens) || 0;
-              }
-              if (data.type === 'event_msg' && data.payload?.rate_limits) {
-                const eventTime = data.timestamp ? new Date(data.timestamp).getTime() : 0;
-                if (eventTime >= latestRateLimitTime) {
-                  latestRateLimitTime = eventTime;
-                  this.scannedRateLimits = data.payload.rate_limits;
-                }
-              }
-            } catch {}
-          }
-        } catch {}
-      }
-    } catch (err) {
-      logger.warn('Failed to scan ~/.codex/sessions for telemetry', { error: String(err) });
     }
 
-    return {
-      totalTurns,
-      totalTokens,
-      promptTokens,
-      completionTokens,
-      thinkingTokens,
-      cacheReadTokens,
+    try {
+      const codexBin = cliAuthService.getCodexBin();
+      const { stdout } = await execFileAsync(codexBin, ['--version'], { timeout: 10000 });
+      if (stdout) {
+        const match = stdout.match(/codex(?:-cli)?\s+([0-9.]+)/i);
+        if (match) return match[1];
+      }
+    } catch {}
+
+    return '0.163.0';
+  }
+
+  /**
+   * Loads user Codex telemetry strictly from memory cache or Firebase Firestore.
+   * Completely avoids reading any local files on the backend.
+   * Quota and rate limits are NEVER loaded from Firestore; they are always fetched live.
+   */
+  private async loadPersistenceAsync(userKey?: string, userEmail?: string): Promise<CliTelemetryPersistence> {
+    const key = userKey || userEmail || 'default';
+    if (this.inMemoryTelemetryMap.has(key)) {
+      return this.inMemoryTelemetryMap.get(key)!;
+    }
+
+    try {
+      const firestoreData = await firestoreBackendService.getUserTelemetry(key, userEmail, 'codex');
+      if (firestoreData) {
+        const sanitized: CliTelemetryPersistence = {
+          totalTurns: Number(firestoreData.totalTurns) || 0,
+          totalTokens: Number(firestoreData.totalTokens) || 0,
+          promptTokens: Number(firestoreData.promptTokens) || 0,
+          completionTokens: Number(firestoreData.completionTokens) || 0,
+          thinkingTokens: Number(firestoreData.thinkingTokens) || 0,
+          cacheReadTokens: Number(firestoreData.cacheReadTokens) || 0,
+          lastLatencyMs: Number(firestoreData.lastLatencyMs) || 0,
+          totalLatencyMs: Number(firestoreData.totalLatencyMs) || 0,
+        };
+        this.inMemoryTelemetryMap.set(key, sanitized);
+        return sanitized;
+      }
+    } catch (err) {
+      logger.warn('[Codex Quota] Failed to load telemetry from Firestore', { error: String(err) });
+    }
+
+    const fresh: CliTelemetryPersistence = {
+      totalTurns: 0,
+      totalTokens: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      thinkingTokens: 0,
+      cacheReadTokens: 0,
       lastLatencyMs: 0,
       totalLatencyMs: 0,
     };
+    this.inMemoryTelemetryMap.set(key, fresh);
+    return fresh;
   }
 
   /**
-   * Fetches authentic OpenAI Codex quota and model limits from ~/.codex configuration
+   * Saves user Codex telemetry strictly into memory cache and Firebase Firestore.
+   * Excludes all volatile quota and rate limit data from Firestore.
+   */
+  private savePersistence(data: CliTelemetryPersistence, userKey?: string, userEmail?: string): void {
+    const key = userKey || userEmail || 'default';
+    this.inMemoryTelemetryMap.set(key, data);
+    firestoreBackendService.saveUserTelemetry(key, data, 'codex', userEmail).catch((err) => {
+      logger.warn('[Codex Quota] Failed to save telemetry to Firestore', { error: String(err) });
+    });
+  }
+
+  /**
+   * Queries authentic live OpenAI Codex rate limits and account quota directly from Codex CLI daemon.
+   * Executes via cloud sandbox microVM first, then falls back to local CLI on dev.
+   */
+  private async queryLiveCodexQuota(): Promise<{ rateLimits?: any; account?: any } | null> {
+    const activeSandboxId = sandboxService.getActiveSandboxId('default');
+    if (activeSandboxId) {
+      try {
+        const script = `node -e 'const { spawn } = require("child_process"); const proc = spawn("codex", ["app-server", "--stdio"]); let buffer = ""; let rateLimits = null; let account = null; const timer = setTimeout(() => { try { proc.kill(); } catch {} process.stdout.write(JSON.stringify({ rateLimits, account })); process.exit(0); }, 4000); proc.stdout.on("data", (chunk) => { buffer += chunk.toString(); const lines = buffer.split("\\n"); buffer = lines.pop() || ""; for (const line of lines) { const trimmed = line.trim(); if (!trimmed) continue; try { const json = JSON.parse(trimmed); if (json.id === 2 && json.result?.rateLimits) rateLimits = json.result.rateLimits; if (json.id === 3 && json.result?.account) account = json.result.account; if (rateLimits && account) { clearTimeout(timer); try { proc.kill(); } catch {} process.stdout.write(JSON.stringify({ rateLimits, account })); process.exit(0); } } catch {} } }); proc.on("error", () => { clearTimeout(timer); process.exit(0); }); proc.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: { name: "atelier-ui", title: "Atelier", version: "1.0.0" }, capabilities: null } }) + "\\n"); setTimeout(() => { try { proc.stdin.write(JSON.stringify({ id: 2, method: "account/rateLimits/read", params: {} }) + "\\n"); proc.stdin.write(JSON.stringify({ id: 3, method: "account/read", params: {} }) + "\\n"); } catch {} }, 200);'`;
+        const cmdRes = await sandboxService.executeInSandbox({
+          command: `sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" ${script}`,
+          code: '',
+          language: 'bash',
+          sandboxId: activeSandboxId,
+          timeoutMs: 6000,
+        });
+        if (cmdRes && cmdRes.stdout) {
+          const parsed = JSON.parse(cmdRes.stdout.trim());
+          if (parsed && (parsed.rateLimits || parsed.account)) {
+            return parsed;
+          }
+        }
+      } catch (err) {
+        logger.warn('[Codex Quota] Failed to live-query rate limits from cloud sandbox microVM', { error: String(err) });
+      }
+    }
+
+    // Direct CLI live execution via app-server JSON-RPC protocol
+    try {
+      const codexBin = cliAuthService.getCodexBin();
+      return await new Promise<{ rateLimits?: any; account?: any } | null>((resolve) => {
+        const proc = spawn(codexBin, ['app-server', '--stdio']);
+        let buffer = '';
+        let rateLimits: any = null;
+        let account: any = null;
+
+        const timer = setTimeout(() => {
+          try { proc.kill(); } catch {}
+          resolve(rateLimits ? { rateLimits, account } : null);
+        }, 5000);
+
+        proc.stdout.on('data', (chunk) => {
+          buffer += chunk.toString();
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const json = JSON.parse(trimmed);
+              if (json.id === 2 && json.result?.rateLimits) {
+                rateLimits = json.result.rateLimits;
+              }
+              if (json.id === 3 && json.result?.account) {
+                account = json.result.account;
+              }
+              if (rateLimits && account) {
+                clearTimeout(timer);
+                try { proc.kill(); } catch {}
+                resolve({ rateLimits, account });
+                return;
+              }
+            } catch {}
+          }
+        });
+
+        proc.on('error', (err) => {
+          clearTimeout(timer);
+          logger.warn('[Codex Quota] Local Codex app-server process error', { error: String(err) });
+          resolve(null);
+        });
+
+        const init = JSON.stringify({
+          id: 1,
+          method: 'initialize',
+          params: {
+            clientInfo: { name: 'atelier-ui', title: 'Atelier', version: '1.0.0' },
+            capabilities: null,
+          },
+        }) + '\n';
+        proc.stdin.write(init);
+
+        setTimeout(() => {
+          try {
+            proc.stdin.write(JSON.stringify({ id: 2, method: 'account/rateLimits/read', params: {} }) + '\n');
+            proc.stdin.write(JSON.stringify({ id: 3, method: 'account/read', params: {} }) + '\n');
+          } catch {}
+        }, 200);
+      });
+    } catch (err) {
+      logger.warn('[Codex Quota] Failed to live-query quota via Codex app-server', { error: String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * Fetches authentic OpenAI Codex quota and model limits freshly and live from the CLI.
+   * Completely avoids storing or reading quota from Firestore.
    */
   public async fetchCodexQuotaLimits(
     userKey?: string,
-    userEmail?: string,
-    persistence?: CliTelemetryPersistence
+    userEmail?: string
   ): Promise<CliQuotaLimits | null> {
     const cacheKey = userKey || userEmail || 'default';
     const cached = this.cachedQuotaLimitsMap.get(cacheKey);
@@ -147,52 +239,42 @@ export class CodexQuotaService {
       return cached.limits;
     }
 
-    let activeRateLimits = persistence?.rateLimits;
-
-    if (!activeRateLimits) {
-      if (!this.scannedRateLimits) {
-        this.scanSessionsTelemetry();
-      }
-      activeRateLimits = this.scannedRateLimits || undefined;
-    }
+    const version = await this.queryCodexVersion();
+    const liveData = await this.queryLiveCodexQuota();
+    const activeRateLimits = liveData?.rateLimits;
 
     try {
-      let version = '0.162.1';
-      const versionPath = path.join(os.homedir(), '.codex', 'version.json');
-      if (fs.existsSync(versionPath)) {
-        try {
-          const vData = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
-          if (vData.latest_version) version = vData.latest_version;
-        } catch {}
-      }
-
       const groups: QuotaGroup[] = [];
       if (activeRateLimits?.primary) {
         const primary = activeRateLimits.primary;
-        const usedPct = typeof primary.used_percent === 'number' ? primary.used_percent : 0;
+        const usedPct = typeof primary.usedPercent === 'number'
+          ? primary.usedPercent
+          : typeof primary.used_percent === 'number'
+          ? primary.used_percent
+          : 0;
         const remainingFraction = Math.max(0, Math.min(1, (100 - usedPct) / 100));
-        const resetTime = primary.resets_at
-          ? new Date(primary.resets_at * 1000).toISOString()
-          : new Date(Date.now() + (primary.window_minutes || 43200) * 60 * 1000).toISOString();
+        const windowMins = primary.windowDurationMins || primary.window_minutes || 43200;
+        const resetSeconds = primary.resetsAt || primary.resets_at;
+        const resetTime = resetSeconds
+          ? new Date(resetSeconds * 1000).toISOString()
+          : new Date(Date.now() + windowMins * 60 * 1000).toISOString();
 
-        const windowDesc = primary.window_minutes
-          ? primary.window_minutes <= 360
-            ? `${Math.round(primary.window_minutes / 60)}h rolling window`
-            : `${Math.round(primary.window_minutes / 1440)}d rolling window`
-          : 'Rolling capacity window';
+        const windowDesc = windowMins <= 360
+          ? `${Math.round(windowMins / 60)}h rolling window`
+          : `${Math.round(windowMins / 1440)}d rolling window`;
 
-        const primaryWindowType =
-          primary.window_minutes && primary.window_minutes <= 360
-            ? '5h'
-            : primary.window_minutes && primary.window_minutes <= 10080
-            ? 'weekly'
-            : 'monthly';
+        const primaryWindowType = windowMins <= 360
+          ? '5h'
+          : windowMins <= 10080
+          ? 'weekly'
+          : 'monthly';
 
-        // Codex has ONLY 1 meter (single rolling limit window)
+        const planName = (activeRateLimits.planType || liveData?.account?.planType || 'ChatGPT').toUpperCase();
+
         const buckets = [
           {
             id: 'codex-rolling-limit',
-            name: 'Codex Limit Remaining',
+            name: `Codex Limit Remaining (${planName} Plan)`,
             description: 'Enforced dynamically by OpenAI Codex infrastructure',
             window: primaryWindowType,
             remaining_fraction: remainingFraction,
@@ -200,10 +282,38 @@ export class CodexQuotaService {
           },
         ];
 
+        // Include secondary window if present (e.g. secondary rate limit bucket)
+        if (activeRateLimits.secondary) {
+          const sec = activeRateLimits.secondary;
+          const secUsed = typeof sec.usedPercent === 'number' ? sec.usedPercent : (sec.used_percent || 0);
+          const secRemaining = Math.max(0, Math.min(1, (100 - secUsed) / 100));
+          const secMins = sec.windowDurationMins || sec.window_minutes || 360;
+          const secResetSec = sec.resetsAt || sec.resets_at;
+          const secResetTime = secResetSec
+            ? new Date(secResetSec * 1000).toISOString()
+            : new Date(Date.now() + secMins * 60 * 1000).toISOString();
+
+          buckets.push({
+            id: 'codex-secondary-limit',
+            name: 'Codex Secondary Window',
+            description: 'Secondary rolling capacity window',
+            window: secMins <= 360 ? '5h' : 'weekly',
+            remaining_fraction: secRemaining,
+            reset_time: secResetTime,
+          });
+        }
+
         groups.push({
           name: 'OpenAI Codex Limits',
           description: `Authenticated via ChatGPT Account (${windowDesc})`,
           buckets,
+        });
+
+        logger.info('[Codex Quota] Resolved live OpenAI Codex quota', {
+          usedPercent: usedPct,
+          remainingFraction,
+          resetTime,
+          planType: planName,
         });
       }
 
@@ -215,200 +325,27 @@ export class CodexQuotaService {
       this.cachedQuotaLimitsMap.set(cacheKey, { limits, timestamp: now });
       return limits;
     } catch (err) {
-      logger.warn('Failed to construct Codex quota limits', { error: String(err) });
+      logger.warn('[Codex Quota] Failed to construct live Codex quota limits', { error: String(err) });
       return null;
     }
   }
 
-  private getUserTelemetryPath(userKey: string): string {
-    const baseDir = path.join(os.homedir(), '.codex', 'telemetry');
-    if (!fs.existsSync(baseDir)) {
-      try {
-        fs.mkdirSync(baseDir, { recursive: true, mode: 0o700 });
-      } catch {}
-    }
-    const clean = userKey.replace(/[^a-zA-Z0-9_.-]/g, '_');
-    return path.join(baseDir, `${clean}.json`);
-  }
-
-  private loadPersistence(userKey?: string, _userEmail?: string): CliTelemetryPersistence {
-    if (userKey && userKey !== 'default') {
-      const userFilePath = this.getUserTelemetryPath(userKey);
-      if (fs.existsSync(userFilePath)) {
-        try {
-          const raw = fs.readFileSync(userFilePath, 'utf8');
-          const parsed = JSON.parse(raw);
-          return {
-            totalTurns: Number(parsed.totalTurns) || 0,
-            totalTokens: Number(parsed.totalTokens) || 0,
-            promptTokens: Number(parsed.promptTokens) || 0,
-            completionTokens: Number(parsed.completionTokens) || 0,
-            thinkingTokens: Number(parsed.thinkingTokens) || 0,
-            cacheReadTokens: Number(parsed.cacheReadTokens) || 0,
-            lastLatencyMs: Number(parsed.lastLatencyMs) || 0,
-            totalLatencyMs: Number(parsed.totalLatencyMs) || 0,
-          };
-        } catch {}
-      }
-
-      return {
-        totalTurns: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        thinkingTokens: 0,
-        cacheReadTokens: 0,
-        lastLatencyMs: 0,
-        totalLatencyMs: 0,
-      };
-    }
-
-    const scanned = this.scanSessionsTelemetry();
-    let current: CliTelemetryPersistence = {
-      totalTurns: 0,
-      totalTokens: 0,
-      promptTokens: 0,
-      completionTokens: 0,
-      thinkingTokens: 0,
-      cacheReadTokens: 0,
-      lastLatencyMs: 0,
-      totalLatencyMs: 0,
-    };
-
-    try {
-      if (fs.existsSync(this.storagePath)) {
-        const parsed = JSON.parse(fs.readFileSync(this.storagePath, 'utf8')) as CliTelemetryPersistence;
-        current = {
-          totalTurns: parsed.totalTurns || 0,
-          totalTokens: parsed.totalTokens || 0,
-          promptTokens: parsed.promptTokens || 0,
-          completionTokens: parsed.completionTokens || 0,
-          thinkingTokens: parsed.thinkingTokens || 0,
-          cacheReadTokens: parsed.cacheReadTokens || 0,
-          lastLatencyMs: parsed.lastLatencyMs || 0,
-          totalLatencyMs: parsed.totalLatencyMs || 0,
-        };
-      }
-    } catch (err) {
-      logger.warn('Failed to parse Codex CLI usage persistence, initializing fresh', { error: String(err) });
-    }
-
-    const merged: CliTelemetryPersistence = {
-      totalTurns: Math.max(current.totalTurns, scanned.totalTurns),
-      totalTokens: Math.max(current.totalTokens, scanned.totalTokens),
-      promptTokens: Math.max(current.promptTokens, scanned.promptTokens),
-      completionTokens: Math.max(current.completionTokens, scanned.completionTokens),
-      thinkingTokens: Math.max(current.thinkingTokens, scanned.thinkingTokens),
-      cacheReadTokens: Math.max(current.cacheReadTokens, scanned.cacheReadTokens),
-      lastLatencyMs: current.lastLatencyMs || scanned.lastLatencyMs || 0,
-      totalLatencyMs: current.totalLatencyMs || scanned.totalLatencyMs || 0,
-    };
-
-    if (
-      merged.totalTurns !== current.totalTurns ||
-      merged.totalTokens !== current.totalTokens ||
-      merged.cacheReadTokens !== current.cacheReadTokens
-    ) {
-      this.savePersistence(merged, userKey, _userEmail);
-    }
-
-    return merged;
-  }
-
-  private async loadPersistenceAsync(userKey?: string, userEmail?: string): Promise<CliTelemetryPersistence> {
-    if (userKey && userKey !== 'default') {
-      const userFilePath = this.getUserTelemetryPath(userKey);
-      if (fs.existsSync(userFilePath)) {
-        try {
-          const raw = fs.readFileSync(userFilePath, 'utf8');
-          const parsed = JSON.parse(raw);
-          return {
-            totalTurns: Number(parsed.totalTurns) || 0,
-            totalTokens: Number(parsed.totalTokens) || 0,
-            promptTokens: Number(parsed.promptTokens) || 0,
-            completionTokens: Number(parsed.completionTokens) || 0,
-            thinkingTokens: Number(parsed.thinkingTokens) || 0,
-            cacheReadTokens: Number(parsed.cacheReadTokens) || 0,
-            lastLatencyMs: Number(parsed.lastLatencyMs) || 0,
-            totalLatencyMs: Number(parsed.totalLatencyMs) || 0,
-            rateLimits: parsed.rateLimits,
-          };
-        } catch {}
-      }
-
-      // Query Firestore
-      try {
-        const firestoreData = await firestoreBackendService.getUserTelemetry(userKey, userEmail, 'codex');
-        if (firestoreData) {
-          try {
-            fs.writeFileSync(userFilePath, JSON.stringify(firestoreData, null, 2), 'utf8');
-          } catch {}
-          return firestoreData;
-        }
-      } catch {}
-
-      // Fresh user initial state
-      const fresh: CliTelemetryPersistence = {
-        totalTurns: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        thinkingTokens: 0,
-        cacheReadTokens: 0,
-        lastLatencyMs: 0,
-        totalLatencyMs: 0,
-      };
-
-      try {
-        fs.writeFileSync(userFilePath, JSON.stringify(fresh, null, 2), 'utf8');
-      } catch {}
-
-      firestoreBackendService.saveUserTelemetry(userKey, fresh, 'codex', userEmail).catch(() => {});
-      return fresh;
-    }
-
-    return this.loadPersistence(userKey, userEmail);
-  }
-
-  private savePersistence(data: CliTelemetryPersistence, userKey?: string, userEmail?: string): void {
-    if (userKey && userKey !== 'default') {
-      try {
-        const userFilePath = this.getUserTelemetryPath(userKey);
-        fs.writeFileSync(userFilePath, JSON.stringify(data, null, 2), 'utf8');
-      } catch {}
-      firestoreBackendService.saveUserTelemetry(userKey, data, 'codex', userEmail).catch(() => {});
-    } else {
-      try {
-        const dir = path.dirname(this.storagePath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-        }
-        fs.writeFileSync(this.storagePath, JSON.stringify(data, null, 2), { mode: 0o600 });
-      } catch (err) {
-        logger.error('Failed to write Codex CLI telemetry storage', err);
-      }
-    }
-  }
-
   /**
-   * Resolves authentic Codex CLI telemetry and quota.
+   * Resolves authentic Codex CLI telemetry and quota scoped to the specific user.
    */
   public async getCodexQuota(userEmail?: string, sessionId?: string, userId?: string): Promise<CodexQuotaStats> {
     const effectiveUserId = userId || (userEmail ? cliAuthService.getUserIdByEmail(userEmail) : undefined) || undefined;
+    if (effectiveUserId || userEmail) {
+      await cliAuthService.syncUserFromFirestore(effectiveUserId || undefined, userEmail);
+    }
+    const cliStatus = await cliAuthService.getCliStatus(effectiveUserId, userEmail);
     const isLinked = Boolean(
+      cliStatus.codex?.linked ||
       (effectiveUserId && cliAuthService.isUserCliLinked(effectiveUserId, 'codex')) ||
       (userEmail && cliAuthService.isUserCliLinkedByEmail(userEmail, 'codex'))
     );
-    const cliStatus = await cliAuthService.getCliStatus(effectiveUserId, userEmail);
 
     if (!isLinked) {
-      logger.info('[Codex Quota] Resolved user quota status: Not Linked', {
-        userId,
-        userEmail,
-        effectiveUserId,
-        isLinked: false,
-      });
-
       return {
         linked: false,
         totalTurns: 0,
@@ -458,8 +395,8 @@ export class CodexQuotaService {
         ? Math.round(effectiveTotalLatency / effectiveCalls)
         : 0;
 
-    const quotaLimits = await this.fetchCodexQuotaLimits(userKey, userEmail, persistence);
-
+    // Fresh live fetch of authentic limits (no Firestore read)
+    const quotaLimits = await this.fetchCodexQuotaLimits(userKey, userEmail);
     const singleBucket = quotaLimits?.groups[0]?.buckets?.[0];
 
     logger.info('[Codex Quota] Resolved user quota status', {
@@ -468,8 +405,10 @@ export class CodexQuotaService {
       effectiveUserId,
       userKey,
       isLinked,
-      totalTurns: effectiveCalls,
-      totalTokens: sessionStats.totalTokens,
+      totalTurns: persistence.totalTurns,
+      sessionTurns: sessionStats.apiCalls,
+      totalTokens: persistence.totalTokens,
+      sessionTokens: sessionStats.totalTokens,
       limitRemaining: singleBucket ? `${(singleBucket.remaining_fraction * 100).toFixed(2)}%` : 'N/A',
     });
 
@@ -478,12 +417,12 @@ export class CodexQuotaService {
       userEmail: email,
       userName: 'ChatGPT Account',
       authMethod: 'ChatGPT OAuth',
-      totalTurns: effectiveCalls,
-      totalTokens: sessionStats.totalTokens,
-      promptTokens: sessionStats.promptTokens,
-      completionTokens: sessionStats.completionTokens,
-      thinkingTokens: sessionStats.thinkingTokens,
-      cacheReadTokens: sessionStats.cacheReadTokens,
+      totalTurns: persistence.totalTurns,
+      totalTokens: persistence.totalTokens,
+      promptTokens: persistence.promptTokens,
+      completionTokens: persistence.completionTokens,
+      thinkingTokens: persistence.thinkingTokens,
+      cacheReadTokens: persistence.cacheReadTokens,
       lastLatencyMs: effectiveLastLatency,
       avgLatencyMs,
       quotaLimits,
@@ -492,12 +431,13 @@ export class CodexQuotaService {
   }
 
   /**
-   * Records a turn completed by the Codex CLI.
+   * Records a turn completed by the Codex CLI and persists cumulative turn/token metrics to Firebase Firestore.
+   * Quota limits are NEVER saved to Firestore.
    */
   public async recordTurn(input: RecordTurnInput): Promise<CodexQuotaStats> {
-    const userKey = input.userEmail
-      ? (cliAuthService.getUserIdByEmail(input.userEmail) || input.userEmail)
-      : 'anonymous';
+    const userKey =
+      input.userId ||
+      (input.userEmail ? (cliAuthService.getUserIdByEmail(input.userEmail) || input.userEmail) : 'anonymous');
 
     const persistence = await this.loadPersistenceAsync(userKey, input.userEmail);
 
@@ -509,6 +449,7 @@ export class CodexQuotaService {
     persistence.cacheReadTokens = (persistence.cacheReadTokens || 0) + (input.cacheReadTokens || 0);
     persistence.lastLatencyMs = input.latencyMs;
     persistence.totalLatencyMs = (persistence.totalLatencyMs || 0) + input.latencyMs;
+
     this.savePersistence(persistence, userKey, input.userEmail);
 
     // Update session metrics if sessionId provided
@@ -536,20 +477,26 @@ export class CodexQuotaService {
       this.sessionStatsMap.set(input.sessionId, existing);
     }
 
-    this.lastQuotaFetchTime = 0;
+    // Invalidate cached limits so the next fetch hits fresh
+    this.cachedQuotaLimitsMap.delete(userKey);
 
-    logger.info('[Codex Quota] Recorded authentic Codex CLI telemetry turn', {
+    logger.info('[Codex Quota] Recorded authentic Codex CLI turn', {
       userKey,
       userEmail: input.userEmail,
       totalTurns: persistence.totalTurns,
       inputTokens: input.promptTokens,
       outputTokens: input.completionTokens,
-      thinkingTokens: input.thinkingTokens,
       totalTokens: input.totalTokens,
       latencyMs: input.latencyMs,
     });
 
-    return this.getCodexQuota(input.userEmail, input.sessionId);
+    return this.getCodexQuota(input.userEmail, input.sessionId, input.userId);
+  }
+
+  public async syncLocalTelemetryToFirestore(userKey: string, userEmail?: string): Promise<void> {
+    try {
+      await this.loadPersistenceAsync(userKey, userEmail);
+    } catch {}
   }
 }
 

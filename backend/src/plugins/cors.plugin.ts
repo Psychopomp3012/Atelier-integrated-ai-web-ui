@@ -4,8 +4,15 @@ import { envConfig } from '../config/env.config.js';
 
 export async function registerCorsPlugin(app: FastifyInstance): Promise<void> {
   await app.register(cors, {
-    origin: envConfig.CORS_ORIGIN === '*' ? true : envConfig.CORS_ORIGIN,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    origin: (origin, cb) => {
+      // Allow all origins dynamically (browser apps, Vercel frontend, local dev)
+      cb(null, true);
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'Range'],
+    exposedHeaders: ['Content-Range', 'X-Content-Range'],
     credentials: true,
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   });
 }

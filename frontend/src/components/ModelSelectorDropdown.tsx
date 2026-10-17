@@ -96,7 +96,9 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   const activeCliStatus = cliStatusProp || internalCliStatus;
 
   useEffect(() => {
-    fetchCliStatus().then(setInternalCliStatus);
+    if (!cliStatusProp) {
+      fetchCliStatus().then(setInternalCliStatus);
+    }
 
     const checkMobile = () => {
       setIsMobile(window.innerWidth < 640);

@@ -14,6 +14,9 @@ Backend(TS + Fastify)
 
 "Atelier" (or Atelier Studio) — French for a master craftsman's workshop
 
+Features:
+
+
 Sandbox(E2B):
 - 2vCPU + 500MB-RAM
 - upto 3 sandboxes max

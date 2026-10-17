@@ -438,11 +438,16 @@ export const Header: React.FC<HeaderProps> = ({
     const totalMinutes = Math.floor(diffMs / (1000 * 60));
     const minutes = totalMinutes % 60;
     const totalHours = Math.floor(totalMinutes / 60);
+    const days = Math.floor(totalHours / 24);
+    const hours = totalHours % 24;
 
-    if (totalHours === 0) {
-      return `Refreshes in ${minutes}m`;
+    if (days > 0) {
+      return `Refreshes in ${days}d ${hours}h ${minutes}m`;
     }
-    return `Refreshes in ${totalHours}h ${minutes}m`;
+    if (totalHours > 0) {
+      return `Refreshes in ${totalHours}h ${minutes}m`;
+    }
+    return `Refreshes in ${minutes}m`;
   };
 
   return (

@@ -165,17 +165,17 @@ export const App: React.FC = () => {
     codex: { linked: false },
   });
 
-  const refreshCliStatus = () => {
-    fetchCliStatus().then((status) => {
+  const refreshCliStatus = (force = false) => {
+    fetchCliStatus(force).then((status) => {
       setCliStatus(status);
-      fetchGeminiQuota(currentSessionId || undefined);
-      fetchCodexQuota(currentSessionId || undefined);
+      fetchGeminiQuota(currentSessionId || undefined, force);
+      fetchCodexQuota(currentSessionId || undefined, force);
     }).catch(() => {});
   };
 
   useEffect(() => {
     refreshCliStatus();
-  }, [currentUser]);
+  }, [currentUser?.id]);
 
   // Cloud Sandbox State & Explicit VM Provisioning
   const [sandboxUsage, setSandboxUsage] = useState<{
@@ -262,16 +262,20 @@ export const App: React.FC = () => {
     if (!currentUser?.id) return;
     fetchSandboxUsage();
 
-    // Poll usage calmly once every 60 seconds only when tab is visible
+    // Poll usage and quota telemetry once every 60 seconds only when tab is visible
     const interval = setInterval(() => {
       if (document.visibilityState === 'visible') {
         fetchSandboxUsage();
+        fetchGeminiQuota(currentSessionId || undefined);
+        fetchCodexQuota(currentSessionId || undefined);
       }
     }, 60000);
 
     const onFocus = () => {
       if (document.visibilityState === 'visible') {
         fetchSandboxUsage();
+        fetchGeminiQuota(currentSessionId || undefined);
+        fetchCodexQuota(currentSessionId || undefined);
       }
     };
     window.addEventListener('focus', onFocus);
@@ -279,7 +283,7 @@ export const App: React.FC = () => {
       clearInterval(interval);
       window.removeEventListener('focus', onFocus);
     };
-  }, [currentUser?.id, fetchSandboxUsage]);
+  }, [currentUser?.id, currentSessionId, fetchSandboxUsage]);
 
   // If the saved sandbox was destroyed or terminated, clean up stale selection
   useEffect(() => {
@@ -500,6 +504,10 @@ export const App: React.FC = () => {
 
   const lastGeminiQuotaFetchRef = useRef<number>(0);
   const lastCodexQuotaFetchRef = useRef<number>(0);
+  const lastQuotaFetchTimeRef = useRef<number>(0);
+  const inFlightQuotaPromiseRef = useRef<Promise<void> | null>(null);
+  const authMeInFlightRef = useRef<Promise<any> | null>(null);
+  const authMeCompletedRef = useRef<boolean>(false);
 
   const fetchGeminiQuota = async (sessId?: string, force = false) => {
     const now = Date.now();
@@ -574,22 +582,37 @@ export const App: React.FC = () => {
     fetchCodexQuota(currentSessionId || undefined);
   }, [currentSessionId]);
 
-  const fetchQuota = async () => {
-    try {
-      const res = await apiFetch('/api/v1/agent/quota');
-      if (res.ok) {
-        const json = await res.json();
-        if (json.data) {
-          setRateLimit({
-            limit: json.data.limit,
-            remaining: json.data.remaining,
-            resetInSeconds: json.data.resetInSeconds,
-          });
-        }
-      }
-    } catch {
-      // offline fallback
+  const fetchQuota = async (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastQuotaFetchTimeRef.current < 4000) {
+      return;
     }
+    if (!force && inFlightQuotaPromiseRef.current) {
+      return inFlightQuotaPromiseRef.current;
+    }
+
+    inFlightQuotaPromiseRef.current = (async () => {
+      try {
+        const res = await apiFetch('/api/v1/agent/quota');
+        if (res.ok) {
+          const json = await res.json();
+          if (json.data) {
+            setRateLimit({
+              limit: json.data.limit,
+              remaining: json.data.remaining,
+              resetInSeconds: json.data.resetInSeconds,
+            });
+            lastQuotaFetchTimeRef.current = Date.now();
+          }
+        }
+      } catch {
+        // offline fallback
+      } finally {
+        inFlightQuotaPromiseRef.current = null;
+      }
+    })();
+
+    return inFlightQuotaPromiseRef.current;
   };
 
   useEffect(() => {
@@ -601,7 +624,7 @@ export const App: React.FC = () => {
     const timer = setInterval(() => {
       setRateLimit((prev) => {
         if (prev.resetInSeconds <= 1) {
-          fetchQuota();
+          fetchQuota(true);
           return { ...prev, remaining: prev.limit, resetInSeconds: 0 };
         }
         return { ...prev, resetInSeconds: prev.resetInSeconds - 1 };
@@ -706,6 +729,8 @@ export const App: React.FC = () => {
 
   // Comprehensive user and session cleanup routine
   const performUserCleanup = useCallback(() => {
+    authMeCompletedRef.current = false;
+    authMeInFlightRef.current = null;
     const prevUserId = currentUserRef.current?.id;
     closeGeminiCliLoginPopup();
     // 1. Invalidate authentication tokens & caches
@@ -781,6 +806,10 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (authMeCompletedRef.current || authMeInFlightRef.current) {
+      return;
+    }
+
     setLoadingMessage('Initializing Atelier Workspace');
     setLoadingSubMessage('Connecting to cloud microVMs & models...');
 
@@ -789,18 +818,17 @@ export const App: React.FC = () => {
       setIsPageLoading(false);
     }, 4000);
 
-    apiFetch('/api/v1/auth/me')
+    authMeInFlightRef.current = apiFetch('/api/v1/auth/me')
       .then((res) => {
         if (!res.ok) throw new Error('Unauthenticated');
         return res.json();
       })
       .then(async (data) => {
+        authMeCompletedRef.current = true;
         if (data.success && data.data) {
           const user = data.data;
+          currentUserRef.current = user;
           setCurrentUser(user);
-          firestoreService.syncUserProfile(user).catch((fErr) => {
-            console.warn('Firestore user profile sync warning', fErr);
-          });
           // Auto-refresh token if within refresh window (weekly refresh requirement)
           refreshAuthToken().then((refreshed) => {
             if (refreshed?.token) {
@@ -817,6 +845,7 @@ export const App: React.FC = () => {
         }
       })
       .finally(() => {
+        authMeInFlightRef.current = null;
         setTimeout(() => {
           setIsPageLoading(false);
           clearTimeout(safetyTimeout);
@@ -1616,8 +1645,8 @@ export const App: React.FC = () => {
                     resetInSeconds: data.rateLimit.resetInSeconds,
                   });
                 }
-                fetchGeminiQuota(activeSessionId);
-                fetchCodexQuota(activeSessionId);
+                fetchGeminiQuota(activeSessionId, true);
+                fetchCodexQuota(activeSessionId, true);
                 fetchSandboxUsage();
                 if (currentUser) {
                   firestoreService.saveChatMessage(currentUser.id, activeSessionId, finalAssistantMsg);

@@ -37,21 +37,50 @@ export interface CliLoginResult {
   expiresAt: string;
 }
 
-export async function fetchCliStatus(): Promise<CliStatus> {
-  try {
-    const res = await apiFetch('/api/v1/auth/cli/status');
-    if (!res.ok) throw new Error('Failed to fetch CLI status');
-    const data = await res.json();
-    return data.data;
-  } catch (err) {
-    console.error('Error fetching CLI auth status:', err);
-    return {
-      antigravity: { linked: false },
-      gemini: { linked: false },
-      claude: { linked: false },
-      codex: { linked: false },
-    };
+let inFlightCliStatusPromise: Promise<CliStatus> | null = null;
+let lastCliStatus: CliStatus | null = null;
+let lastCliStatusFetchTime = 0;
+const CLI_STATUS_CACHE_TTL = 4000; // 4 seconds deduplication window
+
+export function invalidateCliStatusCache(): void {
+  lastCliStatus = null;
+  lastCliStatusFetchTime = 0;
+  inFlightCliStatusPromise = null;
+}
+
+export async function fetchCliStatus(force = false): Promise<CliStatus> {
+  const now = Date.now();
+  if (!force && lastCliStatus && now - lastCliStatusFetchTime < CLI_STATUS_CACHE_TTL) {
+    return lastCliStatus;
   }
+  if (!force && inFlightCliStatusPromise) {
+    return inFlightCliStatusPromise;
+  }
+
+  inFlightCliStatusPromise = (async () => {
+    try {
+      const res = await apiFetch('/api/v1/auth/cli/status');
+      if (!res.ok) throw new Error('Failed to fetch CLI status');
+      const data = await res.json();
+      lastCliStatus = data.data;
+      lastCliStatusFetchTime = Date.now();
+      return data.data;
+    } catch (err) {
+      console.error('Error fetching CLI auth status:', err);
+      return (
+        lastCliStatus || {
+          antigravity: { linked: false },
+          gemini: { linked: false },
+          claude: { linked: false },
+          codex: { linked: false },
+        }
+      );
+    } finally {
+      inFlightCliStatusPromise = null;
+    }
+  })();
+
+  return inFlightCliStatusPromise;
 }
 
 export async function loginWithCliAccount(): Promise<CliLoginResult> {
@@ -66,26 +95,52 @@ export async function loginWithCliAccount(): Promise<CliLoginResult> {
   return data.data;
 }
 
-export async function refreshAuthToken(): Promise<CliLoginResult | null> {
-  try {
-    const res = await apiFetch('/api/v1/auth/refresh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.success ? data.data : null;
-  } catch {
-    return null;
+let inFlightRefreshTokenPromise: Promise<CliLoginResult | null> | null = null;
+let lastRefreshedResult: CliLoginResult | null = null;
+let lastRefreshTokenTime = 0;
+const REFRESH_TOKEN_TTL = 10000; // 10 seconds deduplication window
+
+export async function refreshAuthToken(force = false): Promise<CliLoginResult | null> {
+  const now = Date.now();
+  if (!force && lastRefreshedResult && now - lastRefreshTokenTime < REFRESH_TOKEN_TTL) {
+    return lastRefreshedResult;
   }
+  if (!force && inFlightRefreshTokenPromise) {
+    return inFlightRefreshTokenPromise;
+  }
+
+  inFlightRefreshTokenPromise = (async () => {
+    try {
+      const res = await apiFetch('/api/v1/auth/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.success && data.data) {
+        lastRefreshedResult = data.data;
+        lastRefreshTokenTime = Date.now();
+        return data.data;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      inFlightRefreshTokenPromise = null;
+    }
+  })();
+
+  return inFlightRefreshTokenPromise;
 }
 
 export async function unlinkAntigravityCli(): Promise<boolean> {
   try {
+    invalidateCliStatusCache();
     const res = await apiFetch('/api/v1/auth/cli/antigravity/unlink', {
       method: 'POST',
     });
+    invalidateCliStatusCache();
     return res.ok;
   } catch (err) {
     console.error('Error unlinking Antigravity CLI:', err);
@@ -258,9 +313,11 @@ export async function submitClaudeAuthCode(code: string): Promise<boolean> {
 
 export async function unlinkClaudeCli(): Promise<boolean> {
   try {
+    invalidateCliStatusCache();
     const res = await apiFetch('/api/v1/auth/cli/claude/unlink', {
       method: 'POST',
     });
+    invalidateCliStatusCache();
     return res.ok;
   } catch {
     return false;
@@ -290,6 +347,7 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
         resolved = true;
         window.removeEventListener('message', messageHandler);
         clearInterval(pollTimer);
+        invalidateCliStatusCache();
         resolve({ success: true, email: event.data.email });
       }
     };
@@ -297,7 +355,7 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
     window.addEventListener('message', messageHandler);
 
     const pollTimer = setInterval(() => {
-      fetchCliStatus().then((status) => {
+      fetchCliStatus(true).then((status) => {
         if (status.codex?.linked) {
           resolved = true;
           clearInterval(pollTimer);
@@ -310,7 +368,7 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
           clearInterval(pollTimer);
           window.removeEventListener('message', messageHandler);
           if (!resolved) {
-            fetchCliStatus().then((finalStatus) => {
+            fetchCliStatus(true).then((finalStatus) => {
               if (finalStatus.codex?.linked) {
                 resolve({ success: true, email: finalStatus.codex.email });
               } else {
@@ -326,9 +384,11 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
 
 export async function unlinkCodexCli(): Promise<boolean> {
   try {
+    invalidateCliStatusCache();
     const res = await apiFetch('/api/v1/auth/cli/codex/unlink', {
       method: 'POST',
     });
+    invalidateCliStatusCache();
     return res.ok;
   } catch {
     return false;

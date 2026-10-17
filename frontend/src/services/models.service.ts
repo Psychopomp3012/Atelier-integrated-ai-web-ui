@@ -5,18 +5,49 @@ import { AVAILABLE_MODELS } from '../types';
 /**
  * Fetches available AI models dynamically discovered from Antigravity CLI.
  */
-export async function fetchAvailableModels(): Promise<ModelOption[]> {
-  try {
-    const res = await apiFetch('/api/v1/agent/models');
-    if (!res.ok) {
-      return AVAILABLE_MODELS;
-    }
-    const json = await res.json();
-    if (Array.isArray(json.data) && json.data.length > 0) {
-      return json.data as ModelOption[];
-    }
-    return AVAILABLE_MODELS;
-  } catch {
-    return AVAILABLE_MODELS;
+let inFlightModelsPromise: Promise<ModelOption[]> | null = null;
+let lastModels: ModelOption[] | null = null;
+let lastModelsFetchTime = 0;
+const MODELS_CACHE_TTL = 5000; // 5 seconds deduplication window
+
+export function invalidateModelsCache(): void {
+  lastModels = null;
+  lastModelsFetchTime = 0;
+  inFlightModelsPromise = null;
+}
+
+/**
+ * Fetches available AI models dynamically discovered from installed CLIs.
+ * In-flight promise sharing and short-term deduplication prevents burst duplicate calls.
+ */
+export async function fetchAvailableModels(force = false): Promise<ModelOption[]> {
+  const now = Date.now();
+  if (!force && lastModels && now - lastModelsFetchTime < MODELS_CACHE_TTL) {
+    return lastModels;
   }
+  if (!force && inFlightModelsPromise) {
+    return inFlightModelsPromise;
+  }
+
+  inFlightModelsPromise = (async () => {
+    try {
+      const res = await apiFetch('/api/v1/agent/models');
+      if (!res.ok) {
+        return lastModels || AVAILABLE_MODELS;
+      }
+      const json = await res.json();
+      if (Array.isArray(json.data) && json.data.length > 0) {
+        lastModels = json.data as ModelOption[];
+        lastModelsFetchTime = Date.now();
+        return lastModels;
+      }
+      return lastModels || AVAILABLE_MODELS;
+    } catch {
+      return lastModels || AVAILABLE_MODELS;
+    } finally {
+      inFlightModelsPromise = null;
+    }
+  })();
+
+  return inFlightModelsPromise;
 }

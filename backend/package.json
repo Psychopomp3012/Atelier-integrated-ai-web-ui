@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "nodemon --watch src -e ts --exec tsx src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "tsc --noEmit"
@@ -32,6 +32,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "nodemon": "^3.1.14",
     "tsx": "^4.19.3"
   }
 }

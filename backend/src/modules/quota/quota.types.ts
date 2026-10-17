@@ -65,6 +65,7 @@ export interface CodexQuotaStats {
 }
 
 export interface RecordTurnInput {
+  userId?: string;
   sessionId?: string;
   userEmail?: string;
   model: string;
@@ -74,4 +75,5 @@ export interface RecordTurnInput {
   cacheReadTokens?: number;
   totalTokens: number;
   latencyMs: number;
+  rateLimits?: any;
 }

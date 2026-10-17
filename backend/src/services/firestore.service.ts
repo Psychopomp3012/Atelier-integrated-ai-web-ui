@@ -577,7 +577,11 @@ export class FirestoreBackendService {
         if (snap.exists) {
           const data = snap.data();
           const tel = data?.telemetry?.[provider];
-          if (tel && typeof tel === 'object') return tel;
+          if (tel && typeof tel === 'object') {
+            // Never return volatile quota limits from Firestore
+            const { rateLimits, lastQuotaLimits, ...safeTel } = tel;
+            return safeTel;
+          }
         }
       }
       if (userEmail) {
@@ -586,13 +590,19 @@ export class FirestoreBackendService {
         if (emailDocSnap.exists) {
           const data = emailDocSnap.data();
           const tel = data?.telemetry?.[provider];
-          if (tel && typeof tel === 'object') return tel;
+          if (tel && typeof tel === 'object') {
+            const { rateLimits, lastQuotaLimits, ...safeTel } = tel;
+            return safeTel;
+          }
         }
         const querySnap = await this.db.collection('users').where('email', '==', cleanEmail).limit(1).get();
         if (!querySnap.empty) {
           const data = querySnap.docs[0].data();
           const tel = data?.telemetry?.[provider];
-          if (tel && typeof tel === 'object') return tel;
+          if (tel && typeof tel === 'object') {
+            const { rateLimits, lastQuotaLimits, ...safeTel } = tel;
+            return safeTel;
+          }
         }
       }
     } catch (err) {
@@ -617,18 +627,29 @@ export class FirestoreBackendService {
           targetDocId = querySnap.docs[0].id;
         }
       }
+      // Strictly exclude volatile quota and rate limit data from Firestore persistence
+      const { rateLimits, lastQuotaLimits, ...sanitizedTelemetry } = telemetryData || {};
       const payload: Record<string, any> = {
-        [`telemetry.${provider}`]: telemetryData,
+        [`telemetry.${provider}`]: sanitizedTelemetry,
         updatedAt: FieldValue.serverTimestamp(),
       };
       if (cleanEmail) {
         payload.email = cleanEmail;
       }
       await this.db.collection('users').doc(targetDocId).set(payload, { merge: true });
-      logger.info(`Persisted ${provider} quota telemetry to Firebase for user ${targetDocId}`, {
+      if (cleanEmail && targetDocId !== cleanEmail) {
+        // Also ensure email-based lookup directly resolves by updating email document if it exists
+        try {
+          const emailDoc = await this.db.collection('users').doc(cleanEmail).get();
+          if (emailDoc.exists) {
+            await this.db.collection('users').doc(cleanEmail).set(payload, { merge: true });
+          }
+        } catch {}
+      }
+      logger.info(`Persisted ${provider} usage telemetry to Firebase for user ${targetDocId}`, {
         userEmail: cleanEmail,
-        turns: telemetryData.totalTurns,
-        tokens: telemetryData.totalTokens,
+        turns: sanitizedTelemetry.totalTurns,
+        tokens: sanitizedTelemetry.totalTokens,
       });
     } catch (err) {
       logger.warn(`Failed to save ${provider} telemetry to Firestore`, { error: String(err) });

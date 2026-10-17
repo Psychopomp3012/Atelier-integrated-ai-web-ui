@@ -1,9 +1,8 @@
 /**
- * Centralized API utility with seamless same-origin proxy and fallback.
+ * Centralized API utility with direct backend calls and JWT handling.
  */
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
-const FALLBACK_URL = API_BASE_URL || 'http://localhost:4000';
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/$/, '');
 
 export async function apiFetch(
   endpoint: string,
@@ -17,23 +16,8 @@ export async function apiFetch(
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  // First attempt via configured API base URL (or relative proxy if unset)
-  try {
-    const res = await fetch(`${API_BASE_URL}${cleanEndpoint}`, {
-      ...options,
-      headers,
-    });
-    return res;
-  } catch (err: unknown) {
-    // If relative fetch fails (e.g., dev proxy hiccup or direct access), try direct backend port
-    try {
-      const fallbackRes = await fetch(`${FALLBACK_URL}${cleanEndpoint}`, {
-        ...options,
-        headers,
-      });
-      return fallbackRes;
-    } catch {
-      throw err;
-    }
-  }
+  return fetch(`${API_BASE_URL}${cleanEndpoint}`, {
+    ...options,
+    headers,
+  });
 }

@@ -1,10 +1,8 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AntigravityQuotaStats, GeminiQuotaStats, RecordTurnInput, CliQuotaLimits, QuotaGroup } from './quota.types.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
+import { sandboxService } from '../sandbox/sandbox.service.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 import { logger } from '../../utils/logger.util.js';
 
@@ -29,7 +27,6 @@ interface CliTelemetryPersistence {
   geminiWeeklyTurns?: number;
   thirdPartyWeeklyTokens?: number;
   thirdPartyWeeklyTurns?: number;
-  lastQuotaLimits?: CliQuotaLimits;
 }
 
 interface SessionStats {
@@ -44,23 +41,12 @@ interface SessionStats {
 }
 
 export class AntigravityQuotaService {
-  private readonly defaultStoragePath: string;
+  private readonly inMemoryTelemetryMap: Map<string, CliTelemetryPersistence> = new Map();
   private readonly sessionStatsMap: Map<string, SessionStats> = new Map();
   private readonly cachedQuotaLimitsMap: Map<string, { limits: CliQuotaLimits; timestamp: number }> = new Map();
 
   constructor() {
-    this.defaultStoragePath = path.join(os.homedir(), '.gemini', 'cli_usage_telemetry.json');
-  }
-
-  private getUserTelemetryPath(userKey: string): string {
-    const baseDir = path.join(os.homedir(), '.gemini', 'telemetry');
-    if (!fs.existsSync(baseDir)) {
-      try {
-        fs.mkdirSync(baseDir, { recursive: true, mode: 0o700 });
-      } catch {}
-    }
-    const clean = userKey.replace(/[^a-zA-Z0-9_.-]/g, '_');
-    return path.join(baseDir, `${clean}.json`);
+    // Dynamic live initialization: no local file scanning or storage.
   }
 
   private sanitizePersistence(parsed: any): CliTelemetryPersistence {
@@ -83,72 +69,31 @@ export class AntigravityQuotaService {
       geminiWeeklyTurns: Number(parsed?.geminiWeeklyTurns) || 0,
       thirdPartyWeeklyTokens: Number(parsed?.thirdPartyWeeklyTokens) || 0,
       thirdPartyWeeklyTurns: Number(parsed?.thirdPartyWeeklyTurns) || 0,
-      lastQuotaLimits: parsed?.lastQuotaLimits && Array.isArray(parsed.lastQuotaLimits.groups)
-        ? {
-            description: String(parsed.lastQuotaLimits.description || ''),
-            fetchedAt: String(parsed.lastQuotaLimits.fetchedAt || ''),
-            groups: parsed.lastQuotaLimits.groups.map((g: any) => ({
-              name: String(g.name || ''),
-              description: String(g.description || ''),
-              buckets: Array.isArray(g.buckets)
-                ? g.buckets.map((b: any) => ({
-                    id: String(b.id || ''),
-                    name: String(b.name || ''),
-                    description: String(b.description || ''),
-                    window: String(b.window || ''),
-                    remaining_fraction: typeof b.remaining_fraction === 'number' ? b.remaining_fraction : 1.0,
-                    reset_time: String(b.reset_time || ''),
-                  }))
-                : [],
-            })),
-          }
-        : undefined,
     } as CliTelemetryPersistence;
   }
 
-  private loadPersistence(userKey?: string, userEmail?: string): CliTelemetryPersistence {
-    if (userKey && userKey !== 'default') {
-      const userFilePath = this.getUserTelemetryPath(userKey);
-      if (fs.existsSync(userFilePath)) {
-        try {
-          const raw = fs.readFileSync(userFilePath, 'utf8');
-          const parsed = JSON.parse(raw);
-          return this.sanitizePersistence(parsed);
-        } catch {}
+  /**
+   * Loads user Antigravity telemetry strictly from memory cache or Firebase Firestore.
+   * Completely avoids reading any local files on the backend.
+   */
+  private async loadPersistenceAsync(userKey?: string, userEmail?: string): Promise<CliTelemetryPersistence> {
+    const key = userKey || userEmail || 'default';
+    if (this.inMemoryTelemetryMap.has(key)) {
+      return this.inMemoryTelemetryMap.get(key)!;
+    }
+
+    try {
+      const firestoreData = await firestoreBackendService.getUserTelemetry(key, userEmail, 'antigravity');
+      if (firestoreData) {
+        const sanitized = this.sanitizePersistence(firestoreData);
+        this.inMemoryTelemetryMap.set(key, sanitized);
+        return sanitized;
       }
-
-      // STRICT MULTI-TENANT ISOLATION:
-      // Never fall back to defaultStoragePath for named users!
-      // Return a clean initial state with 0 turns and 0 tokens.
-      return {
-        totalTurns: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        thinkingTokens: 0,
-        cacheReadTokens: 0,
-        lastLatencyMs: 0,
-        totalLatencyMs: 0,
-        gemini5hTokens: 0,
-        gemini5hTurns: 0,
-        thirdParty5hTokens: 0,
-        thirdParty5hTurns: 0,
-        geminiWeeklyTokens: 0,
-        geminiWeeklyTurns: 0,
-        thirdPartyWeeklyTokens: 0,
-        thirdPartyWeeklyTurns: 0,
-      };
+    } catch (err) {
+      logger.warn('[Antigravity Quota] Failed to load telemetry from Firestore', { error: String(err) });
     }
 
-    if (fs.existsSync(this.defaultStoragePath)) {
-      try {
-        const raw = fs.readFileSync(this.defaultStoragePath, 'utf8');
-        const parsed = JSON.parse(raw);
-        return this.sanitizePersistence(parsed);
-      } catch {}
-    }
-
-    return {
+    const fresh: CliTelemetryPersistence = {
       totalTurns: 0,
       totalTokens: 0,
       promptTokens: 0,
@@ -166,89 +111,55 @@ export class AntigravityQuotaService {
       thirdPartyWeeklyTokens: 0,
       thirdPartyWeeklyTurns: 0,
     };
+    this.inMemoryTelemetryMap.set(key, fresh);
+    return fresh;
   }
 
-  private async loadPersistenceAsync(userKey?: string, userEmail?: string): Promise<CliTelemetryPersistence> {
-    if (userKey && userKey !== 'default') {
-      const userFilePath = this.getUserTelemetryPath(userKey);
-      if (fs.existsSync(userFilePath)) {
-        try {
-          const raw = fs.readFileSync(userFilePath, 'utf8');
-          const parsed = JSON.parse(raw);
-          return this.sanitizePersistence(parsed);
-        } catch {}
-      }
-
-      // Check persistent storage in Firebase Firestore
-      try {
-        const firestoreData = await firestoreBackendService.getUserTelemetry(userKey, userEmail, 'antigravity');
-        if (firestoreData) {
-          const sanitized = this.sanitizePersistence(firestoreData);
-          try {
-            fs.writeFileSync(userFilePath, JSON.stringify(sanitized, null, 2), 'utf8');
-          } catch {}
-          return sanitized;
-        }
-      } catch {}
-
-      // Fresh user initial state: 0 tokens, 0 turns
-      const freshUserTelemetry: CliTelemetryPersistence = {
-        totalTurns: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        thinkingTokens: 0,
-        cacheReadTokens: 0,
-        lastLatencyMs: 0,
-        totalLatencyMs: 0,
-        gemini5hTokens: 0,
-        gemini5hTurns: 0,
-        thirdParty5hTokens: 0,
-        thirdParty5hTurns: 0,
-        geminiWeeklyTokens: 0,
-        geminiWeeklyTurns: 0,
-        thirdPartyWeeklyTokens: 0,
-        thirdPartyWeeklyTurns: 0,
-      };
-      try {
-        fs.writeFileSync(userFilePath, JSON.stringify(freshUserTelemetry, null, 2), 'utf8');
-      } catch {}
-
-      firestoreBackendService.saveUserTelemetry(userKey, freshUserTelemetry, 'antigravity', userEmail).catch(() => {});
-      return freshUserTelemetry;
-    }
-
-    return this.loadPersistence(userKey, userEmail);
-  }
-
+  /**
+   * Saves user Antigravity telemetry strictly into memory cache and Firebase Firestore.
+   * Completely avoids saving or writing any local files on the backend.
+   */
   private savePersistence(data: CliTelemetryPersistence, userKey?: string, userEmail?: string): void {
-    const json = JSON.stringify(data, null, 2);
-    if (userKey && userKey !== 'default') {
-      try {
-        const userFilePath = this.getUserTelemetryPath(userKey);
-        fs.writeFileSync(userFilePath, json, 'utf8');
-      } catch {}
-      // Persist to Firebase Firestore
-      firestoreBackendService.saveUserTelemetry(userKey, data, 'antigravity', userEmail).catch(() => {});
-    } else {
-      try {
-        const dir = path.dirname(this.defaultStoragePath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        fs.writeFileSync(this.defaultStoragePath, json, 'utf8');
-      } catch {}
-    }
+    const key = userKey || userEmail || 'default';
+    this.inMemoryTelemetryMap.set(key, data);
+    firestoreBackendService.saveUserTelemetry(key, data, 'antigravity', userEmail).catch((err) => {
+      logger.warn('[Antigravity Quota] Failed to save telemetry to Firestore', { error: String(err) });
+    });
   }
 
   /**
    * Queries live authentic Antigravity quota from Google's Code Assist backend via CLI.
-   * Completely avoids any hardcoded values, fictitious databases, or synthetic token arithmetic.
+   * Queries the active cloud sandbox microVM first, then falls back to local CLI on dev.
    */
   private async queryLiveGoogleQuota(): Promise<CliQuotaLimits | null> {
     try {
-      const bin = cliAuthService.getAntigravityBin();
-      const { stdout } = await execFileAsync(bin, ['-p', '/quota', '--output-format', 'json'], { timeout: 15000 });
+      let stdout = '';
+      const activeSandboxId = sandboxService.getActiveSandboxId('default');
+      if (activeSandboxId) {
+        try {
+          const cmdRes = await sandboxService.executeInSandbox({
+            command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" agy -p /quota --output-format json',
+            code: '',
+            language: 'bash',
+            sandboxId: activeSandboxId,
+            timeoutMs: 15000,
+          });
+          if (cmdRes && cmdRes.stdout) {
+            stdout = cmdRes.stdout;
+          }
+        } catch (err) {
+          logger.warn('[Antigravity Quota] Failed to live-query quota from cloud microVM', { error: String(err) });
+        }
+      }
+
+      if (!stdout) {
+        try {
+          const bin = cliAuthService.getAntigravityBin();
+          const { stdout: localOut } = await execFileAsync(bin, ['-p', '/quota', '--output-format', 'json'], { timeout: 15000 });
+          if (localOut) stdout = localOut;
+        } catch {}
+      }
+
       if (!stdout || stdout.trim().length === 0) return null;
 
       const parsed = JSON.parse(stdout);
@@ -298,26 +209,18 @@ export class AntigravityQuotaService {
   ): Promise<CliQuotaLimits> {
     const cached = this.cachedQuotaLimitsMap.get(userKey);
     const now = Date.now();
-    if (cached && now - cached.timestamp < 30000) {
+    if (cached && now - cached.timestamp < 10000) {
       return cached.limits;
     }
 
-    // Live Google API integration
+    // Live Google Code Assist CLI live fetch
     const liveLimits = await this.queryLiveGoogleQuota();
     if (liveLimits && liveLimits.groups.length > 0) {
-      persistence.lastQuotaLimits = liveLimits;
-      this.savePersistence(persistence, userKey, userEmail);
       this.cachedQuotaLimitsMap.set(userKey, { limits: liveLimits, timestamp: now });
       return liveLimits;
     }
 
-    // If live call returned null, use persistent authentic quota snapshot if available
-    if (persistence.lastQuotaLimits && persistence.lastQuotaLimits.groups.length > 0) {
-      this.cachedQuotaLimitsMap.set(userKey, { limits: persistence.lastQuotaLimits, timestamp: now });
-      return persistence.lastQuotaLimits;
-    }
-
-    // Clean initial fallback if no authentic snapshot exists yet (never fabricate or hardcode values)
+    // Clean initial fallback if live fetch unavailable (never store or read from firestore)
     const initialLimits: CliQuotaLimits = {
       description: 'Antigravity CLI native and third-party hosted limits',
       fetchedAt: new Date().toISOString(),
