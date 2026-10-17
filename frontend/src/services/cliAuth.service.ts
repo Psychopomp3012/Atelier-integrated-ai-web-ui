@@ -1,4 +1,4 @@
-import { apiFetch } from '../utils/api.util';
+import { apiFetch, API_BASE_URL } from '../utils/api.util';
 import type { UserProfile } from '../types';
 
 export interface CliStatus {
@@ -201,10 +201,13 @@ export function openAntigravityCliLoginPopup(): { success: boolean; authUrl?: st
     antigravityPopupRef = null;
   }
 
+  const token = localStorage.getItem('auth_token') || '';
+  const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
+
   // Open popup synchronously during the user gesture to preserve script-closable control
   // and completely avoid browser popup blockers or detached tab conversions
   const popup = window.open(
-    '/api/v1/auth/cli/antigravity/login',
+    `${API_BASE_URL}/api/v1/auth/cli/antigravity/login${tokenQuery}`,
     'antigravity_cli_oauth',
     `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`
   );
@@ -250,8 +253,11 @@ export function openClaudeCliLoginPopup(
     const left = window.screenX + (window.outerWidth - width) / 2;
     const top = window.screenY + (window.outerHeight - height) / 2;
 
+    const token = localStorage.getItem('auth_token') || '';
+    const tokenQuery = token ? `&token=${encodeURIComponent(token)}` : '';
+
     const popup = window.open(
-      `/api/v1/auth/cli/claude/login?mode=${mode}`,
+      `${API_BASE_URL}/api/v1/auth/cli/claude/login?mode=${mode}${tokenQuery}`,
       'claude_cli_oauth',
       `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`
     );
@@ -324,6 +330,18 @@ export async function unlinkClaudeCli(): Promise<boolean> {
   }
 }
 
+export async function getCodexAuthUrl(): Promise<{ authUrl: string; userCode?: string; sessionId: string }> {
+  const token = localStorage.getItem('auth_token') || '';
+  const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
+  const res = await apiFetch(`/api/v1/auth/cli/codex/url${tokenQuery}`);
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error?.message || 'Failed to start Codex login');
+  }
+  const data = await res.json();
+  return data.data;
+}
+
 export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: string }> {
   return new Promise((resolve) => {
     const width = 550;
@@ -331,11 +349,11 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
     const left = window.screenX + (window.outerWidth - width) / 2;
     const top = window.screenY + (window.outerHeight - height) / 2;
 
-    const token = localStorage.getItem('token') || '';
+    const token = localStorage.getItem('auth_token') || '';
     const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
 
     const popup = window.open(
-      `/api/v1/auth/cli/codex/login${tokenQuery}`,
+      `${API_BASE_URL}/api/v1/auth/cli/codex/login${tokenQuery}`,
       'codex_cli_oauth',
       `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`
     );

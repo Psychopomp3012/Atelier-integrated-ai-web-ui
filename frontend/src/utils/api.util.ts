@@ -2,7 +2,7 @@
  * Centralized API utility with direct backend calls and JWT handling.
  */
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/$/, '');
+export const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/$/, '');
 
 export async function apiFetch(
   endpoint: string,

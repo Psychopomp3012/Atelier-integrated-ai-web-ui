@@ -428,7 +428,224 @@ export class CliAuthController {
         }
       }
 
-      const { authUrl } = await cliAuthService.startCodexCliLogin(userId, userEmail);
+      const { authUrl, userCode } = await cliAuthService.startCodexCliLogin(userId, userEmail);
+
+      if (userCode) {
+        const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Authorize Codex CLI · Atelier</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #0b0f19;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+    .card {
+      background: #151d2f;
+      border: 1px solid rgba(16, 163, 127, 0.35);
+      border-radius: 1.25rem;
+      padding: 2.25rem 2rem;
+      max-width: 440px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      background: rgba(16, 163, 127, 0.15);
+      border: 1px solid rgba(16, 163, 127, 0.3);
+      margin-bottom: 1.25rem;
+    }
+    .badge svg {
+      width: 26px;
+      height: 26px;
+      fill: #10A37F;
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      color: #f8fafc;
+      margin-bottom: 0.5rem;
+    }
+    p.desc {
+      color: #94a3b8;
+      font-size: 0.875rem;
+      line-height: 1.5;
+      margin-bottom: 1.5rem;
+    }
+    .code-box {
+      background: #0b0f19;
+      border: 1px dashed rgba(16, 163, 127, 0.5);
+      border-radius: 0.75rem;
+      padding: 1rem 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+    .code-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      color: #34d399;
+      user-select: all;
+    }
+    .btn-copy {
+      background: #1e293b;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      color: #f8fafc;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.4rem 0.75rem;
+      border-radius: 0.5rem;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .btn-copy:hover {
+      background: #334155;
+    }
+    .btn-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      width: 100%;
+      background: #10A37F;
+      color: white;
+      text-decoration: none;
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 0.85rem 1.25rem;
+      border-radius: 0.75rem;
+      border: none;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: 0 4px 12px rgba(16, 163, 127, 0.3);
+    }
+    .btn-action:hover {
+      background: #0d8a6a;
+      box-shadow: 0 6px 16px rgba(16, 163, 127, 0.4);
+    }
+    .status-bar {
+      margin-top: 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.6rem;
+      font-size: 0.825rem;
+      color: #94a3b8;
+    }
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(16, 163, 127, 0.25);
+      border-top-color: #10A37F;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .success {
+      color: #34d399 !important;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">
+      <svg viewBox="0 0 24 24">
+        <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1683a.071.071 0 0 1 .038.052v5.5826a4.5045 4.5045 0 0 1-4.4945 4.4947zm-9.426-4.9961a4.466 4.466 0 0 1-.5351-3.0094l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-5.906-2.5171zm-1.5201-9.6118a4.4755 4.4755 0 0 1 2.336-1.9663v5.6635a.7712.7712 0 0 0 .3879.6718l5.8428 3.3733-2.02 1.1683a.0757.0757 0 0 1-.071 0l-4.8304-2.7915a4.4945 4.4945 0 0 1-1.6453-6.1192zm16.5 4.8727-5.8428-3.3733 2.02-1.1683a.0757.0757 0 0 1 .071 0l4.8304 2.7915a4.4945 4.4945 0 0 1-.6535 8.0855v-5.6635a.7712.7712 0 0 0-.4251-.6719zm2.3965-3.0567l-.142-.0852-4.7783-2.7582a.7712.7712 0 0 0-.7854 0L9.809 6.2201V3.8877a.0804.0804 0 0 1 .0332-.0615l4.897-2.8293a4.4992 4.4992 0 0 1 6.6805 4.7474zm-11.822-2.3324v6.7369l-2.02-1.1683a.071.071 0 0 1-.038-.052V2.4278a4.5045 4.5045 0 0 1 4.4945-4.4947l-.142.0804-4.7783 2.7582a.7948.7948 0 0 0-.3927.6813zm2.0108 4.2644l2.8764-1.6568 2.8764 1.6568v3.3136l-2.8764 1.6568-2.8764-1.6568z"/>
+      </svg>
+    </div>
+    <h1>Authorize OpenAI Codex CLI</h1>
+    <p class="desc">Enter the one-time device code below on OpenAI to link your account to Atelier:</p>
+
+    <div class="code-box">
+      <span id="code-val" class="code-val">${userCode}</span>
+      <button type="button" id="copy-btn" class="btn-copy" onclick="copyCode()">Copy Code</button>
+    </div>
+
+    <button type="button" id="open-btn" class="btn-action" onclick="openAndCopy()">
+      <span>Copy Code & Open auth.openai.com</span>
+      <span style="font-size: 1.1rem;">↗</span>
+    </button>
+
+    <div id="status-box" class="status-bar">
+      <div class="spinner"></div>
+      <span id="status-label">Waiting for authorization on OpenAI...</span>
+    </div>
+  </div>
+
+  <script>
+    const code = "${userCode}";
+    const authUrl = "${authUrl}";
+
+    function copyCode() {
+      navigator.clipboard.writeText(code).then(() => {
+        const btn = document.getElementById('copy-btn');
+        btn.innerText = 'Copied!';
+        btn.style.color = '#34d399';
+        setTimeout(() => {
+          btn.innerText = 'Copy Code';
+          btn.style.color = '#f8fafc';
+        }, 2500);
+      }).catch(() => {});
+    }
+
+    function openAndCopy() {
+      copyCode();
+      const openBtn = document.getElementById('open-btn');
+      openBtn.innerHTML = '<span>Code Copied! Complete in OpenAI Tab</span> <span>↗</span>';
+      window.open(authUrl, '_blank');
+    }
+
+    // Live poll status until approved
+    const pollTimer = setInterval(async () => {
+      try {
+        const res = await fetch('/api/v1/auth/cli/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.data?.codex?.linked) {
+          clearInterval(pollTimer);
+          const statusBox = document.getElementById('status-box');
+          statusBox.innerHTML = '<span class="success">✓ Codex CLI Successfully Linked! Closing...</span>';
+          if (window.opener) {
+            window.opener.postMessage({
+              type: 'CODEX_CLI_AUTH_SUCCESS',
+              email: data.data.codex.email
+            }, '*');
+          }
+          setTimeout(() => {
+            window.close();
+          }, 1500);
+        }
+      } catch (err) {}
+    }, 1500);
+  </script>
+</body>
+</html>`;
+        return reply.type('text/html').send(html);
+      }
+
       return reply.redirect(authUrl);
     } catch (err: unknown) {
       logger.error('Failed to initiate Codex CLI login redirect', err);

@@ -11,6 +11,7 @@ import {
   unlinkClaudeCli,
   submitClaudeAuthCode,
   openCodexCliLoginPopup,
+  getCodexAuthUrl,
   unlinkCodexCli,
   refreshAuthToken,
   type CliStatus,
@@ -265,6 +266,33 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         onCliStatusChange?.(updated);
         try {
           await refreshAuthToken();
+        } catch {}
+      } else {
+        // Fallback: If popup was closed early or blocked by browser, fetch device code directly
+        try {
+          const details = await getCodexAuthUrl();
+          if (details?.userCode) {
+            setPendingDeviceAuth({
+              platform: 'codex_subscription',
+              userCode: details.userCode,
+              verificationUri: details.authUrl,
+              deviceCode: details.sessionId,
+            });
+            // Poll in background while device code is displayed
+            const pollTimer = setInterval(async () => {
+              const status = await fetchCliStatus();
+              if (status.codex?.linked) {
+                clearInterval(pollTimer);
+                setPendingDeviceAuth(null);
+                setCliStatus(status);
+                onCliStatusChange?.(status);
+                try {
+                  await refreshAuthToken();
+                } catch {}
+              }
+            }, 1500);
+            setTimeout(() => clearInterval(pollTimer), 120000);
+          }
         } catch {}
       }
     } catch (err: unknown) {

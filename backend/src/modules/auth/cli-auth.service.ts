@@ -75,6 +75,7 @@ export class CliAuthService {
   private activeCodexLogin: {
     process: ChildProcess;
     authUrl?: string;
+    userCode?: string;
     userId?: string;
     userEmail?: string;
     startedAt: number;
@@ -1701,14 +1702,15 @@ export class CliAuthService {
     return info;
   }
 
-  public async startCodexCliLogin(userId?: string, userEmail?: string): Promise<{ authUrl: string; sessionId: string }> {
+  public async startCodexCliLogin(userId?: string, userEmail?: string): Promise<{ authUrl: string; userCode?: string; sessionId: string }> {
     if (
       this.activeCodexLogin &&
       this.activeCodexLogin.authUrl &&
-      Date.now() - this.activeCodexLogin.startedAt < 45000
+      Date.now() - this.activeCodexLogin.startedAt < 60000
     ) {
       return {
         authUrl: this.activeCodexLogin.authUrl,
+        userCode: this.activeCodexLogin.userCode,
         sessionId: String(this.activeCodexLogin.startedAt),
       };
     }
@@ -1725,7 +1727,7 @@ export class CliAuthService {
 
     return new Promise((resolve, reject) => {
       let resolved = false;
-      const proc = spawn(codexBin, ['login'], {
+      const proc = spawn(codexBin, ['login', '--device-auth'], {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: this.getHeadlessCliEnv(),
       });
@@ -1735,7 +1737,7 @@ export class CliAuthService {
           proc.kill('SIGTERM');
           reject(new AppError('Codex CLI login timed out waiting for authorization URL', 504, 'TIMEOUT'));
         }
-      }, 8000);
+      }, 10000);
 
       const sessionExpiryTimer = setTimeout(() => {
         if (this.activeCodexLogin?.process === proc) {
@@ -1750,21 +1752,27 @@ export class CliAuthService {
 
       const handleChunk = (chunk: Buffer) => {
         buf += chunk.toString();
-        const urlMatch = buf.match(/https:\/\/auth\.openai\.com\/oauth\/authorize[^\s\x1b\x07]+/);
+        const urlMatch = buf.match(/https:\/\/[^\s\x1b\x07]+/);
+        const codeMatch = buf.match(/([A-Z0-9]{4,}-[A-Z0-9]{4,})/);
         if (urlMatch && !resolved) {
+          const userCode = codeMatch ? codeMatch[1] : undefined;
+          if (buf.includes('device') && !userCode) {
+            return;
+          }
           resolved = true;
           clearTimeout(timeoutId);
           const authUrl = urlMatch[0];
           this.activeCodexLogin = {
             process: proc,
             authUrl,
+            userCode,
             userId,
             userEmail,
             startedAt: Date.now(),
             timeoutId: sessionExpiryTimer,
           };
-          logger.info('Captured Codex CLI OAuth authorization URL', { authUrl });
-          resolve({ authUrl, sessionId: String(Date.now()) });
+          logger.info('Captured Codex CLI device auth details', { authUrl, userCode });
+          resolve({ authUrl, userCode, sessionId: String(Date.now()) });
         }
       };
 
@@ -1785,10 +1793,16 @@ export class CliAuthService {
           this.cachedCodexStatus = { linked: true, email: info.email, timestamp: Date.now() };
           if (loginUserId) {
             this.linkUserCli(loginUserId, 'codex', info.email || loginUserEmail || 'ChatGPT Account');
+            import('../sandbox/sandbox.service.js')
+              .then(({ sandboxService }) => sandboxService.syncCredentialsToUserSandboxes(loginUserId).catch(() => {}))
+              .catch(() => {});
           } else {
             const links = this.loadUserCliLinks();
             for (const uid of Object.keys(links)) {
               this.linkUserCli(uid, 'codex', info.email || 'ChatGPT Account');
+              import('../sandbox/sandbox.service.js')
+                .then(({ sandboxService }) => sandboxService.syncCredentialsToUserSandboxes(uid).catch(() => {}))
+                .catch(() => {});
             }
           }
         } else if (!resolved) {
