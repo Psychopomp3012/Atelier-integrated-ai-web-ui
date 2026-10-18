@@ -966,7 +966,9 @@ export const App: React.FC = () => {
             setCliStatus(cliData);
             cliStatusFetchedRef.current = true;
             try {
-              localStorage.setItem(`harness_cli_status_${user.id}`, JSON.stringify(cliData));
+              if (user?.id) {
+                localStorage.setItem(`harness_cli_status_${user.id}`, JSON.stringify(cliData));
+              }
             } catch {}
           }
 
