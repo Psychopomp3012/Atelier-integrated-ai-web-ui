@@ -16,12 +16,12 @@ export class CliAuthController {
   }
 
   private async getUserIdFromReq(req: FastifyRequest): Promise<string | undefined> {
-    const query = req.query as { userId?: string; userEmail?: string; email?: string } | undefined;
+    const query = req.query as { userId?: string; userEmail?: string; email?: string; token?: string } | undefined;
     if (query?.userId) return query.userId;
 
     const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.substring(7);
+    const token = (authHeader && authHeader.startsWith('Bearer ')) ? authHeader.substring(7) : query?.token;
+    if (token) {
       const session = await authService.getSession(token);
       if (session) return session.user.id;
       const verified = tokenUtil.verifyJwt(token);
@@ -39,13 +39,13 @@ export class CliAuthController {
   }
 
   private async getUserEmailFromReq(req: FastifyRequest): Promise<string | undefined> {
-    const query = req.query as { userEmail?: string; email?: string } | undefined;
+    const query = req.query as { userEmail?: string; email?: string; token?: string } | undefined;
     if (query?.userEmail) return query.userEmail;
     if (query?.email) return query.email;
 
     const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.substring(7);
+    const token = (authHeader && authHeader.startsWith('Bearer ')) ? authHeader.substring(7) : query?.token;
+    if (token) {
       const session = await authService.getSession(token);
       if (session?.user?.email) return session.user.email;
       const verified = tokenUtil.verifyJwt(token);
@@ -403,9 +403,12 @@ export class CliAuthController {
         }
       }
 
+      logger.info('[Codex Auth] Generating Codex CLI auth URL via API', { userId, userEmail });
       const result = await cliAuthService.startCodexCliLogin(userId, userEmail);
+      logger.info('[Codex Auth] Generated Codex CLI auth URL', { userId, userCode: result.userCode, authUrl: result.authUrl });
       return reply.status(200).send(createSuccessResponse(result));
     } catch (err: unknown) {
+      logger.error('[Codex Auth] Failed to generate Codex CLI login URL', err);
       const msg = err instanceof Error ? err.message : 'Failed to generate Codex CLI login URL';
       return reply.status(500).send({ success: false, error: { message: msg } });
     }
@@ -431,7 +434,9 @@ export class CliAuthController {
         }
       }
 
+      logger.info('[Codex Auth] Initiating Codex CLI login popup request', { userId, userEmail, hasToken: Boolean(query?.token) });
       const { authUrl, userCode } = await cliAuthService.startCodexCliLogin(userId, userEmail);
+      logger.info('[Codex Auth] Codex CLI device auth prompt ready for popup', { userId, userCode, authUrl });
 
       if (userCode) {
         const html = `<!DOCTYPE html>
@@ -601,6 +606,9 @@ export class CliAuthController {
   <script>
     const code = "${userCode}";
     const authUrl = "${authUrl}";
+    const authToken = "${query?.token || ''}";
+    const authUserId = "${userId || ''}";
+    const authUserEmail = "${userEmail || ''}";
 
     function copyCode() {
       navigator.clipboard.writeText(code).then(() => {
@@ -623,7 +631,16 @@ export class CliAuthController {
 
     async function checkApproval() {
       try {
-        const res = await fetch('/api/v1/auth/cli/status');
+        const params = new URLSearchParams();
+        if (authToken) params.set('token', authToken);
+        if (authUserId) params.set('userId', authUserId);
+        if (authUserEmail) params.set('userEmail', authUserEmail);
+        const queryStr = params.toString() ? '?' + params.toString() : '';
+
+        const headers = {};
+        if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+
+        const res = await fetch('/api/v1/auth/cli/status' + queryStr, { headers });
         if (!res.ok) return;
         const data = await res.json();
         if (data.data?.codex?.linked) {
@@ -639,7 +656,7 @@ export class CliAuthController {
           }
           setTimeout(() => {
             window.close();
-          }, 1500);
+          }, 1000);
         }
       } catch (err) {}
     }
@@ -649,13 +666,13 @@ export class CliAuthController {
     let attempts = 0;
     const pollTimer = setInterval(() => {
       attempts++;
-      if (attempts > 15) {
+      if (attempts > 100) {
         clearInterval(pollTimer);
         window.removeEventListener('focus', checkApproval);
         return;
       }
       checkApproval();
-    }, 8000);
+    }, 3000);
   </script>
 </body>
 </html>`;
@@ -664,7 +681,7 @@ export class CliAuthController {
 
       return reply.redirect(authUrl);
     } catch (err: unknown) {
-      logger.error('Failed to initiate Codex CLI login redirect', err);
+      logger.error('[Codex Auth] Failed to initiate Codex CLI login redirect', err);
       return reply.type('text/html').status(500).send(`
         <!DOCTYPE html>
         <html>
@@ -682,6 +699,7 @@ export class CliAuthController {
   public async unlinkCodex(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const userId = await this.getUserIdFromReq(req);
     const userEmail = await this.getUserEmailFromReq(req);
+    logger.info('[Codex Auth] Unlinking Codex CLI request received', { userId, userEmail });
     if (userId || userEmail) {
       cliAuthService.unlinkUserCli(userId || '', 'codex', userEmail);
       if (userId) {
@@ -689,6 +707,7 @@ export class CliAuthController {
       }
     }
     await cliAuthService.unlinkCodex(userId);
+    logger.info('[Codex Auth] Codex CLI successfully unlinked', { userId });
     return reply.status(200).send(createSuccessResponse({ success: true, message: 'Codex CLI unlinked' }));
   }
 }

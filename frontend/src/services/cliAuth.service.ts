@@ -59,11 +59,15 @@ export async function fetchCliStatus(force = false): Promise<CliStatus> {
     };
   }
   const now = Date.now();
-  if (!force && lastCliStatus && now - lastCliStatusFetchTime < CLI_STATUS_CACHE_TTL) {
-    return lastCliStatus;
-  }
-  if (inFlightCliStatusPromise) {
-    return inFlightCliStatusPromise;
+  if (force) {
+    invalidateCliStatusCache();
+  } else {
+    if (lastCliStatus && now - lastCliStatusFetchTime < CLI_STATUS_CACHE_TTL) {
+      return lastCliStatus;
+    }
+    if (inFlightCliStatusPromise) {
+      return inFlightCliStatusPromise;
+    }
   }
 
   inFlightCliStatusPromise = (async () => {
@@ -343,6 +347,27 @@ export async function getCodexAuthUrl(): Promise<{ authUrl: string; userCode?: s
   return data.data;
 }
 
+let codexPopupRef: Window | null = null;
+
+export function closeCodexCliLoginPopup(): boolean {
+  let closed = false;
+  if (codexPopupRef) {
+    try {
+      if (!codexPopupRef.closed) {
+        codexPopupRef.close();
+        closed = true;
+      }
+    } catch {
+      try {
+        codexPopupRef.close();
+        closed = true;
+      } catch {}
+    }
+    codexPopupRef = null;
+  }
+  return closed;
+}
+
 export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: string }> {
   return new Promise((resolve) => {
     const width = 550;
@@ -350,7 +375,9 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
     const left = window.screenX + (window.outerWidth - width) / 2;
     const top = window.screenY + (window.outerHeight - height) / 2;
 
-    const token = localStorage.getItem('auth_token') || '';
+    closeCodexCliLoginPopup();
+
+    const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') || '' : '';
     const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
 
     const popup = window.open(
@@ -359,37 +386,100 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
       `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`
     );
 
+    codexPopupRef = popup;
+
     let resolved = false;
     let checkTimer: ReturnType<typeof setInterval> | null = null;
 
+    const cleanup = () => {
+      if (checkTimer) {
+        clearInterval(checkTimer);
+        checkTimer = null;
+      }
+      window.removeEventListener('message', messageHandler);
+      window.removeEventListener('focus', checkStatusDirectly);
+    };
+
+    const finishSuccess = (email?: string) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      closeCodexCliLoginPopup();
+      invalidateCliStatusCache();
+      resolve({ success: true, email });
+    };
+
+    const finishFail = () => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      closeCodexCliLoginPopup();
+      resolve({ success: false });
+    };
+
+    const checkStatusDirectly = async () => {
+      if (resolved) return;
+      try {
+        const current = await fetchCliStatus(true);
+        if (current.codex?.linked) {
+          finishSuccess(current.codex.email);
+        }
+      } catch {}
+    };
+
     const messageHandler = (event: MessageEvent) => {
       if (event.data?.type === 'CODEX_CLI_AUTH_SUCCESS') {
-        resolved = true;
-        window.removeEventListener('message', messageHandler);
-        if (checkTimer) clearInterval(checkTimer);
-        invalidateCliStatusCache();
-        resolve({ success: true, email: event.data.email });
+        finishSuccess(event.data.email);
       }
     };
 
     window.addEventListener('message', messageHandler);
+    window.addEventListener('focus', checkStatusDirectly);
 
-    // Detect popup closure without constantly polling the backend
-    checkTimer = setInterval(() => {
-      if (!popup || popup.closed) {
-        if (checkTimer) clearInterval(checkTimer);
-        window.removeEventListener('message', messageHandler);
-        if (!resolved) {
-          fetchCliStatus(true).then((finalStatus) => {
-            if (finalStatus.codex?.linked) {
-              resolve({ success: true, email: finalStatus.codex.email });
-            } else {
-              resolve({ success: false });
-            }
-          });
+    // Initial check in case user was already linked
+    checkStatusDirectly();
+
+    // Check periodically for backend authorization approval or window closure
+    let elapsedMs = 0;
+    checkTimer = setInterval(async () => {
+      elapsedMs += 2000;
+
+      // 1. Actively verify if backend has confirmed the link
+      try {
+        const status = await fetchCliStatus(true);
+        if (status.codex?.linked) {
+          finishSuccess(status.codex.email);
+          return;
         }
+      } catch {}
+
+      // 2. Check if popup was closed
+      let isClosed = false;
+      try {
+        isClosed = !popup || popup.closed;
+      } catch {
+        isClosed = false;
       }
-    }, 1500);
+
+      if (isClosed) {
+        try {
+          const finalStatus = await fetchCliStatus(true);
+          if (finalStatus.codex?.linked) {
+            finishSuccess(finalStatus.codex.email);
+          } else {
+            finishFail();
+          }
+        } catch {
+          finishFail();
+        }
+        return;
+      }
+
+      // 3. Graceful timeout after 5 minutes
+      if (elapsedMs >= 300000) {
+        finishFail();
+      }
+    }, 2000);
   });
 }
 

@@ -136,6 +136,7 @@ export const App: React.FC = () => {
   const [toastMessage, setToastMessage] = useAtom(toastMessageAtom);
   const abortControllerRef = useRef<AbortController | null>(null);
   const initialLoadCompletedRef = useRef<boolean>(false);
+  const lastHydratedUserIdRef = useRef<string | null>(null);
 
   // User Message Action States (Copy & Inline Edit)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
@@ -301,7 +302,11 @@ export const App: React.FC = () => {
         const attached = sandboxUsage.sandboxes.find((s) => s.attachedSessionIds?.includes(cleanSession));
         if (attached) {
           setSelectedSandboxId(attached.sandboxId);
+        } else {
+          setSelectedSandboxId(sandboxUsage.sandboxes[0].sandboxId);
         }
+      } else {
+        setSelectedSandboxId(sandboxUsage.sandboxes[0].sandboxId);
       }
     }
   }, [sandboxUsage, selectedSandboxId, currentSessionId]);
@@ -316,6 +321,9 @@ export const App: React.FC = () => {
     if (selectedSandboxId) {
       const selected = sandboxUsage.sandboxes.find((s) => s.sandboxId === selectedSandboxId);
       if (selected) return selected;
+    }
+    if (sandboxUsage.sandboxes.length > 0) {
+      return sandboxUsage.sandboxes[0];
     }
     return null;
   }, [currentUser, sandboxUsage, currentSessionId, selectedSandboxId]);
@@ -648,7 +656,7 @@ export const App: React.FC = () => {
         console.warn('Error waiting for providers and models ready', err);
       }
     },
-    [currentSessionId, fetchSandboxUsage]
+    [fetchSandboxUsage]
   );
 
   useEffect(() => {
@@ -848,6 +856,8 @@ export const App: React.FC = () => {
   const performUserCleanup = useCallback(() => {
     authMeCompletedRef.current = false;
     authMeInFlightRef.current = null;
+    initialLoadCompletedRef.current = false;
+    lastHydratedUserIdRef.current = null;
     const prevUserId = currentUserRef.current?.id;
     closeGeminiCliLoginPopup();
     // 1. Invalidate authentication tokens & caches
@@ -1041,6 +1051,8 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     if (!currentUser?.id) {
+      lastHydratedUserIdRef.current = null;
+      initialLoadCompletedRef.current = false;
       setIsSyncingSessions(false);
       setSessions([]);
       setMessages([]);
@@ -1049,6 +1061,12 @@ export const App: React.FC = () => {
       setRemainingMessageCount(0);
       return;
     }
+
+    // Guard: Prevent re-running initial wipe and sync if this user has already been hydrated
+    if (lastHydratedUserIdRef.current === currentUser.id) {
+      return;
+    }
+    lastHydratedUserIdRef.current = currentUser.id;
 
     // 0ms instant hydration: immediately display local sessions before network calls, scoped to user
     const cached = sessionSyncService.getLocalSessions(currentUser.id);
@@ -1604,6 +1622,11 @@ export const App: React.FC = () => {
       return;
     }
 
+    const activeSessionId = currentSessionId || `sess_${Date.now()}`;
+    if (!currentSessionId) {
+      setCurrentSessionId(activeSessionId);
+    }
+
     let newMessages: ChatMessage[];
 
     if (customHistory) {
@@ -1624,9 +1647,48 @@ export const App: React.FC = () => {
       newMessages = [...messages, userMsg];
       setMessages(newMessages);
       if (currentUser) {
-        firestoreService.saveChatMessage(currentUser.id, currentSessionId || `sess_${Date.now()}`, userMsg);
+        firestoreService.saveChatMessage(currentUser.id, activeSessionId, userMsg);
       }
     }
+
+    const sessionTitle = promptText.length > 36 ? promptText.slice(0, 36) + '...' : promptText;
+    const isTruncated = Boolean(editOptions?.isTruncated || customHistory);
+    const truncateAfterId = editOptions?.truncateAfterMessageId;
+
+    // Immediately register or update the session in local state & cache so it appears in the sidebar
+    setSessions((prev) => {
+      const idx = prev.findIndex((s) => s.id === activeSessionId);
+      let updated: ChatSession[];
+      let targetSession: ChatSession;
+      if (idx >= 0) {
+        updated = [...prev];
+        targetSession = {
+          ...updated[idx],
+          updatedAt: new Date().toISOString(),
+          messages: newMessages,
+          messageCount: newMessages.length,
+          model: selectedModel,
+          overwriteMessages: isTruncated || !hasMoreEarlierMessages,
+          truncateAfterMessageId: truncateAfterId,
+        };
+        updated[idx] = targetSession;
+      } else {
+        targetSession = {
+          id: activeSessionId,
+          title: sessionTitle,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          messages: newMessages,
+          messageCount: newMessages.length,
+          model: selectedModel,
+          overwriteMessages: isTruncated || !hasMoreEarlierMessages,
+          truncateAfterMessageId: truncateAfterId,
+        };
+        updated = [targetSession, ...prev];
+      }
+      sessionSyncService.saveSession(targetSession, currentUser?.id).catch(() => {});
+      return updated;
+    });
 
     setIsLoading(true);
 
@@ -1636,10 +1698,6 @@ export const App: React.FC = () => {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    const activeSessionId = currentSessionId || `sess_${Date.now()}`;
-    if (!currentSessionId) {
-      setCurrentSessionId(activeSessionId);
-    }
     if (activeSandbox?.sandboxId) {
       const clean = activeSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
       await apiFetch('/api/v1/sandbox/attach', {

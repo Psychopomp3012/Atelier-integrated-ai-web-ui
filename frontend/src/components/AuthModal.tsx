@@ -11,6 +11,7 @@ import {
   unlinkClaudeCli,
   submitClaudeAuthCode,
   openCodexCliLoginPopup,
+  closeCodexCliLoginPopup,
   getCodexAuthUrl,
   unlinkCodexCli,
   refreshAuthToken,
@@ -54,6 +55,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [authError, setAuthError] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [cliStatus, setCliStatus] = useState<CliStatus | null>(initialCliStatus || null);
+  const [codexProcessingStep, setCodexProcessingStep] = useState<string | null>(null);
+  const [codexSuccess, setCodexSuccess] = useState(false);
+  const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     if (initialCliStatus) {
@@ -68,7 +72,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   useEffect(() => {
     if (!isOpen || !currentUser) return;
     const update = () => {
-      fetchCliStatus()
+      fetchCliStatus(true)
         .then((status) => {
           const json = JSON.stringify(status);
           if (json !== lastStatusJsonRef.current) {
@@ -271,19 +275,54 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   const handleLinkCodexCli = async () => {
+    if (isSubmitting || codexProcessingStep) return;
     setIsSubmitting(true);
     setAuthError(null);
+    setCodexAuthError(null);
+    setCodexSuccess(false);
+    setCodexProcessingStep('Opening OpenAI OAuth browser popup...');
+
     try {
-      const res = await openCodexCliLoginPopup();
+      const popupPromise = openCodexCliLoginPopup();
+      setCodexProcessingStep('Waiting for ChatGPT / OpenAI authorization in popup...');
+      const res = await popupPromise;
+
       if (res.success) {
-        const updated = await fetchCliStatus();
+        setCodexProcessingStep('Verifying Codex CLI credentials & active session...');
+        let updated = await fetchCliStatus(true);
+        if (!updated.codex?.linked) {
+          await new Promise((r) => setTimeout(r, 700));
+          updated = await fetchCliStatus(true);
+        }
         setCliStatus(updated);
         onCliStatusChange?.(updated);
         try {
           await refreshAuthToken();
         } catch {}
+        setCodexSuccess(true);
+        setCodexProcessingStep('OpenAI Codex CLI linked successfully! 🎉');
+        await new Promise((r) => setTimeout(r, 1200));
+        setCodexSuccess(false);
+        setCodexProcessingStep(null);
       } else {
+        // First verify if actually linked before assuming failure
+        const freshStatus = await fetchCliStatus(true).catch(() => null);
+        if (freshStatus?.codex?.linked) {
+          setCliStatus(freshStatus);
+          onCliStatusChange?.(freshStatus);
+          try {
+            await refreshAuthToken();
+          } catch {}
+          setCodexSuccess(true);
+          setCodexProcessingStep('OpenAI Codex CLI linked successfully! 🎉');
+          await new Promise((r) => setTimeout(r, 1200));
+          setCodexSuccess(false);
+          setCodexProcessingStep(null);
+          return;
+        }
+
         // Fallback: If popup was closed early or blocked by browser, fetch device code directly
+        setCodexProcessingStep(null);
         try {
           const details = await getCodexAuthUrl();
           if (details?.userCode) {
@@ -294,8 +333,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               deviceCode: details.sessionId,
             });
             // Check status immediately on window focus, or via a gentle 8s fallback interval
+            let pollTimer: ReturnType<typeof setInterval> | null = null;
             const checkDeviceAuthStatus = async () => {
-              const status = await fetchCliStatus();
+              const status = await fetchCliStatus(true);
               if (status.codex?.linked) {
                 if (pollTimer) clearInterval(pollTimer);
                 window.removeEventListener('focus', checkDeviceAuthStatus);
@@ -308,33 +348,43 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               }
             };
             window.addEventListener('focus', checkDeviceAuthStatus);
-            const pollTimer = setInterval(checkDeviceAuthStatus, 8000);
+            pollTimer = setInterval(checkDeviceAuthStatus, 8000);
             setTimeout(() => {
-              clearInterval(pollTimer);
+              if (pollTimer) clearInterval(pollTimer);
               window.removeEventListener('focus', checkDeviceAuthStatus);
             }, 120000);
+          } else {
+            setCodexAuthError('Authorization window closed without completing login. Please try again.');
           }
-        } catch {}
+        } catch {
+          setCodexAuthError('Authorization window closed without completing login. Please try again.');
+        }
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Codex CLI linking was cancelled';
-      setAuthError(msg);
+      setCodexAuthError(msg);
+      setCodexProcessingStep(null);
     } finally {
       setIsSubmitting(false);
+      if (!codexSuccess) {
+        setCodexProcessingStep(null);
+      }
     }
   };
 
   const handleUnlinkCodexCli = async () => {
+    closeCodexCliLoginPopup();
     setUnlinkingCli('codex');
     setAuthError(null);
+    setCodexAuthError(null);
     try {
       await unlinkCodexCli();
-      const updated = await fetchCliStatus();
+      const updated = await fetchCliStatus(true);
       setCliStatus(updated);
       onCliStatusChange?.(updated);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to unlink Codex CLI';
-      setAuthError(msg);
+      setCodexAuthError(msg);
     } finally {
       setUnlinkingCli(null);
     }
@@ -718,7 +768,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
 
                 {/* OpenAI Codex CLI (codex) */}
-                <div className="p-3 sm:p-4 rounded-xl bg-surface-container-lowest border border-outline-variant/20 flex flex-col gap-2.5">
+                <div className={`p-3 sm:p-4 rounded-xl border transition-all flex flex-col gap-2.5 relative overflow-hidden ${
+                  codexProcessingStep
+                    ? 'bg-[#10A37F]/5 border-[#10A37F]/50 shadow-md shadow-[#10A37F]/10 ring-1 ring-[#10A37F]/20'
+                    : codexAuthError
+                    ? 'bg-error-container/10 border-error/30'
+                    : 'bg-surface-container-lowest border-outline-variant/20'
+                }`}>
+                  {/* Indeterminate loading bar when processing */}
+                  {codexProcessingStep && (
+                    <div className="absolute top-0 left-0 right-0 h-1 bg-[#10A37F]/20 overflow-hidden">
+                      <div className="w-1/2 h-full bg-gradient-to-r from-[#10A37F] via-[#2DD4BF] to-[#10A37F] rounded-full animate-indeterminate" />
+                    </div>
+                  )}
+
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 sm:gap-3">
                     <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
                       <div className="w-9 h-9 rounded-lg bg-[#10A37F]/15 border border-[#10A37F]/30 flex items-center justify-center p-2 shrink-0">
@@ -769,15 +832,87 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         <button
                           type="button"
                           onClick={handleLinkCodexCli}
-                          disabled={isSubmitting}
+                          disabled={isSubmitting || Boolean(codexProcessingStep)}
                           className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-3.5 py-2 sm:py-1.5 rounded-lg bg-[#10A37F] text-white hover:bg-[#0E8A6C] font-semibold text-xs transition-all cursor-pointer shadow-sm disabled:opacity-50"
                         >
-                          <span className="material-symbols-outlined text-[14px]">open_in_new</span>
-                          <span>Link Codex CLI</span>
+                          {codexProcessingStep ? (
+                            <>
+                              <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
+                              <span>Authorizing...</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="material-symbols-outlined text-[14px]">open_in_new</span>
+                              <span>Link Codex CLI</span>
+                            </>
+                          )}
                         </button>
                       )}
                     </div>
                   </div>
+
+                  {/* Linked Success Message */}
+                  {cliStatus?.codex?.linked ? (
+                    <div className="pt-2 border-t border-outline-variant/15 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium">
+                      <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                      <span>Codex CLI is linked! You can now safely close the OpenAI authorization popup.</span>
+                    </div>
+                  ) : null}
+
+                  {/* Dynamic Processing Status Card */}
+                  {codexProcessingStep && (
+                    <div className={`flex items-center gap-3 p-3 rounded-xl border text-xs text-on-surface animate-fadeIn transition-all ${
+                      codexSuccess
+                        ? 'bg-emerald-500/10 border-emerald-500/30'
+                        : 'bg-[#10A37F]/10 border-[#10A37F]/30 shadow-xs'
+                    }`}>
+                      {codexSuccess ? (
+                        <div className="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                          <span className="material-symbols-outlined text-[18px]">check_circle</span>
+                        </div>
+                      ) : (
+                        <div className="w-7 h-7 rounded-full bg-[#10A37F]/20 text-[#10A37F] flex items-center justify-center shrink-0">
+                          <span className="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
+                        </div>
+                      )}
+                      <div className="flex flex-col flex-1 min-w-0">
+                        <span className="font-semibold text-on-surface text-xs leading-tight">
+                          {codexProcessingStep}
+                        </span>
+                        {!codexSuccess && (
+                          <span className="text-[10px] text-outline mt-0.5">
+                            Complete authorization in the opened browser popup window...
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Inline Error Card */}
+                  {codexAuthError && !codexProcessingStep && (
+                    <div className="flex items-start gap-2.5 p-3 rounded-xl bg-error-container/20 border border-error/40 text-error text-xs animate-fadeIn">
+                      <span className="material-symbols-outlined text-[18px] shrink-0 mt-0.5 leading-none">error</span>
+                      <div className="flex-1 flex flex-col gap-1.5 min-w-0">
+                        <span className="leading-snug break-words">{codexAuthError}</span>
+                        <div className="flex items-center gap-2 pt-0.5">
+                          <button
+                            type="button"
+                            onClick={handleLinkCodexCli}
+                            className="px-2.5 py-1 rounded-md bg-error/15 hover:bg-error/25 text-error font-medium text-[11px] cursor-pointer transition-colors"
+                          >
+                            Open Sign-in again
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCodexAuthError(null)}
+                            className="px-2 py-1 text-outline hover:text-on-surface text-[11px] cursor-pointer"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Antigravity CLI Status Card */}

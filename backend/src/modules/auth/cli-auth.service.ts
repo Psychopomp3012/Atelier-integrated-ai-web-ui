@@ -1926,7 +1926,7 @@ export class CliAuthService {
             startedAt: Date.now(),
             timeoutId: sessionExpiryTimer,
           });
-          logger.info('Captured Codex CLI device auth details', { authUrl, userCode, userId });
+          logger.info('[Codex Auth] Captured Codex CLI device auth details', { authUrl, userCode, userId });
           resolve({ authUrl, userCode, sessionId: String(Date.now()) });
         }
       };
@@ -1957,8 +1957,6 @@ export class CliAuthService {
         const isAuthSuccessful = Boolean(foundAuthJson && fs.existsSync(foundAuthJson) && fs.statSync(foundAuthJson).size > 20);
 
         if (isAuthSuccessful) {
-          logger.info('Codex CLI login process completed successfully for user', { loginUserId });
-
           let userDetectedEmail = loginUserEmail;
           let authContent = '';
 
@@ -1978,6 +1976,7 @@ export class CliAuthService {
           }
 
           const resolvedEmail = userDetectedEmail || info.email || 'ChatGPT Account';
+          logger.info('[Codex Auth] Codex CLI login process completed successfully for user', { loginUserId, resolvedEmail });
 
           if (loginUserId && loginUserId !== 'default' && loginUserId !== 'default_user') {
             const userProfileCodexDir = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.codex');
@@ -2023,7 +2022,18 @@ export class CliAuthService {
           try {
             fs.rmSync(userCodexHome, { recursive: true, force: true });
           } catch {}
+          logger.error(`[Codex Auth] Codex CLI login process exited before auth URL could be resolved (code ${code})`, { exitCode: code, loginUserId, buf: buf.slice(-500) });
           reject(new AppError(`Codex CLI login process exited with code ${code}: ${buf}`, 500, 'CLI_LOGIN_ERROR'));
+        } else {
+          try {
+            fs.rmSync(userCodexHome, { recursive: true, force: true });
+          } catch {}
+          logger.warn('[Codex Auth] Codex CLI login process closed without valid credentials', {
+            exitCode: code,
+            loginUserId,
+            hasAuthJson: Boolean(foundAuthJson),
+            stderrSample: buf.slice(-500),
+          });
         }
       });
 
@@ -2035,8 +2045,8 @@ export class CliAuthService {
           fs.rmSync(userCodexHome, { recursive: true, force: true });
         } catch {}
 
+        logger.error('[Codex Auth] Failed to spawn Codex CLI for device auth', { error: err.message, codexBin, userId });
         if (!resolved) {
-          logger.error('Failed to spawn Codex CLI for device auth', { error: err.message, codexBin });
           reject(new AppError(`Failed to spawn Codex CLI: ${err.message}`, 500, 'SPAWN_ERROR'));
         }
       });
