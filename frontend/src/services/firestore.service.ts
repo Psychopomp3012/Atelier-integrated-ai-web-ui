@@ -23,7 +23,7 @@ export const firestoreService = {
       email: user.email,
       avatarUrl: user.avatarUrl,
       primaryPlatform: user.primaryPlatform,
-      linkedPlatforms: user.linkedPlatforms,
+      linkedPlatforms: Array.isArray(user.linkedPlatforms) ? user.linkedPlatforms : [],
     });
 
     const now = Date.now();
@@ -62,7 +62,11 @@ export const firestoreService = {
       const res = await apiFetch('/api/v1/auth/me');
       if (res.ok) {
         const data = await res.json();
-        return (data.data as Partial<UserProfile>) || null;
+        const profile = (data.data as Partial<UserProfile>) || null;
+        if (profile && !Array.isArray(profile.linkedPlatforms)) {
+          profile.linkedPlatforms = [];
+        }
+        return profile;
       }
       return null;
     } catch (error) {

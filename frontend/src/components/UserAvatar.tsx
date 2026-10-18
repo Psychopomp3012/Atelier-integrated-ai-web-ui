@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface UserAvatarProps {
   name: string;
@@ -15,6 +15,10 @@ export const UserAvatar: React.FC<UserAvatarProps> = ({
 }) => {
   const [hasError, setHasError] = useState(false);
 
+  useEffect(() => {
+    setHasError(false);
+  }, [avatarUrl]);
+
   const sizeClasses = {
     sm: 'w-7 h-7 text-xs',
     md: 'w-8 h-8 text-xs',
@@ -30,7 +34,9 @@ export const UserAvatar: React.FC<UserAvatarProps> = ({
     .join('')
     .toUpperCase() || 'U';
 
-  if (!avatarUrl || hasError) {
+  const isPlaceholderUrl = !avatarUrl || avatarUrl.includes('ui-avatars.com');
+
+  if (isPlaceholderUrl || hasError) {
     return (
       <div
         className={`${sizeClasses} rounded-full bg-gradient-to-tr from-primary to-secondary text-on-primary font-bold flex items-center justify-center shadow-sm select-none shrink-0 tracking-wider border border-white/20 ${className}`}
@@ -44,7 +50,7 @@ export const UserAvatar: React.FC<UserAvatarProps> = ({
   return (
     <img
       src={avatarUrl}
-      alt=""
+      alt={name}
       referrerPolicy="no-referrer"
       onError={() => setHasError(true)}
       className={`${sizeClasses} rounded-full object-cover shrink-0 border border-outline-variant/30 ${className}`}

@@ -1,18 +1,25 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useAtomValue, useSetAtom } from 'jotai';
 import type { UserProfile } from '../types';
 import { UserAvatar } from './UserAvatar';
+import { currentUserAtom, isAuthModalOpenAtom } from '../state';
 
 interface UserMenuProps {
-  user: UserProfile | null;
-  onOpenAuthModal: () => void;
+  user?: UserProfile | null;
+  onOpenAuthModal?: () => void;
   onLogout: () => void;
 }
 
 export const UserMenu: React.FC<UserMenuProps> = ({
-  user,
-  onOpenAuthModal,
+  user: propUser,
+  onOpenAuthModal: propOnOpenAuthModal,
   onLogout,
 }) => {
+  const atomUser = useAtomValue(currentUserAtom);
+  const setIsAuthModalOpen = useSetAtom(isAuthModalOpenAtom);
+
+  const user = propUser !== undefined ? propUser : atomUser;
+  const onOpenAuthModal = propOnOpenAuthModal ?? (() => setIsAuthModalOpen(true));
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 

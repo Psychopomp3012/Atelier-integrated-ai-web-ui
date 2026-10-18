@@ -1,0 +1,67 @@
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'darkMode': true,
+    'lineColor': '#ffffff',
+    'arrowheadColor': '#ffffff',
+    'mainBkg': '#1e293b',
+    'nodeBorder': '#38bdf8',
+    'primaryColor': '#1e293b',
+    'primaryTextColor': '#ffffff',
+    'primaryBorderColor': '#38bdf8',
+    'secondaryColor': '#0f172a',
+    'tertiaryColor': '#1e1b4b',
+    'edgeLabelBackground': '#0b0f19',
+    'clusterBkg': 'rgba(15, 23, 42, 0.85)',
+    'clusterBorder': '#334155'
+  }
+}}%%
+flowchart TD
+    subgraph Client["🖥️ Client Browser & Auth Popup (React 19)"]
+        U1([fa:fa-user Click 'Link Codex']) --> U2[fa:fa-window-maximize Open Auth Popup /api/v1/auth/cli/codex/login]
+        U2 --> U3[fa:fa-id-card Transmit 7-Day JWT Token]
+        P1[fa:fa-copy Render Dark-Mode Helper Page: Code Displayed & Auto-Copied] --> P2[fa:fa-external-link-alt Auto-Open OpenAI Device Page]
+        P2 --> P3[fa:fa-paste User Pastes One-Time Code: ABCD-1234]
+        P3 --> P4[fa:fa-check-circle Confirm ChatGPT Authorization]
+        P4 --> P5[fa:fa-spinner Poll / Detect Completion]
+        P5 --> P6([fa:fa-check-double Popup Closes: Codex Unlocked])
+    end
+
+    subgraph Backend["⚡ Fastify Backend Orchestrator (Multi-Tenant Isolation)"]
+        U3 --> B1{fa:fa-shield-halved Validate JWT}
+        B1 -->|Valid| B2[fa:fa-users Extract userId & userEmail]
+        B1 -->|Invalid| B_ERR([fa:fa-ban Reject 401 Unauthorized])
+
+        B2 --> B3[fa:fa-network-wired Allocate Isolated Session in activeCodexLogins Map]
+        B3 --> B4[fa:fa-folder-plus Create User-Specific Directory: ~/.agent-codex-auth/userId]
+        B4 --> B5[fa:fa-terminal Spawn Headless @openai/codex CLI with CODEX_HOME Isolation]
+        
+        B5 --> B6[fa:fa-filter Intercept CLI stdout: Extract Device URL & User Code]
+        B6 --> P1
+
+        B7[fa:fa-clock-rotate-left Await CLI Process Completion: exitCode == 0]
+        B7 --> B8[fa:fa-file-shield Read Isolated auth.json Token Payload]
+        B8 --> B9[fa:fa-id-badge Extract Verified Account Email]
+        
+        B9 --> B10[fa:fa-database Persist to Multi-Tenant Storage: ~/.agent-user-profiles/userId/.codex/auth.json]
+        B10 --> B11[fa:fa-cloud-upload-alt Save Linked State in Cloud Firestore: codex.linked = true]
+        B11 --> B12[fa:fa-broom Purge Temp Auth Directory: rm -rf ~/.agent-codex-auth/userId]
+        B12 --> B13[fa:fa-arrows-rotate Trigger syncCredentialsToUserSandboxes]
+        B13 --> P5
+    end
+
+    subgraph OpenAI["🌐 OpenAI OAuth & Device Service"]
+        B5 -.->|1. Device Auth Handshake| O1[fa:fa-key POST /api/accounts/device/code]
+        O1 -.->|2. Return Verification URL & Code| B6
+        P4 -.->|3. User Grants Permission| O2[fa:fa-user-lock Authorize Device Token]
+        O2 -.->|4. Transmit OAuth Tokens to Headless CLI| B7
+    end
+
+    subgraph Sandbox["☁️ E2B MicroVM Sandbox Pool (Cloud-Only Execution)"]
+        B13 --> S1{fa:fa-server Active User MicroVM?}
+        S1 -->|Running VM| S2[fa:fa-bolt Hot-Swap Credential Write: /home/agent-runner/.codex/auth.json]
+        S1 -->|Future VM| S3[fa:fa-snowflake Pre-Warmed Boot Seeding from User Profile]
+        S2 --> S4[fa:fa-lock Strict DAC Boundary: chown agent-runner & chmod 700]
+        S3 --> S4
+        S4 --> S5([fa:fa-play Safe Cloud Execution: Codex CLI Ready for Prompts])
+    end

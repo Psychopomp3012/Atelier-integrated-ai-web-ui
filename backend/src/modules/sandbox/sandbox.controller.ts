@@ -7,6 +7,7 @@ import { createSuccessResponse } from '../../utils/response.util.js';
 import { AppError } from '../../utils/error.util.js';
 import { envConfig } from '../../config/env.config.js';
 import { tokenUtil } from '../../utils/token.util.js';
+import { logger } from '../../utils/logger.util.js';
 
 export class SandboxController {
   public async getMetrics(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -163,15 +164,19 @@ export class SandboxController {
     const body = (req.body as { sessionId?: string; userId?: string; replaceOldest?: boolean }) || {};
     const userId = this.extractUserId(req, body.userId);
     if (!userId) {
+      logger.warn('[Sandbox] Unauthorized sandbox creation attempt: user not authenticated');
       throw new AppError('Authentication required: Please sign in to create a personal cloud sandbox.', 401, 'UNAUTHORIZED');
     }
     const sessionId = body.sessionId || 'default';
+    logger.info('[Sandbox] Received request to provision new cloud microVM', { sessionId, userId });
     try {
       const sandboxId = await sandboxService.getOrCreateSandbox(sessionId, userId, 'new', body.replaceOldest);
       const usage = sandboxService.getSandboxUsage(userId);
+      logger.info('[Sandbox] Successfully provisioned cloud microVM', { sandboxId, sessionId, userId, used: usage.used, max: usage.max });
       return reply.status(201).send(createSuccessResponse({ sandboxId, usage }));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      logger.error('[Sandbox] Failed to provision cloud microVM', err, { sessionId, userId });
       throw new AppError(msg, 400, 'SANDBOX_CREATION_FAILED');
     }
   }
@@ -184,6 +189,7 @@ export class SandboxController {
     if (!sessionId) {
       throw new AppError('sessionId is required to detach session', 400, 'VALIDATION_ERROR');
     }
+    logger.info('[Sandbox] Detaching session from sandbox', { sessionId, userId });
     const detached = sandboxService.detachSession(sessionId);
     const usage = sandboxService.getSandboxUsage(userId);
     return reply.status(200).send(createSuccessResponse({ success: detached, sessionId, usage }));
@@ -203,8 +209,10 @@ export class SandboxController {
     const clearAll = query?.clearAllSessions === 'true' || body.clearAllSessions === true || sessionId === 'all';
 
     if (sandboxId) {
+      logger.info('[Sandbox] Terminating cloud sandbox', { sandboxId, userId });
       await sandboxService.destroySandbox(sandboxId);
       const usage = sandboxService.getSandboxUsage(userId);
+      logger.info('[Sandbox] Cloud sandbox terminated and quota slot released', { sandboxId, userId, used: usage.used, max: usage.max });
       return reply.status(200).send(
         createSuccessResponse({
           message: `Sandbox ${sandboxId} deleted successfully. Quota slot released.`,

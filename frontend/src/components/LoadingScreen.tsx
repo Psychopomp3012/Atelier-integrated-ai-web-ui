@@ -49,10 +49,13 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({
       {/* Brand & Loading Label */}
       <div className="flex flex-col items-center text-center z-10 px-4">
         <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs font-mono font-semibold tracking-[0.25em] text-sky-400 uppercase">
+          <span className="text-xs font-mono font-semibold tracking-[0.25em] text-sky-400 uppercase leading-none">
             ATELIER
           </span>
-          <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping" />
+          <span className="relative flex h-2 w-2 items-center justify-center -translate-y-[1.5px]">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-sky-400" />
+          </span>
         </div>
         <h2 className="text-base sm:text-lg font-medium text-white tracking-wide mb-1.5">
           {message}

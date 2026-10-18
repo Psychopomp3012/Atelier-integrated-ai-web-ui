@@ -12,6 +12,7 @@ import { AppError } from '../../utils/error.util.js';
 import { envConfig } from '../../config/env.config.js';
 import { tokenUtil } from '../../utils/token.util.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
+import { logger } from '../../utils/logger.util.js';
 
 export class AuthController {
   public async getConfig(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -25,10 +26,13 @@ export class AuthController {
   public async loginGoogle(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const parseResult = GoogleLoginSchema.safeParse(req.body);
     if (!parseResult.success) {
+      logger.warn('[Auth] Google login payload validation failed', { errors: parseResult.error.format() });
       throw new AppError('Invalid Google login payload', 400, 'VALIDATION_ERROR', parseResult.error.format());
     }
 
+    logger.info('[Auth] Initiating Google login', { email: parseResult.data.email });
     const session = await authService.loginWithGoogle(parseResult.data);
+    logger.info('[Auth] Google login resolved session', { userId: session.user.id, email: session.user.email });
     return reply.status(200).send(createSuccessResponse(session));
   }
 
@@ -93,12 +97,18 @@ export class AuthController {
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
     if (!token) {
+      logger.warn('[Auth] getMe rejected: Missing or invalid Authorization Bearer header');
       throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
     }
 
     const session = await authService.getSession(token);
     if (!session) {
+      logger.warn('[Auth] getMe rejected: Invalid or expired session for provided token');
       throw new AppError('Invalid or expired session', 401, 'UNAUTHORIZED');
+    }
+
+    if (session.user && !Array.isArray(session.user.linkedPlatforms)) {
+      session.user.linkedPlatforms = [];
     }
 
     return reply.status(200).send(createSuccessResponse(session.user));
@@ -131,13 +141,19 @@ export class AuthController {
       throw new AppError('Invalid authentication token', 401, 'UNAUTHORIZED');
     }
     const body = (req.body || {}) as any;
+    const linkedPlatforms = Array.isArray(body.linkedPlatforms)
+      ? body.linkedPlatforms
+      : typeof body.linkedPlatforms === 'object' && body.linkedPlatforms !== null
+      ? Object.values(body.linkedPlatforms).filter((p: any) => Boolean(p && typeof p === 'object' && 'platform' in p))
+      : [];
+
     await firestoreBackendService.syncUserProfile({
       id: verified.payload.sub,
       name: body.name,
       email: body.email,
       avatarUrl: body.avatarUrl,
       primaryPlatform: body.primaryPlatform,
-      linkedPlatforms: body.linkedPlatforms,
+      linkedPlatforms,
       lastLoginAt: new Date().toISOString(),
     });
     return reply.status(200).send(createSuccessResponse({ synced: true }));

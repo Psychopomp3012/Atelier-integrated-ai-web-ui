@@ -14,6 +14,7 @@ import { logger } from '../../utils/logger.util.js';
 import { AppError } from '../../utils/error.util.js';
 import { envConfig } from '../../config/env.config.js';
 import { cliAuthService } from './cli-auth.service.js';
+import { firestoreBackendService } from '../../services/firestore.service.js';
 
 export function getStableUserId(email: string): string {
   const normalized = email.toLowerCase().trim();
@@ -135,13 +136,24 @@ export class AuthService {
       throw new AppError('Google authentication did not contain a valid email address', 400, 'INVALID_TOKEN');
     }
 
+    const stableId = getStableUserId(email);
+
+    let firestoreProfile: any = null;
+    try {
+      firestoreProfile = await firestoreBackendService.getUserProfile(stableId);
+      if (firestoreProfile?.avatarUrl && !firestoreProfile.avatarUrl.includes('ui-avatars.com')) {
+        avatarUrl = firestoreProfile.avatarUrl;
+      }
+    } catch (err) {
+      logger.warn('Failed to load user profile from Firestore in loginWithGoogle', { error: String(err) });
+    }
+
     name = name || email.split('@')[0];
     avatarUrl =
       avatarUrl ||
       `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=4285F4&color=fff`;
 
     // Look up existing user by canonical stableId derived from email hash
-    const stableId = getStableUserId(email);
     let user = this.users.get(stableId);
     if (!user) {
       const existing = Array.from(this.users.values()).find((u) => u.email === email);
@@ -149,6 +161,20 @@ export class AuthService {
         user = existing;
         user.id = stableId;
       }
+    }
+
+    if (!user && firestoreProfile) {
+      user = {
+        id: stableId,
+        name: firestoreProfile.name || name,
+        email,
+        avatarUrl: firestoreProfile.avatarUrl || avatarUrl,
+        primaryPlatform: firestoreProfile.primaryPlatform || 'google',
+        linkedPlatforms: Array.isArray(firestoreProfile.linkedPlatforms) ? firestoreProfile.linkedPlatforms : [],
+        createdAt: firestoreProfile.createdAt || new Date().toISOString(),
+      };
+      this.users.set(user.id, user);
+      logger.info('Restored returning developer profile from Firestore via Google OAuth', { userId: user.id, email });
     }
 
     if (!user) {
@@ -174,7 +200,14 @@ export class AuthService {
       logger.info('Registered new developer via Google OAuth', { userId: user.id, email });
     } else {
       user.name = name;
-      user.avatarUrl = avatarUrl;
+      if (avatarUrl && !avatarUrl.includes('ui-avatars.com')) {
+        user.avatarUrl = avatarUrl;
+      } else if (!user.avatarUrl || user.avatarUrl.includes('ui-avatars.com')) {
+        user.avatarUrl = avatarUrl;
+      }
+      if (!Array.isArray(user.linkedPlatforms)) {
+        user.linkedPlatforms = [];
+      }
       const googlePlatformIndex = user.linkedPlatforms.findIndex((p) => p.platform === 'google');
       if (googlePlatformIndex >= 0) {
         user.linkedPlatforms[googlePlatformIndex].hasValidSession = true;
@@ -192,10 +225,16 @@ export class AuthService {
       logger.info('Authenticated returning developer via Google OAuth', { userId: user.id, email });
     }
 
+    // Persist to Firestore so avatar & profile survive restarts
+    firestoreBackendService.syncUserProfile(user).catch((fErr) => {
+      logger.warn('Failed to sync user profile to Firestore in loginWithGoogle', { error: String(fErr) });
+    });
+
     const token = tokenUtil.generateSessionToken({
       userId: user.id,
       email: user.email,
       name: user.name,
+      avatarUrl: user.avatarUrl,
     });
     const session: AuthSession = {
       token,
@@ -249,6 +288,9 @@ export class AuthService {
       logger.info('Signed in new user via linked Antigravity CLI account', { userId: user.id, email });
     } else {
       user.name = name;
+      if (!Array.isArray(user.linkedPlatforms)) {
+        user.linkedPlatforms = [];
+      }
       const googlePlatformIndex = user.linkedPlatforms.findIndex((p) => p.platform === 'google');
       if (googlePlatformIndex >= 0) {
         user.linkedPlatforms[googlePlatformIndex].hasValidSession = true;
@@ -297,14 +339,25 @@ export class AuthService {
         user.id = stableId;
       }
     }
-    if (!user && email) {
-      user = {
-        id: stableId,
-        name: verification.payload.name || email.split('@')[0],
-        email: email,
-        avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(verification.payload.name || email)}&background=4285F4&color=fff`,
-        primaryPlatform: 'google',
-        linkedPlatforms: [
+
+    let firestoreProfile: any = null;
+    try {
+      firestoreProfile = await firestoreBackendService.getUserProfile(stableId);
+    } catch (err) {
+      logger.warn('Failed to load user profile from Firestore in refreshToken', { error: String(err) });
+    }
+
+    const resolvedAvatarUrl =
+      (firestoreProfile?.avatarUrl && !firestoreProfile.avatarUrl.includes('ui-avatars.com') ? firestoreProfile.avatarUrl : '') ||
+      (verification.payload.avatarUrl && !verification.payload.avatarUrl.includes('ui-avatars.com') ? verification.payload.avatarUrl : '') ||
+      (user?.avatarUrl && !user.avatarUrl.includes('ui-avatars.com') ? user.avatarUrl : '') ||
+      firestoreProfile?.avatarUrl ||
+      verification.payload.avatarUrl ||
+      `https://ui-avatars.com/api/?name=${encodeURIComponent(verification.payload.name || email || 'User')}&background=4285F4&color=fff`;
+
+    const validLinkedPlatforms = Array.isArray(firestoreProfile?.linkedPlatforms)
+      ? firestoreProfile.linkedPlatforms
+      : [
           {
             platform: 'google',
             accountId: stableId,
@@ -313,15 +366,40 @@ export class AuthService {
             hasValidSession: true,
             tier: 'Google Gemini 2.5 Pro Active',
           },
-        ],
-        createdAt: new Date().toISOString(),
+        ];
+
+    if (!user && email) {
+      user = {
+        id: stableId,
+        name: firestoreProfile?.name || verification.payload.name || email.split('@')[0],
+        email: email,
+        avatarUrl: resolvedAvatarUrl,
+        primaryPlatform: (firestoreProfile?.primaryPlatform as any) || 'google',
+        linkedPlatforms: validLinkedPlatforms,
+        createdAt: firestoreProfile?.createdAt || new Date().toISOString(),
       };
       this.users.set(user.id, user);
+    } else if (user) {
+      if (!Array.isArray(user.linkedPlatforms)) {
+        user.linkedPlatforms = validLinkedPlatforms;
+      }
+      if (firestoreProfile?.avatarUrl && !firestoreProfile.avatarUrl.includes('ui-avatars.com')) {
+        user.avatarUrl = firestoreProfile.avatarUrl;
+      } else if (verification.payload.avatarUrl && !verification.payload.avatarUrl.includes('ui-avatars.com')) {
+        user.avatarUrl = verification.payload.avatarUrl;
+      }
     }
 
     if (!user) {
       throw new AppError('User not found for token refresh', 404, 'USER_NOT_FOUND');
     }
+
+    const token = tokenUtil.generateSessionToken({
+      userId: user.id,
+      email: user.email,
+      name: user.name,
+      avatarUrl: user.avatarUrl,
+    });
 
     const newToken = tokenUtil.generateSessionToken({
       userId: user.id,
@@ -400,6 +478,9 @@ export class AuthService {
       tier: tierName,
     };
 
+    if (!Array.isArray(user.linkedPlatforms)) {
+      user.linkedPlatforms = [];
+    }
     const existingIndex = user.linkedPlatforms.findIndex((p) => p.platform === platform);
     if (existingIndex >= 0) {
       user.linkedPlatforms[existingIndex] = linkedAcc;
@@ -479,14 +560,25 @@ export class AuthService {
             user.id = stableId;
           }
         }
-        if (!user && email) {
-          user = {
-            id: stableId,
-            name: payload.name || email.split('@')[0],
-            email: email,
-            avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(payload.name || email)}&background=4285F4&color=fff`,
-            primaryPlatform: 'google',
-            linkedPlatforms: [
+
+        let firestoreProfile: any = null;
+        try {
+          firestoreProfile = await firestoreBackendService.getUserProfile(stableId);
+        } catch (err) {
+          logger.warn('Failed to load user profile from Firestore in getSession', { error: String(err) });
+        }
+
+        const resolvedAvatarUrl =
+          (firestoreProfile?.avatarUrl && !firestoreProfile.avatarUrl.includes('ui-avatars.com') ? firestoreProfile.avatarUrl : '') ||
+          (payload.avatarUrl && !payload.avatarUrl.includes('ui-avatars.com') ? payload.avatarUrl : '') ||
+          (user?.avatarUrl && !user.avatarUrl.includes('ui-avatars.com') ? user.avatarUrl : '') ||
+          firestoreProfile?.avatarUrl ||
+          payload.avatarUrl ||
+          `https://ui-avatars.com/api/?name=${encodeURIComponent(payload.name || email || 'User')}&background=4285F4&color=fff`;
+
+        const validLinkedPlatforms = Array.isArray(firestoreProfile?.linkedPlatforms)
+          ? firestoreProfile.linkedPlatforms
+          : [
               {
                 platform: 'google',
                 accountId: stableId,
@@ -495,11 +587,30 @@ export class AuthService {
                 hasValidSession: true,
                 tier: 'Google Gemini 2.5 Pro Active',
               },
-            ],
-            createdAt: new Date().toISOString(),
+            ];
+
+        if (!user && email) {
+          user = {
+            id: stableId,
+            name: firestoreProfile?.name || payload.name || email.split('@')[0],
+            email: email,
+            avatarUrl: resolvedAvatarUrl,
+            primaryPlatform: (firestoreProfile?.primaryPlatform as any) || 'google',
+            linkedPlatforms: validLinkedPlatforms,
+            createdAt: firestoreProfile?.createdAt || new Date().toISOString(),
           };
           this.users.set(user.id, user);
+        } else if (user) {
+          if (!Array.isArray(user.linkedPlatforms)) {
+            user.linkedPlatforms = validLinkedPlatforms;
+          }
+          if (firestoreProfile?.avatarUrl && !firestoreProfile.avatarUrl.includes('ui-avatars.com')) {
+            user.avatarUrl = firestoreProfile.avatarUrl;
+          } else if (payload.avatarUrl && !payload.avatarUrl.includes('ui-avatars.com')) {
+            user.avatarUrl = payload.avatarUrl;
+          }
         }
+
         if (user) {
           session = {
             token,
@@ -508,10 +619,38 @@ export class AuthService {
           };
           this.sessions.set(token, session);
           return session;
+        } else {
+          logger.warn('[Auth] getSession: verified JWT payload but unable to resolve user', {
+            email,
+            stableId,
+          });
         }
+      } else {
+        logger.warn('[Auth] getSession: JWT verification failed', {
+          tokenPrefix: token ? `${token.substring(0, 16)}...` : 'empty',
+          reason: verification.error || 'Invalid signature or expired token',
+        });
       }
       return null;
     }
+
+    // If session is already in memory, ensure avatarUrl isn't stale if Firestore has the real photo
+    if (session?.user && (!session.user.avatarUrl || session.user.avatarUrl.includes('ui-avatars.com'))) {
+      try {
+        const fp = await firestoreBackendService.getUserProfile(session.user.id);
+        if (fp?.avatarUrl && !fp.avatarUrl.includes('ui-avatars.com')) {
+          session.user.avatarUrl = fp.avatarUrl;
+          this.users.set(session.user.id, session.user);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (session?.user && !Array.isArray(session.user.linkedPlatforms)) {
+      session.user.linkedPlatforms = [];
+    }
+
     return session;
   }
 
@@ -522,6 +661,9 @@ export class AuthService {
     }
 
     const user = session.user;
+    if (!Array.isArray(user.linkedPlatforms)) {
+      user.linkedPlatforms = [];
+    }
     const existingIndex = user.linkedPlatforms.findIndex((p) => p.platform === req.platform);
 
     const platformLabel =

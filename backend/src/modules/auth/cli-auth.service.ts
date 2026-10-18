@@ -1,10 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { logger } from '../../utils/logger.util.js';
 import { AppError } from '../../utils/error.util.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 
 export interface CliStatusResult {
@@ -72,15 +76,19 @@ export class CliAuthService {
     timestamp: number;
   } | null = null;
 
-  private activeCodexLogin: {
-    process: ChildProcess;
-    authUrl?: string;
-    userCode?: string;
-    userId?: string;
-    userEmail?: string;
-    startedAt: number;
-    timeoutId: NodeJS.Timeout;
-  } | null = null;
+  private activeCodexLogins = new Map<
+    string,
+    {
+      process: ChildProcess;
+      authUrl?: string;
+      userCode?: string;
+      userId?: string;
+      userEmail?: string;
+      userCodexHome: string;
+      startedAt: number;
+      timeoutId: NodeJS.Timeout;
+    }
+  >();
 
   private cachedCodexStatus: {
     linked: boolean;
@@ -374,6 +382,11 @@ export class CliAuthService {
     this.saveUserCliLinks(links);
     firestoreBackendService.saveUserCliLinks(userId, links[userId], email).catch(() => {});
     logger.info(`Linked ${cli} CLI for user ${userId}`, { email });
+
+    // Also persist per-user Antigravity profile if linking antigravity or gemini
+    if (cli === 'antigravity' || cli === 'gemini') {
+      this.persistUserAntigravityProfile(userId, email || links[userId].email);
+    }
   }
 
   public unlinkUserCli(userId: string, cli: 'antigravity' | 'gemini' | 'claude' | 'codex', userEmail?: string): void {
@@ -421,6 +434,15 @@ export class CliAuthService {
     this.saveUserCliLinks(links);
     if (userId && links[userId]) {
       firestoreBackendService.saveUserCliLinks(userId, links[userId], targetEmail || cleanEmail).catch(() => {});
+    }
+    if (userId && (cli === 'antigravity' || cli === 'gemini')) {
+      const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const userGeminiDir = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.gemini');
+      if (fs.existsSync(userGeminiDir)) {
+        try {
+          fs.rmSync(userGeminiDir, { recursive: true, force: true });
+        } catch {}
+      }
     }
     logger.info(`Unlinked ${cli} CLI for user ${userId}`, { targetEmail });
   }
@@ -805,6 +827,78 @@ export class CliAuthService {
     }
   }
 
+  public extractEmailFromToken(tokenContent: string): string | null {
+    try {
+      const parsed = JSON.parse(tokenContent);
+      if (parsed.id_token) {
+        const parts = parsed.id_token.split('.');
+        if (parts.length >= 2) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+          if (payload?.email) return payload.email.toLowerCase().trim();
+        }
+      }
+      if (parsed.email) return parsed.email.toLowerCase().trim();
+    } catch {}
+    return null;
+  }
+
+  public getLatestHostAntigravityToken(): string | null {
+    const homedir = os.homedir();
+    const candidatePaths = [
+      path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+    ];
+    let newestText: string | null = null;
+    let newestMtime = 0;
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        try {
+          const st = fs.statSync(p);
+          if (st.size > 20 && st.mtimeMs > newestMtime) {
+            const text = fs.readFileSync(p, 'utf8');
+            if (text.includes('token') || text.includes('Bearer') || text.includes('access') || text.includes('refresh')) {
+              newestMtime = st.mtimeMs;
+              newestText = text;
+            }
+          }
+        } catch {}
+      }
+    }
+    return newestText;
+  }
+
+  public persistUserAntigravityProfile(userId: string, userEmail?: string): void {
+    if (!userId || userId === 'default' || userId === 'default_user') return;
+    const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const userGeminiDir = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.gemini');
+    const userAgyDir = path.join(userGeminiDir, 'antigravity-cli');
+    const userCacheDir = path.join(userAgyDir, 'cache');
+    try {
+      fs.mkdirSync(userCacheDir, { recursive: true, mode: 0o700 });
+      const hostToken = this.getLatestHostAntigravityToken();
+      if (hostToken) {
+        fs.writeFileSync(path.join(userCacheDir, 'antigravity-keyring-unavailable-oauth-token'), hostToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userCacheDir, 'antigravity-oauth-token'), hostToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userCacheDir, 'jetski-keyring-unavailable-oauth-token'), hostToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userAgyDir, 'antigravity-oauth-token'), hostToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userAgyDir, 'jetski-oauth-token'), hostToken, { mode: 0o600 });
+      }
+      const emailToSave = userEmail || (hostToken ? this.extractEmailFromToken(hostToken) : undefined);
+      if (emailToSave) {
+        const accJson = JSON.stringify({ active: emailToSave, accounts: [{ email: emailToSave }] }, null, 2);
+        fs.writeFileSync(path.join(userGeminiDir, 'google_accounts.json'), accJson, { mode: 0o600 });
+        fs.writeFileSync(path.join(userAgyDir, 'google_accounts.json'), accJson, { mode: 0o600 });
+        fs.writeFileSync(path.join(userGeminiDir, 'user_info.json'), JSON.stringify({ email: emailToSave }, null, 2), { mode: 0o600 });
+      }
+      logger.info(`Persisted Antigravity credentials to user profile: ${safeUserId}`, { email: emailToSave });
+    } catch (err) {
+      logger.warn('Failed to persist Antigravity credentials to user profile', { error: String(err) });
+    }
+  }
+
   public getHostTokenFiles(): string[] {
     const homedir = os.homedir();
     return [
@@ -1005,12 +1099,14 @@ export class CliAuthService {
   /**
    * Submits user-provided authorization code to active Antigravity CLI process stdin.
    */
-  public async submitAntigravityCliCode(code: string): Promise<{ success: boolean; error?: string; reason?: string }> {
+  public async submitAntigravityCliCode(code: string, userId?: string, userEmail?: string): Promise<{ success: boolean; error?: string; reason?: string }> {
     let cleanCode = code.trim();
     logger.info('[Antigravity Auth] Code submission received', {
       rawLength: code.length,
       hasCodeParam: cleanCode.includes('code='),
       hasStateParam: cleanCode.includes('state='),
+      userId,
+      userEmail,
     });
 
     // 1. If user pasted the redirect URL or query string, extract the code parameter
@@ -1077,6 +1173,9 @@ export class CliAuthService {
             errReason,
           });
           if (linked || ok) {
+            if (userId && userId !== 'default' && userId !== 'default_user') {
+              this.persistUserAntigravityProfile(userId, userEmail);
+            }
             resolve({ success: true });
           } else {
             resolve({
@@ -1651,49 +1750,74 @@ export class CliAuthService {
   }
 
   public getCodexBin(): string {
-    const localBin = path.join(os.homedir(), '.local', 'bin', 'codex');
-    if (fs.existsSync(localBin)) return localBin;
+    const candidatePaths = [
+      path.join(process.cwd(), 'node_modules', '.bin', 'codex'),
+      path.join(process.cwd(), 'backend', 'node_modules', '.bin', 'codex'),
+      path.join(__dirname, '..', '..', '..', 'node_modules', '.bin', 'codex'),
+      path.join(os.homedir(), '.local', 'bin', 'codex'),
+      '/usr/local/bin/codex',
+      '/usr/bin/codex',
+    ];
+
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) return p;
+    }
+
     return 'codex';
   }
 
-  public getCodexAuthInfo(): { linked: boolean; email?: string; mtime?: number } {
-    const codexDir = path.join(os.homedir(), '.codex');
-    const authJsonPath = path.join(codexDir, 'auth.json');
-    if (fs.existsSync(authJsonPath)) {
-      try {
-        const stats = fs.statSync(authJsonPath);
-        if (stats.size > 20) {
-          const raw = fs.readFileSync(authJsonPath, 'utf8');
-          const parsed = JSON.parse(raw);
-          let email = parsed.email;
-          if (!email && parsed.tokens?.id_token) {
-            try {
-              const parts = parsed.tokens.id_token.split('.');
-              if (parts.length > 1) {
-                const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-                if (payload.email) email = payload.email;
-              }
-            } catch {}
-          }
-          if (parsed.tokens || parsed.OPENAI_API_KEY || parsed.auth_mode) {
-            return {
-              linked: true,
-              email: email || (parsed.tokens ? 'ChatGPT Account' : undefined),
-              mtime: stats.mtimeMs,
-            };
-          }
-        }
-      } catch {}
+  public getCodexAuthInfo(userId?: string): { linked: boolean; email?: string; mtime?: number } {
+    const candidateFiles: string[] = [];
+
+    if (userId && userId !== 'default' && userId !== 'default_user') {
+      const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      candidateFiles.push(
+        path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.codex', 'auth.json'),
+        path.join(os.homedir(), '.agent-codex-auth', safeUserId, 'auth.json'),
+        path.join(os.homedir(), '.agent-codex-auth', safeUserId, '.codex', 'auth.json')
+      );
     }
+
+    candidateFiles.push(path.join(os.homedir(), '.codex', 'auth.json'));
+
+    for (const authJsonPath of candidateFiles) {
+      if (fs.existsSync(authJsonPath)) {
+        try {
+          const stats = fs.statSync(authJsonPath);
+          if (stats.size > 20) {
+            const raw = fs.readFileSync(authJsonPath, 'utf8');
+            const parsed = JSON.parse(raw);
+            let email = parsed.email;
+            if (!email && parsed.tokens?.id_token) {
+              try {
+                const parts = parsed.tokens.id_token.split('.');
+                if (parts.length > 1) {
+                  const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+                  if (payload.email) email = payload.email;
+                }
+              } catch {}
+            }
+            if (parsed.tokens || parsed.OPENAI_API_KEY || parsed.auth_mode) {
+              return {
+                linked: true,
+                email: email || (parsed.tokens ? 'ChatGPT Account' : undefined),
+                mtime: stats.mtimeMs,
+              };
+            }
+          }
+        } catch {}
+      }
+    }
+
     return { linked: false };
   }
 
-  public isCodexLinked(): boolean {
-    return this.getCodexAuthInfo().linked;
+  public isCodexLinked(userId?: string): boolean {
+    return this.getCodexAuthInfo(userId).linked;
   }
 
-  public async refreshCodexStatus(): Promise<{ linked: boolean; email?: string }> {
-    const info = this.getCodexAuthInfo();
+  public async refreshCodexStatus(userId?: string): Promise<{ linked: boolean; email?: string }> {
+    const info = this.getCodexAuthInfo(userId);
     this.cachedCodexStatus = {
       linked: info.linked,
       email: info.email,
@@ -1703,48 +1827,78 @@ export class CliAuthService {
   }
 
   public async startCodexCliLogin(userId?: string, userEmail?: string): Promise<{ authUrl: string; userCode?: string; sessionId: string }> {
+    const sessionKey = userId || 'global';
+    const existing = this.activeCodexLogins.get(sessionKey);
+
     if (
-      this.activeCodexLogin &&
-      this.activeCodexLogin.authUrl &&
-      Date.now() - this.activeCodexLogin.startedAt < 60000
+      existing &&
+      existing.authUrl &&
+      Date.now() - existing.startedAt < 60000
     ) {
       return {
-        authUrl: this.activeCodexLogin.authUrl,
-        userCode: this.activeCodexLogin.userCode,
-        sessionId: String(this.activeCodexLogin.startedAt),
+        authUrl: existing.authUrl,
+        userCode: existing.userCode,
+        sessionId: String(existing.startedAt),
       };
     }
 
-    if (this.activeCodexLogin) {
-      clearTimeout(this.activeCodexLogin.timeoutId);
+    if (existing) {
+      clearTimeout(existing.timeoutId);
       try {
-        this.activeCodexLogin.process.kill('SIGTERM');
+        existing.process.kill('SIGTERM');
       } catch {}
-      this.activeCodexLogin = null;
+      this.activeCodexLogins.delete(sessionKey);
+      try {
+        fs.rmSync(existing.userCodexHome, { recursive: true, force: true });
+      } catch {}
+    }
+
+    const safeUserId = (userId || 'global').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const userCodexHome = path.join(os.homedir(), '.agent-codex-auth', safeUserId);
+    try {
+      if (!fs.existsSync(userCodexHome)) {
+        fs.mkdirSync(userCodexHome, { recursive: true });
+      }
+    } catch (err) {
+      logger.warn('Failed to ensure userCodexHome directory', { userCodexHome, error: String(err) });
     }
 
     const codexBin = this.getCodexBin();
 
     return new Promise((resolve, reject) => {
       let resolved = false;
+
+      // Spawn Codex with isolated CODEX_HOME and HOME for multi-tenant safety
       const proc = spawn(codexBin, ['login', '--device-auth'], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: this.getHeadlessCliEnv(),
+        env: {
+          ...this.getHeadlessCliEnv(),
+          CODEX_HOME: userCodexHome,
+          HOME: userCodexHome,
+        },
       });
 
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           proc.kill('SIGTERM');
+          this.activeCodexLogins.delete(sessionKey);
+          try {
+            fs.rmSync(userCodexHome, { recursive: true, force: true });
+          } catch {}
           reject(new AppError('Codex CLI login timed out waiting for authorization URL', 504, 'TIMEOUT'));
         }
-      }, 10000);
+      }, 15000);
 
       const sessionExpiryTimer = setTimeout(() => {
-        if (this.activeCodexLogin?.process === proc) {
+        const cur = this.activeCodexLogins.get(sessionKey);
+        if (cur?.process === proc) {
           try {
             proc.kill('SIGTERM');
           } catch {}
-          this.activeCodexLogin = null;
+          this.activeCodexLogins.delete(sessionKey);
+          try {
+            fs.rmSync(userCodexHome, { recursive: true, force: true });
+          } catch {}
         }
       }, 300000);
 
@@ -1762,16 +1916,17 @@ export class CliAuthService {
           resolved = true;
           clearTimeout(timeoutId);
           const authUrl = urlMatch[0];
-          this.activeCodexLogin = {
+          this.activeCodexLogins.set(sessionKey, {
             process: proc,
             authUrl,
             userCode,
             userId,
             userEmail,
+            userCodexHome,
             startedAt: Date.now(),
             timeoutId: sessionExpiryTimer,
-          };
-          logger.info('Captured Codex CLI device auth details', { authUrl, userCode });
+          });
+          logger.info('Captured Codex CLI device auth details', { authUrl, userCode, userId });
           resolve({ authUrl, userCode, sessionId: String(Date.now()) });
         }
       };
@@ -1779,33 +1934,95 @@ export class CliAuthService {
       proc.stdout?.on('data', handleChunk);
       proc.stderr?.on('data', handleChunk);
 
-      proc.on('close', (code) => {
+      proc.on('close', async (code) => {
         clearTimeout(timeoutId);
         clearTimeout(sessionExpiryTimer);
-        const loginUserId = userId || this.activeCodexLogin?.userId;
-        const loginUserEmail = userEmail || this.activeCodexLogin?.userEmail;
-        if (this.activeCodexLogin?.process === proc) {
-          this.activeCodexLogin = null;
+        const loginUserId = userId;
+        const loginUserEmail = userEmail;
+        this.activeCodexLogins.delete(sessionKey);
+
+        const isolatedAuthCandidates = [
+          path.join(userCodexHome, 'auth.json'),
+          path.join(userCodexHome, '.codex', 'auth.json'),
+        ];
+        let foundAuthJson: string | null = null;
+        for (const candidate of isolatedAuthCandidates) {
+          if (fs.existsSync(candidate) && fs.statSync(candidate).size > 20) {
+            foundAuthJson = candidate;
+            break;
+          }
         }
-        const info = this.getCodexAuthInfo();
-        if (code === 0 || info.linked) {
-          logger.info('Codex CLI login process completed successfully');
-          this.cachedCodexStatus = { linked: true, email: info.email, timestamp: Date.now() };
-          if (loginUserId) {
-            this.linkUserCli(loginUserId, 'codex', info.email || loginUserEmail || 'ChatGPT Account');
+
+        const info = this.getCodexAuthInfo(loginUserId);
+        const isAuthSuccessful = Boolean(foundAuthJson && fs.existsSync(foundAuthJson) && fs.statSync(foundAuthJson).size > 20);
+
+        if (isAuthSuccessful) {
+          logger.info('Codex CLI login process completed successfully for user', { loginUserId });
+
+          let userDetectedEmail = loginUserEmail;
+          let authContent = '';
+
+          if (foundAuthJson) {
+            try {
+              authContent = fs.readFileSync(foundAuthJson, 'utf8');
+              const parsed = JSON.parse(authContent);
+              if (parsed.email) userDetectedEmail = parsed.email;
+              else if (parsed.tokens?.id_token) {
+                const parts = parsed.tokens.id_token.split('.');
+                if (parts.length > 1) {
+                  const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+                  if (payload.email) userDetectedEmail = payload.email;
+                }
+              }
+            } catch {}
+          }
+
+          const resolvedEmail = userDetectedEmail || info.email || 'ChatGPT Account';
+
+          if (loginUserId && loginUserId !== 'default' && loginUserId !== 'default_user') {
+            const userProfileCodexDir = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.codex');
+            try {
+              if (!fs.existsSync(userProfileCodexDir)) {
+                fs.mkdirSync(userProfileCodexDir, { recursive: true });
+              }
+              if (authContent) {
+                fs.writeFileSync(path.join(userProfileCodexDir, 'auth.json'), authContent, 'utf8');
+                const defaultCodexDir = path.join(os.homedir(), '.codex');
+                if (!fs.existsSync(defaultCodexDir)) fs.mkdirSync(defaultCodexDir, { recursive: true });
+                fs.writeFileSync(path.join(defaultCodexDir, 'auth.json'), authContent, 'utf8');
+              }
+            } catch (err) {
+              logger.warn('Failed to persist user profile codex credentials', { error: String(err) });
+            }
+
+            this.linkUserCli(loginUserId, 'codex', resolvedEmail);
             import('../sandbox/sandbox.service.js')
               .then(({ sandboxService }) => sandboxService.syncCredentialsToUserSandboxes(loginUserId).catch(() => {}))
               .catch(() => {});
           } else {
+            if (authContent) {
+              const defaultCodexDir = path.join(os.homedir(), '.codex');
+              try {
+                if (!fs.existsSync(defaultCodexDir)) fs.mkdirSync(defaultCodexDir, { recursive: true });
+                fs.writeFileSync(path.join(defaultCodexDir, 'auth.json'), authContent, 'utf8');
+              } catch {}
+            }
             const links = this.loadUserCliLinks();
             for (const uid of Object.keys(links)) {
-              this.linkUserCli(uid, 'codex', info.email || 'ChatGPT Account');
+              this.linkUserCli(uid, 'codex', resolvedEmail);
               import('../sandbox/sandbox.service.js')
                 .then(({ sandboxService }) => sandboxService.syncCredentialsToUserSandboxes(uid).catch(() => {}))
                 .catch(() => {});
             }
           }
+
+          try {
+            fs.rmSync(userCodexHome, { recursive: true, force: true });
+          } catch {}
         } else if (!resolved) {
+          try {
+            fs.rmSync(userCodexHome, { recursive: true, force: true });
+          } catch {}
           reject(new AppError(`Codex CLI login process exited with code ${code}: ${buf}`, 500, 'CLI_LOGIN_ERROR'));
         }
       });
@@ -1813,16 +2030,13 @@ export class CliAuthService {
       proc.on('error', (err: any) => {
         clearTimeout(timeoutId);
         clearTimeout(sessionExpiryTimer);
+        this.activeCodexLogins.delete(sessionKey);
+        try {
+          fs.rmSync(userCodexHome, { recursive: true, force: true });
+        } catch {}
+
         if (!resolved) {
-          if (err.code === 'ENOENT') {
-            logger.info('Codex CLI binary not found on host backend. Returning OpenAI auth link.');
-            resolved = true;
-            resolve({
-              authUrl: 'https://auth.openai.com/codex',
-              sessionId: String(Date.now()),
-            });
-            return;
-          }
+          logger.error('Failed to spawn Codex CLI for device auth', { error: err.message, codexBin });
           reject(new AppError(`Failed to spawn Codex CLI: ${err.message}`, 500, 'SPAWN_ERROR'));
         }
       });
@@ -1830,16 +2044,28 @@ export class CliAuthService {
   }
 
   public async unlinkCodex(userId?: string): Promise<boolean> {
-    if (this.activeCodexLogin) {
-      clearTimeout(this.activeCodexLogin.timeoutId);
+    const sessionKey = userId || 'global';
+    const active = this.activeCodexLogins.get(sessionKey);
+    if (active) {
+      clearTimeout(active.timeoutId);
       try {
-        this.activeCodexLogin.process.kill('SIGTERM');
+        active.process.kill('SIGTERM');
       } catch {}
-      this.activeCodexLogin = null;
+      this.activeCodexLogins.delete(sessionKey);
+      try {
+        fs.rmSync(active.userCodexHome, { recursive: true, force: true });
+      } catch {}
     }
 
     if (userId) {
       this.unlinkUserCli(userId, 'codex');
+      const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const userProfileCodex = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.codex');
+      try {
+        if (fs.existsSync(userProfileCodex)) {
+          fs.rmSync(userProfileCodex, { recursive: true, force: true });
+        }
+      } catch {}
     }
 
     try {

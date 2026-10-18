@@ -7,7 +7,7 @@ import type { ModelOption } from '../types';
 let inFlightModelsPromise: Promise<ModelOption[]> | null = null;
 let lastModels: ModelOption[] | null = null;
 let lastModelsFetchTime = 0;
-const MODELS_CACHE_TTL = 5000; // 5 seconds deduplication window
+const MODELS_CACHE_TTL = 4000;
 
 export function invalidateModelsCache(): void {
   lastModels = null;
@@ -20,11 +20,18 @@ export function invalidateModelsCache(): void {
  * In-flight promise sharing and short-term deduplication prevents burst duplicate calls.
  */
 export async function fetchAvailableModels(force = false, sessionId?: string, userId?: string): Promise<ModelOption[]> {
+  if (!userId) {
+    return [];
+  }
   const now = Date.now();
   if (!force && lastModels && now - lastModelsFetchTime < MODELS_CACHE_TTL) {
     return lastModels;
   }
-  if (!force && inFlightModelsPromise) {
+  // Deduplicate burst calls within 1.5s regardless of force flag
+  if (lastModels && now - lastModelsFetchTime < 1500) {
+    return lastModels;
+  }
+  if (inFlightModelsPromise) {
     return inFlightModelsPromise;
   }
 

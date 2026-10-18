@@ -18,15 +18,17 @@ You can view these diagrams in three convenient ways:
    This gives you tabbed navigation between diagrams, high-definition zoom/pan, and one-click SVG/PNG export buttons.
 
 2. **In Antigravity IDE / VS Code:**
-   - Open this file ([`backend/visualizations/README.md`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/backend/visualizations/README.md)) and press **`Ctrl+Shift+V`** (or click the **Markdown Preview** button in the top-right corner of the editor tab).
+   - Open this file ([`visualizations/README.md`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/visualizations/README.md)) and press **`Ctrl+Shift+V`** (or click the **Markdown Preview** button in the top-right corner of the editor tab).
    - Or click directly on the image files in the sidebar file tree:
-     - [`architecture-diagram.svg`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/backend/visualizations/architecture-diagram.svg) / [`architecture-diagram.png`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/backend/visualizations/architecture-diagram.png)
-     - [`user-flow-diagram.svg`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/backend/visualizations/user-flow-diagram.svg) / [`user-flow-diagram.png`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/backend/visualizations/user-flow-diagram.png)
+     - [`architecture-diagram.svg`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/visualizations/architecture-diagram.svg) / [`architecture-diagram.png`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/visualizations/architecture-diagram.png)
+     - [`user-flow-diagram.svg`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/visualizations/user-flow-diagram.svg) / [`user-flow-diagram.png`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/visualizations/user-flow-diagram.png)
+     - [`codex-auth-flow.svg`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/visualizations/codex-auth-flow.svg) / [`codex-auth-flow.png`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/visualizations/codex-auth-flow.png)
 
 3. **From the Terminal / Native Image Viewer:**
    ```bash
-   xdg-open backend/visualizations/architecture-diagram.png
-   xdg-open backend/visualizations/user-flow-diagram.png
+   xdg-open visualizations/architecture-diagram.png
+   xdg-open visualizations/user-flow-diagram.png
+   xdg-open visualizations/codex-auth-flow.png
    ```
 
 ---
@@ -68,16 +70,50 @@ Built with Mermaid's **`flowchart TD`** visual decision engine featuring native 
 
 ---
 
+## 3. Codex Multi-Tenant Device Auth Flow (`flowchart TD`)
+
+Built with Mermaid's **`flowchart TD`** documenting the zero-race-condition headless device auth handshake:
+- **Client Browser & Auth Popup**:
+  - User initiates "Link Codex" (`fa:fa-user`).
+  - Browser opens popup `/api/v1/auth/cli/codex/login` with 7-day JWT token (`fa:fa-window-maximize`, `fa:fa-id-card`).
+  - Dark-mode helper page auto-displays one-time user code (`fa:fa-copy`) and auto-opens OpenAI device page (`fa:fa-external-link-alt`).
+  - User pastes code into OpenAI and grants ChatGPT authorization (`fa:fa-paste`, `fa:fa-check-circle`).
+  - Browser polls completion and closes popup upon linkage (`fa:fa-check-double`).
+- **Fastify Backend Orchestrator (Multi-Tenant Isolation)**:
+  - Validates JWT and extracts user identity (`fa:fa-shield-halved`, `fa:fa-users`).
+  - Allocates dedicated session in `activeCodexLogins` Map keyed by `userId` to eliminate multi-user race conditions (`fa:fa-network-wired`).
+  - Provisions per-user isolated directory `~/.agent-codex-auth/{userId}` (`fa:fa-folder-plus`).
+  - Executes headless `@openai/codex login --device-auth` with `CODEX_HOME` and `HOME` isolated to that user directory (`fa:fa-terminal`).
+  - Intercepts stdout to extract verification URL and code for the popup (`fa:fa-filter`).
+  - Awaits process completion (`fa:fa-clock-rotate-left`), extracts authenticated email from `auth.json` (`fa:fa-file-shield`, `fa:fa-id-badge`).
+  - Persists token to multi-tenant profile storage: `~/.agent-user-profiles/{userId}/.codex/auth.json` (`fa:fa-database`).
+  - Updates Firestore linkage state: `codex.linked = true` (`fa:fa-cloud-upload-alt`).
+  - Securely purges temporary auth directory: `rm -rf ~/.agent-codex-auth/{userId}` (`fa:fa-broom`).
+  - Dispatches `syncCredentialsToUserSandboxes` (`fa:fa-arrows-rotate`).
+- **E2B MicroVM Sandbox Boundary**:
+  - Hot-swaps credentials into running user microVMs at `/home/agent-runner/.codex/auth.json` (`fa:fa-bolt`).
+  - Pre-warms future microVMs from persistent user profile on boot (`fa:fa-snowflake`).
+  - Strictly enforces Linux DAC permissions: `chown -R agent-runner:agent-runner` and `chmod 700` (`fa:fa-lock`).
+  - Enables prompt execution strictly within the cloud MicroVM (`fa:fa-play`).
+
+![Codex Auth Flow Diagram](codex-auth-flow.png)
+
+---
+
 ## 🛠️ Regenerating Visualizations
 
-Both diagrams can be regenerated at any time using the pre-configured `mmdc` CLI tool:
+All diagrams can be regenerated at any time using the pre-configured `mmdc` CLI tool:
 
 ```bash
 # Architecture Diagram (SVG & High-Res PNG)
-mmdc -p ~/.mermaid-puppeteer.json -i backend/visualizations/architecture-diagram.mmd -o backend/visualizations/architecture-diagram.svg -b "#0b0f19"
-mmdc -p ~/.mermaid-puppeteer.json -i backend/visualizations/architecture-diagram.mmd -o backend/visualizations/architecture-diagram.png -b "#0b0f19" -s 2
+mmdc -p ~/.mermaid-puppeteer.json -i visualizations/architecture-diagram.mmd -o visualizations/architecture-diagram.svg -b "#0b0f19"
+mmdc -p ~/.mermaid-puppeteer.json -i visualizations/architecture-diagram.mmd -o visualizations/architecture-diagram.png -b "#0b0f19" -s 2
 
 # User Flow Diagram (SVG & High-Res PNG)
-mmdc -p ~/.mermaid-puppeteer.json -i backend/visualizations/user-flow-diagram.mmd -o backend/visualizations/user-flow-diagram.svg -b "#0b0f19"
-mmdc -p ~/.mermaid-puppeteer.json -i backend/visualizations/user-flow-diagram.mmd -o backend/visualizations/user-flow-diagram.png -b "#0b0f19" -s 2
+mmdc -p ~/.mermaid-puppeteer.json -i visualizations/user-flow-diagram.mmd -o visualizations/user-flow-diagram.svg -b "#0b0f19"
+mmdc -p ~/.mermaid-puppeteer.json -i visualizations/user-flow-diagram.mmd -o visualizations/user-flow-diagram.png -b "#0b0f19" -s 2
+
+# Codex Auth Flow Diagram (SVG & High-Res PNG)
+mmdc -p ~/.mermaid-puppeteer.json -i visualizations/codex-auth-flow.mmd -o visualizations/codex-auth-flow.svg -b "#0b0f19"
+mmdc -p ~/.mermaid-puppeteer.json -i visualizations/codex-auth-flow.mmd -o visualizations/codex-auth-flow.png -b "#0b0f19" -s 2
 ```

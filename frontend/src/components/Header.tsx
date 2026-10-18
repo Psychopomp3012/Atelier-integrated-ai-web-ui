@@ -1,10 +1,20 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import { UserMenu } from './UserMenu';
 import { DeleteSandboxModal, type SandboxPendingDelete } from './DeleteSandboxModal';
 import type { UserProfile, TokenUsageState, ModelOption, ModelType } from '../types';
-import { formatTokenMetric } from '../utils/token.util';
 import { apiFetch } from '../utils/api.util';
+import {
+  currentUserAtom,
+  isAuthModalOpenAtom,
+  isDarkModeAtom,
+  isInspectorOpenAtom,
+  sandboxUsageAtom,
+  selectedModelAtom,
+  currentSessionIdAtom,
+  toastMessageAtom,
+} from '../state';
 
 interface SandboxUsageData {
   used: number;
@@ -35,8 +45,8 @@ interface HeaderProps {
   onToggleSidebar?: () => void;
   onToggleInspector?: () => void;
   isInspectorOpen?: boolean;
-  user: UserProfile | null;
-  onOpenAuthModal: () => void;
+  user?: UserProfile | null;
+  onOpenAuthModal?: () => void;
   onLogout: () => void;
   isDarkMode?: boolean;
   onToggleTheme?: () => void;
@@ -54,19 +64,19 @@ export const Header: React.FC<HeaderProps> = ({
   sandboxName: _sandboxName,
   tokenUsage,
   modelName = 'Gemini 2.5 Pro',
-  selectedModel,
+  selectedModel: propSelectedModel,
   selectedModelOption,
   isModelLinked = true,
   activeProvider: propsActiveProvider,
   onToggleSidebar,
-  onToggleInspector,
-  isInspectorOpen = false,
-  user,
-  onOpenAuthModal,
+  onToggleInspector: propOnToggleInspector,
+  isInspectorOpen: propIsInspectorOpen,
+  user: propUser,
+  onOpenAuthModal: propOnOpenAuthModal,
   onLogout,
-  isDarkMode = true,
-  onToggleTheme,
-  currentSessionId,
+  isDarkMode: propIsDarkMode,
+  onToggleTheme: propOnToggleTheme,
+  currentSessionId: propCurrentSessionId,
   onSandboxChanged,
   sandboxUsage: propSandboxUsage,
   activeSandbox: propActiveSandbox,
@@ -74,8 +84,25 @@ export const Header: React.FC<HeaderProps> = ({
   onRefreshQuota,
   validSessionIds,
 }) => {
+  const [atomDarkMode, setAtomDarkMode] = useAtom(isDarkModeAtom);
+  const [atomInspectorOpen, setAtomInspectorOpen] = useAtom(isInspectorOpenAtom);
+  const atomUser = useAtomValue(currentUserAtom);
+  const atomSandboxUsage = useAtomValue(sandboxUsageAtom);
+  const atomSelectedModel = useAtomValue(selectedModelAtom);
+  const atomCurrentSessionId = useAtomValue(currentSessionIdAtom);
+  const setIsAuthModalOpen = useSetAtom(isAuthModalOpenAtom);
+  const setToastMessage = useSetAtom(toastMessageAtom);
+
+  const user = propUser !== undefined ? propUser : atomUser;
+  const isDarkMode = propIsDarkMode !== undefined ? propIsDarkMode : atomDarkMode;
+  const isInspectorOpen = propIsInspectorOpen !== undefined ? propIsInspectorOpen : atomInspectorOpen;
+  const selectedModel = propSelectedModel ?? atomSelectedModel;
+  const currentSessionId = propCurrentSessionId !== undefined ? propCurrentSessionId : atomCurrentSessionId;
+  const onToggleTheme = propOnToggleTheme ?? (() => setAtomDarkMode((prev) => !prev));
+  const onToggleInspector = propOnToggleInspector ?? (() => setAtomInspectorOpen((prev) => !prev));
+  const onOpenAuthModal = propOnOpenAuthModal ?? (() => setIsAuthModalOpen(true));
+
   const [showLimitsPopover, setShowLimitsPopover] = useState(false);
-  const [telemetryTab, setTelemetryTab] = useState<'quota' | 'session'>('quota');
   const popoverRef = useRef<HTMLDivElement>(null);
 
   const [showSandboxDropdown, setShowSandboxDropdown] = useState(false);
@@ -89,7 +116,7 @@ export const Header: React.FC<HeaderProps> = ({
   const mobileSandboxModalRef = useRef<HTMLDivElement>(null);
 
   const validSessionSet = useMemo(() => new Set(validSessionIds || []), [validSessionIds]);
-  const sandboxUsage = propSandboxUsage !== undefined ? propSandboxUsage : internalSandboxUsage;
+  const sandboxUsage = propSandboxUsage !== undefined ? propSandboxUsage : (atomSandboxUsage || internalSandboxUsage);
 
   const fetchSandboxUsage = async () => {
     if (onRefreshSandboxUsage) {
@@ -198,8 +225,8 @@ export const Header: React.FC<HeaderProps> = ({
     if (isCreatingSandbox) return;
 
     if (sandboxUsage && sandboxUsage.used >= sandboxUsage.max) {
-      alert(
-        `Sandbox quota limit reached (${sandboxUsage.used}/${sandboxUsage.max} full).\n\nPlease delete one of your existing sandboxes using the trash icon to free a quota slot before creating a new one.`
+      setToastMessage(
+        `Sandbox quota limit reached (${sandboxUsage.used}/${sandboxUsage.max} full). Delete an existing sandbox first.`
       );
       return;
     }
@@ -221,14 +248,15 @@ export const Header: React.FC<HeaderProps> = ({
         fetchSandboxUsage();
         onSandboxChanged?.(data.data.sandboxId);
         setShowSandboxDropdown(false);
+        setToastMessage('Cloud Sandbox VM created and ready');
       } else {
         setIsCreatingSandbox(false);
-        alert(data.error?.message || 'Failed to create new sandbox VM');
+        setToastMessage(data.error?.message || 'Failed to create new sandbox VM');
       }
-    } catch (err) {
+    } catch (err: unknown) {
       setIsCreatingSandbox(false);
       console.error('Failed to create new sandbox', err);
-      alert('Failed to connect to backend to create sandbox');
+      setToastMessage('Failed to create sandbox VM');
     } finally {
       setIsCreatingSandbox(false);
     }
@@ -312,14 +340,6 @@ export const Header: React.FC<HeaderProps> = ({
     <img src="/provider-icons/antigravity.svg" alt="Antigravity" className="w-3.5 h-3.5 object-contain shrink-0" />
   );
 
-  const used = tokenUsage ? tokenUsage.totalTokens : 0;
-  const promptTokens = tokenUsage ? tokenUsage.promptTokens : 0;
-  const completionTokens = tokenUsage ? tokenUsage.completionTokens : 0;
-  const thinkingTokens = tokenUsage ? tokenUsage.thinkingTokens : 0;
-  const cacheReadTokens = tokenUsage ? tokenUsage.cacheReadTokens : 0;
-  const totalTurns = tokenUsage ? tokenUsage.totalTurns : 0;
-  const lastLatencyMs = tokenUsage ? tokenUsage.lastLatencyMs : 0;
-  const avgLatencyMs = tokenUsage ? tokenUsage.avgLatencyMs : 0;
   const linkedEmail = isCodex
     ? (tokenUsage?.codexQuota?.userEmail || tokenUsage?.userEmail || user?.email)
     : (tokenUsage?.userEmail || user?.email);
@@ -425,8 +445,8 @@ export const Header: React.FC<HeaderProps> = ({
       return `${Math.round(singleFraction * 100)}% Quota`;
     }
 
-    return used > 0 ? `${formatTokenMetric(used)} tokens` : 'Active';
-  }, [isAntigravity, fraction5h, fractionWeekly, relevantGroup, used]);
+    return 'Active';
+  }, [isAntigravity, fraction5h, fractionWeekly, relevantGroup]);
 
   const formatResetCountdown = (isoDate?: string, remainingFraction?: number): string => {
     if (remainingFraction !== undefined && remainingFraction >= 1.0) {
@@ -1011,17 +1031,17 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Real CLI Telemetry Chip */}
-        <div className="relative" ref={popoverRef}>
+        <div className="relative shrink-0" ref={popoverRef}>
           {isNoneSelected ? (
             <button
               type="button"
               onClick={() => setShowLimitsPopover(!showLimitsPopover)}
-              className="hidden sm:flex items-center gap-1.5 px-space-sm py-1 rounded border border-dashed border-outline-variant/40 bg-surface-container-low text-outline hover:text-on-surface hover:border-outline-variant/80 font-code-sm text-code-sm transition-all cursor-pointer"
+              className="hidden sm:flex items-center gap-1.5 px-space-sm py-1 rounded border border-dashed border-outline-variant/40 bg-surface-container-low text-outline hover:text-on-surface hover:border-outline-variant/80 font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0"
               title="No model selected. Click to view status or select a model below to activate live quota telemetry."
             >
               <span className="material-symbols-outlined text-[14px] text-outline shrink-0">speed</span>
-              <span className="text-[11px] font-mono text-outline">Telemetry: Standby</span>
-              <span className="material-symbols-outlined text-[13px] text-outline">
+              <span className="text-[11px] font-mono text-outline whitespace-nowrap">Telemetry: Standby</span>
+              <span className="material-symbols-outlined text-[13px] text-outline shrink-0">
                 {showLimitsPopover ? 'expand_less' : 'expand_more'}
               </span>
             </button>
@@ -1029,7 +1049,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => setShowLimitsPopover(!showLimitsPopover)}
-              className={`hidden sm:flex items-center gap-1.5 px-space-sm py-1 rounded border font-code-sm text-code-sm transition-all cursor-pointer ${
+              className={`hidden sm:flex items-center gap-1.5 px-space-sm py-1 rounded border font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 !isModelLinked
                   ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/15'
                   : isAnyLimitExhausted
@@ -1050,20 +1070,20 @@ export const Header: React.FC<HeaderProps> = ({
             >
               {!isModelLinked ? (
                 <>
-                  <span className="material-symbols-outlined text-[14px] text-amber-400">
+                  <span className="material-symbols-outlined text-[14px] text-amber-400 shrink-0">
                     lock
                   </span>
-                  <span className="text-amber-400 font-medium">
+                  <span className="text-amber-400 font-medium whitespace-nowrap">
                     {`${providerLabel} Not Linked`}
                   </span>
                 </>
               ) : (
                 <>
                   {providerIcon}
-                  <span>{`${providerLabel}: ${quotaBadgeText}`}</span>
+                  <span className="whitespace-nowrap">{`${providerLabel}: ${quotaBadgeText}`}</span>
                 </>
               )}
-              <span className="material-symbols-outlined text-[13px] text-outline">
+              <span className="material-symbols-outlined text-[13px] text-outline shrink-0">
                 {showLimitsPopover ? 'expand_less' : 'expand_more'}
               </span>
             </button>
@@ -1101,30 +1121,9 @@ export const Header: React.FC<HeaderProps> = ({
                     STANDBY
                   </span>
                 ) : isModelLinked ? (
-                  <div className="flex items-center gap-1 bg-surface-container-low p-0.5 rounded-lg border border-outline-variant/20">
-                    <button
-                      type="button"
-                      onClick={() => setTelemetryTab('quota')}
-                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
-                        telemetryTab === 'quota'
-                          ? 'bg-primary text-on-primary shadow-xs'
-                          : 'text-outline hover:text-on-surface'
-                      }`}
-                    >
-                      Models & Quota
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTelemetryTab('session')}
-                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
-                        telemetryTab === 'session'
-                          ? 'bg-primary text-on-primary shadow-xs'
-                          : 'text-outline hover:text-on-surface'
-                      }`}
-                    >
-                      Session Tokens
-                    </button>
-                  </div>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    CONNECTED
+                  </span>
                 ) : null}
               </div>
 
@@ -1202,9 +1201,7 @@ export const Header: React.FC<HeaderProps> = ({
                     <span>{isCodex ? 'Link Codex CLI' : isClaude ? 'Link Claude CLI' : 'Link Google Account'}</span>
                   </button>
                 </div>
-              ) : telemetryTab === 'quota' ? (
-                /* Tab 1: Authentic Models & Quota Visual */
-                !activeSandbox ? (
+              ) : !activeSandbox ? (
                   <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 text-center space-y-3">
                     <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center mx-auto border border-primary/20">
                       <span className="material-symbols-outlined text-[20px]">dns</span>
@@ -1283,6 +1280,35 @@ export const Header: React.FC<HeaderProps> = ({
                   </div>
                 ) : (
                 <div className="space-y-4">
+                  {/* Account & Active Model Bar */}
+                  <div className="p-2.5 rounded-xl bg-surface-container-low border border-outline-variant/20 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-medium text-on-surface truncate">
+                          {linkedEmail || 'Linked Account'}
+                        </div>
+                        <div className="text-[10px] text-on-surface-variant truncate flex items-center gap-1 mt-0.5">
+                          <span>Active Model:</span>
+                          {modelName.toLowerCase().includes('none') ? (
+                            <span className="material-symbols-outlined text-[13px] text-outline">tune</span>
+                          ) : modelName.toLowerCase().includes('claude') ? (
+                            <img src="/provider-icons/claude.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
+                          ) : modelName.toLowerCase().includes('gpt') || modelName.toLowerCase().includes('codex') || modelName.toLowerCase().startsWith('o') ? (
+                            <img src="/model-icons/openai.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
+                          ) : modelName.toLowerCase().includes('gemini') ? (
+                            <img src="/model-icons/google-gemini.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
+                          ) : (
+                            <img src="/provider-icons/antigravity.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
+                          )}
+                          <span className="text-primary font-mono font-medium">{modelName}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-medium text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20 shrink-0">
+                      Connected
+                    </span>
+                  </div>
                   {/* Quota Groups */}
                   {isCodex ? (
                     <div className="space-y-3">
@@ -1433,18 +1459,6 @@ export const Header: React.FC<HeaderProps> = ({
                       <p className="text-[11px] text-outline">
                         Antigravity CLI is evaluating capacity for your linked Google account.
                       </p>
-                      {onRefreshQuota && (
-                        <div className="pt-1">
-                          <button
-                            type="button"
-                            onClick={() => onRefreshQuota()}
-                            className="px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest border border-outline-variant/30 text-on-surface text-[11px] font-medium transition-colors cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
-                          >
-                            <span className="material-symbols-outlined text-[14px]">refresh</span>
-                            <span>Retry Live Refresh</span>
-                          </button>
-                        </div>
-                      )}
                     </div>
                   )}
 
@@ -1454,107 +1468,6 @@ export const Header: React.FC<HeaderProps> = ({
                       {quotaLimits.description}
                     </p>
                   )}
-                </div>
-              )
-              ) : (
-                /* Tab 2: Session Token Telemetry */
-                <div className="space-y-3">
-                  {/* Account & Active Model Bar */}
-                  <div className="p-2.5 rounded-xl bg-surface-container-low border border-outline-variant/20 flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-[11px] font-medium text-on-surface truncate">
-                          {linkedEmail || 'Linked Account'}
-                        </div>
-                        <div className="text-[10px] text-on-surface-variant truncate flex items-center gap-1 mt-0.5">
-                          <span>Active Model:</span>
-                          {modelName.toLowerCase().includes('none') ? (
-                            <span className="material-symbols-outlined text-[13px] text-outline">tune</span>
-                          ) : modelName.toLowerCase().includes('claude') ? (
-                            <img src="/provider-icons/claude.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
-                          ) : modelName.toLowerCase().includes('gpt') || modelName.toLowerCase().includes('codex') || modelName.toLowerCase().startsWith('o') ? (
-                            <img src="/model-icons/openai.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
-                          ) : modelName.toLowerCase().includes('gemini') ? (
-                            <img src="/model-icons/google-gemini.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
-                          ) : (
-                            <img src="/provider-icons/antigravity.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
-                          )}
-                          <span className="text-primary font-mono font-medium">{modelName}</span>
-                        </div>
-                      </div>
-                    </div>
-                    <span className="text-[10px] font-medium text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20 shrink-0">
-                      Connected
-                    </span>
-                  </div>
-
-                  {/* Authentic Token Telemetry Grid */}
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="p-2 rounded-lg bg-surface-container-low border border-outline-variant/15">
-                      <span className="text-outline block text-[9px] uppercase font-semibold">Total Consumed</span>
-                      <span className="font-mono font-semibold text-primary text-[13px]">
-                        {used.toLocaleString()}
-                      </span>
-                      <span className="text-outline text-[10px] block">tokens</span>
-                    </div>
-
-                    <div className="p-2 rounded-lg bg-surface-container-low border border-outline-variant/15">
-                      <span className="text-outline block text-[9px] uppercase font-semibold">CLI Turns</span>
-                      <span className="font-mono font-semibold text-on-surface text-[13px]">
-                        {totalTurns}
-                      </span>
-                      <span className="text-outline text-[10px] block">invocations</span>
-                    </div>
-
-                    <div className="p-2 rounded-lg bg-surface-container-low border border-outline-variant/15">
-                      <span className="text-outline block text-[9px] uppercase font-semibold">Prompt In</span>
-                      <span className="font-mono font-medium text-on-surface text-[12px]">
-                        {promptTokens.toLocaleString()}
-                      </span>
-                      <span className="text-outline text-[10px] block">tokens</span>
-                    </div>
-
-                    <div className="p-2 rounded-lg bg-surface-container-low border border-outline-variant/15">
-                      <span className="text-outline block text-[9px] uppercase font-semibold">Resp Out</span>
-                      <span className="font-mono font-medium text-on-surface text-[12px]">
-                        {completionTokens.toLocaleString()}
-                      </span>
-                      <span className="text-outline text-[10px] block">tokens</span>
-                    </div>
-
-                    <div className="p-2 rounded-lg bg-surface-container-low border border-outline-variant/15">
-                      <span className="text-outline block text-[9px] uppercase font-semibold">Thinking</span>
-                      <span className="font-mono font-medium text-on-surface text-[12px]">
-                        {thinkingTokens.toLocaleString()}
-                      </span>
-                      <span className="text-outline text-[10px] block">reasoning tokens</span>
-                    </div>
-
-                    <div className="p-2 rounded-lg bg-surface-container-low border border-outline-variant/15">
-                      <span className="text-outline block text-[9px] uppercase font-semibold">Cache Read</span>
-                      <span className="font-mono font-medium text-on-surface text-[12px]">
-                        {cacheReadTokens.toLocaleString()}
-                      </span>
-                      <span className="text-outline text-[10px] block">cached tokens</span>
-                    </div>
-                  </div>
-
-                  {/* Execution Latency Telemetry */}
-                  <div className="p-2 rounded-lg bg-surface-container-low border border-outline-variant/15 flex items-center justify-between text-xs">
-                    <span className="text-on-surface-variant text-[11px]">Last Turn Latency</span>
-                    <span className="font-mono text-on-surface text-[11px] font-medium">
-                      {lastLatencyMs > 0 ? `${lastLatencyMs}ms` : '—'}
-                      {avgLatencyMs > 0 && ` (avg ${avgLatencyMs}ms)`}
-                    </span>
-                  </div>
-
-                  {/* Telemetry Authenticity Note */}
-                  <p className="text-[10px] text-outline leading-tight pt-1 border-t border-outline-variant/15">
-                    {isCodex
-                      ? 'Metrics acquired directly from local OpenAI Codex CLI process execution telemetry. No external quotas or rate limits are simulated.'
-                      : 'Metrics acquired directly from local Antigravity CLI process execution telemetry. No external quotas or rate limits are simulated.'}
-                  </p>
                 </div>
               )}
             </div>

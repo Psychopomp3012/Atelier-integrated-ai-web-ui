@@ -1,4 +1,27 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useAtom } from 'jotai';
+import {
+  currentUserAtom,
+  isAuthModalOpenAtom,
+  cliStatusAtom,
+  selectedModelAtom,
+  availableModelsAtom,
+  geminiQuotaAtom,
+  codexQuotaAtom,
+  rateLimitAtom,
+  currentSessionIdAtom,
+  sessionsAtom,
+  messagesAtom,
+  isGeneratingAtom,
+  selectedSandboxIdAtom,
+  sandboxUsageAtom,
+  isDarkModeAtom,
+  isInspectorOpenAtom,
+  toastMessageAtom,
+  isPageLoadingAtom,
+  loadingMessageAtom,
+  loadingSubMessageAtom,
+} from './state';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { Ribbon } from './components/Ribbon';
@@ -13,8 +36,8 @@ import { firestoreService } from './services/firestore.service';
 import { sessionSyncService } from './services/sessionSync.service';
 import { fetchCliStatus, refreshAuthToken, closeGeminiCliLoginPopup, type CliStatus } from './services/cliAuth.service';
 import { apiFetch } from './utils/api.util';
-import type { ModelType, ChatMessage, UserProfile, AIPlatform, ChatSession, RateLimitState, GeminiQuotaStats, CodexQuotaStats, StepItem, ModelOption } from './types';
-import { AVAILABLE_MODELS, NONE_MODEL, getModelDisplayInfo, getMinimumEffortModelId } from './types';
+import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSession, StepItem, ModelOption } from './types';
+import { NONE_MODEL, getModelDisplayInfo, getMinimumEffortModelId } from './types';
 import { fetchAvailableModels } from './services/models.service';
 import { computeSessionTokens } from './utils/token.util';
 
@@ -64,38 +87,35 @@ function getAttachmentIcon(fileName: string): { icon: string; colorClass: string
   return { icon: 'description', colorClass: 'text-blue-400' };
 }
 
+function normalizeUser(user: UserProfile | null): UserProfile | null {
+  if (!user) return null;
+  let linkedPlatforms: LinkedAIPlatformAccount[] = [];
+  if (Array.isArray(user.linkedPlatforms)) {
+    linkedPlatforms = user.linkedPlatforms;
+  } else if (user.linkedPlatforms && typeof user.linkedPlatforms === 'object') {
+    linkedPlatforms = Object.values(user.linkedPlatforms).filter(
+      (p): p is LinkedAIPlatformAccount => Boolean(p && typeof p === 'object' && 'platform' in p)
+    );
+  }
+  return {
+    ...user,
+    linkedPlatforms,
+  };
+}
+
 export const App: React.FC = () => {
-  // Session history state - strictly initialized to empty until authenticated user is resolved
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  // Session history state managed via Jotai
+  const [sessions, setSessions] = useAtom(sessionsAtom);
+  const [currentSessionId, setCurrentSessionId] = useAtom(currentSessionIdAtom);
 
-  // Provider - Model - Effort preference state: initialized from localStorage preference, or 'none'
-  const [selectedModel, setSelectedModel] = useState<ModelType>(() => {
-    try {
-      const saved = localStorage.getItem('model_preference');
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (parsed && typeof parsed === 'object' && parsed.modelId) {
-            return parsed.modelId as ModelType;
-          }
-        } catch {
-          return saved as ModelType;
-        }
-      }
-      const direct = localStorage.getItem('selected_model_preference');
-      if (direct) return direct as ModelType;
-    } catch {}
-    return 'none';
-  });
+  // Provider - Model - Effort preference state managed via Jotai
+  const [selectedModel, setSelectedModel] = useAtom(selectedModelAtom);
+  const [availableModels, setAvailableModels] = useAtom(availableModelsAtom);
+  const [messages, setMessages] = useAtom(messagesAtom);
 
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>(AVAILABLE_MODELS);
-
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-
-  // AI Platform Auth State
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  // AI Platform Auth State managed via Jotai
+  const [currentUser, setCurrentUser] = useAtom(currentUserAtom);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useAtom(isAuthModalOpenAtom);
   const [isSyncingSessions, setIsSyncingSessions] = useState(false);
 
   // Persist current session ID to localStorage whenever it changes, strictly scoped per user
@@ -110,94 +130,83 @@ export const App: React.FC = () => {
       }
     } catch {}
   }, [currentUser?.id, currentSessionId]);
-  const [isLoading, setIsLoading] = useState(false);
+
+  const [isLoading, setIsLoading] = useAtom(isGeneratingAtom);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useAtom(toastMessageAtom);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const initialLoadCompletedRef = useRef<boolean>(false);
 
   // User Message Action States (Copy & Inline Edit)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editMessageContent, setEditMessageContent] = useState<string>('');
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
-  // Mobile drawer & inspector states (starts open on desktop >= 1280px)
+  // Mobile drawer & inspector states
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isInspectorOpen, setIsInspectorOpen] = useState(() => {
-    try {
-      return typeof window !== 'undefined' && window.innerWidth >= 1280;
-    } catch {
-      return false;
-    }
-  });
+  const [isInspectorOpen, setIsInspectorOpen] = useAtom(isInspectorOpenAtom);
 
   // Full-page initialization and post-sign-in loading screen
-  const [isPageLoading, setIsPageLoading] = useState<boolean>(true);
-  const [loadingMessage, setLoadingMessage] = useState('Initializing Atelier Workspace');
-  const [loadingSubMessage, setLoadingSubMessage] = useState('Verifying secure session & environment...');
+  const [isPageLoading, setIsPageLoading] = useAtom(isPageLoadingAtom);
+  const [loadingMessage, setLoadingMessage] = useAtom(loadingMessageAtom);
+  const [loadingSubMessage, setLoadingSubMessage] = useAtom(loadingSubMessageAtom);
 
   // Paginated chat history state
   const [hasMoreEarlierMessages, setHasMoreEarlierMessages] = useState<boolean>(false);
   const [remainingMessageCount, setRemainingMessageCount] = useState<number>(0);
   const [isLoadingEarlierMessages, setIsLoadingEarlierMessages] = useState<boolean>(false);
 
-  // Rate Limiting & Quota State
-  const [rateLimit, setRateLimit] = useState<RateLimitState>({
-    limit: 1000,
-    remaining: 1000,
-    resetInSeconds: 0,
-  });
+  // Rate Limiting & Quota State managed via Jotai
+  const [rateLimit, setRateLimit] = useAtom(rateLimitAtom);
+  const [geminiQuota, setGeminiQuota] = useAtom(geminiQuotaAtom);
+  const [codexQuota, setCodexQuota] = useAtom(codexQuotaAtom);
+  const [cliStatus, setCliStatus] = useAtom(cliStatusAtom);
+  const cliStatusFetchedRef = useRef<boolean>(false);
 
-  // Real-time Gemini CLI Daily Quota & Session Stats
-  const [geminiQuota, setGeminiQuota] = useState<GeminiQuotaStats | null>(null);
-  // Real-time Codex CLI Daily Quota & Session Stats
-  const [codexQuota, setCodexQuota] = useState<CodexQuotaStats | null>(null);
-
-  // CLI Linkage Status for active model detection
-  const [cliStatus, setCliStatus] = useState<CliStatus>({
-    gemini: { linked: false },
-    claude: { linked: false },
-    codex: { linked: false },
-  });
-
-  const refreshCliStatus = (force = false) => {
-    fetchCliStatus(force).then((status) => {
+  const refreshCliStatus = useCallback((force = false) => {
+    if (!currentUserRef.current?.id) return Promise.resolve(null);
+    return fetchCliStatus(force).then((status) => {
       setCliStatus(status);
-      fetchGeminiQuota(currentSessionId || undefined, force);
-      fetchCodexQuota(currentSessionId || undefined, force);
-    }).catch(() => {});
-  };
+      cliStatusFetchedRef.current = true;
+      try {
+        if (currentUserRef.current?.id) {
+          localStorage.setItem(`harness_cli_status_${currentUserRef.current.id}`, JSON.stringify(status));
+        }
+      } catch {}
+      fetchGeminiQuota(currentSessionId || undefined, force, currentUserRef.current?.email);
+      fetchCodexQuota(currentSessionId || undefined, force, currentUserRef.current?.email);
+      return status;
+    }).catch(() => null);
+  }, [currentSessionId]);
 
   useEffect(() => {
-    refreshCliStatus();
-  }, [currentUser?.id]);
+    if (!currentUser?.id) {
+      if (!localStorage.getItem('auth_token')) {
+        setCliStatus({
+          antigravity: { linked: false },
+          gemini: { linked: false },
+          claude: { linked: false },
+          codex: { linked: false },
+        });
+      }
+      return;
+    }
+    // Instant 0ms cache hydration from localStorage if available
+    try {
+      const cached = localStorage.getItem(`harness_cli_status_${currentUser.id}`);
+      if (cached && !cliStatusFetchedRef.current) {
+        setCliStatus(JSON.parse(cached));
+      }
+    } catch {}
 
-  // Cloud Sandbox State & Explicit VM Provisioning
-  const [sandboxUsage, setSandboxUsage] = useState<{
-    used: number;
-    max: number;
-    sandboxes: Array<{
-      sandboxId: string;
-      name: string;
-      sessionId?: string;
-      lastActiveAt: number;
-      createdAt: number;
-      attachedSessionCount: number;
-      attachedSessionIds: string[];
-      lastUpdateCheckAt?: number;
-      isUpdating?: boolean;
-    }>;
-  } | null>(null);
+    refreshCliStatus(true);
+  }, [currentUser?.id, refreshCliStatus]);
+
+  // Cloud Sandbox State & Explicit VM Provisioning managed via Jotai
+  const [sandboxUsage, setSandboxUsage] = useAtom(sandboxUsageAtom);
   const [isStartingSandbox, setIsStartingSandbox] = useState(false);
   const [isAttachingSandbox, setIsAttachingSandbox] = useState<string | null>(null);
-  const [selectedSandboxId, setSelectedSandboxId] = useState<string | null>(() => {
-    try {
-      const token = localStorage.getItem('auth_token');
-      if (!token) return null;
-      return localStorage.getItem('harness_selected_sandbox_id') || null;
-    } catch {
-      return null;
-    }
-  });
+  const [selectedSandboxId, setSelectedSandboxId] = useAtom(selectedSandboxIdAtom);
 
   useEffect(() => {
     try {
@@ -399,12 +408,20 @@ export const App: React.FC = () => {
     if (selectedModel.startsWith('gemini-') || selectedModel.startsWith('antigravity-')) {
       return isAgyLinked;
     }
+    const linkedPlatforms = Array.isArray(currentUser?.linkedPlatforms)
+      ? currentUser.linkedPlatforms
+      : (currentUser?.linkedPlatforms && typeof currentUser.linkedPlatforms === 'object')
+      ? Object.values(currentUser.linkedPlatforms).filter(
+          (p): p is LinkedAIPlatformAccount => Boolean(p && typeof p === 'object' && 'platform' in p)
+        )
+      : [];
+
     if (selectedModel.startsWith('claude-')) {
       const isCliSubscription = Boolean(
         cliStatus?.claude?.linked && cliStatus?.claude?.authMethod !== 'api_key'
       );
       const isAccountSubscription = Boolean(
-        currentUser?.linkedPlatforms?.some(
+        linkedPlatforms.some(
           (p) => p.platform === 'claude_subscription' && p.hasValidSession
         )
       );
@@ -418,7 +435,7 @@ export const App: React.FC = () => {
     ) {
       return Boolean(
         cliStatus?.codex?.linked ||
-        currentUser?.linkedPlatforms?.some(
+        linkedPlatforms.some(
           (p) => (p.platform === 'codex_subscription' || p.platform === 'openai') && p.hasValidSession
         )
       );
@@ -436,7 +453,11 @@ export const App: React.FC = () => {
   }, [cliStatus]);
 
   const refreshModels = useCallback((force = true) => {
-    fetchAvailableModels(force, currentSessionId || undefined, currentUser?.id)
+    if (!currentUserRef.current?.id) {
+      setAvailableModels([]);
+      return;
+    }
+    fetchAvailableModels(force, currentSessionId || undefined, currentUserRef.current.id)
       .then((models) => {
         if (models && models.length > 0) {
           setAvailableModels(models);
@@ -482,11 +503,19 @@ export const App: React.FC = () => {
         }
       })
       .catch(() => {});
-  }, [currentSessionId, currentUser?.id, selectedModel]);
+  }, [currentSessionId, selectedModel]);
 
   useEffect(() => {
-    refreshModels(false);
-  }, [refreshModels]);
+    if (!currentUser?.id) {
+      setAvailableModels([]);
+      return;
+    }
+    // During initial workspace load, waitForWorkspaceAndProvidersReady performs
+    // the single unified fetch for models, status, quotas, and sandboxes.
+    if (initialLoadCompletedRef.current) {
+      refreshModels(false);
+    }
+  }, [currentUser?.id, refreshModels]);
 
   const tokenUsage = useMemo(
     () =>
@@ -506,96 +535,169 @@ export const App: React.FC = () => {
   const lastCodexQuotaFetchRef = useRef<number>(0);
   const lastQuotaFetchTimeRef = useRef<number>(0);
   const inFlightQuotaPromiseRef = useRef<Promise<void> | null>(null);
+  const inFlightGeminiQuotaPromiseRef = useRef<Promise<any> | null>(null);
+  const inFlightCodexQuotaPromiseRef = useRef<Promise<any> | null>(null);
   const authMeInFlightRef = useRef<Promise<any> | null>(null);
   const authMeCompletedRef = useRef<boolean>(false);
-  const initialLoadCompletedRef = useRef<boolean>(false);
 
-  const fetchGeminiQuota = async (sessId?: string, force = false) => {
-    const now = Date.now();
-    if (!force && now - lastGeminiQuotaFetchRef.current < 1500) {
+  const fetchGeminiQuota = async (sessId?: string, force = false, emailOverride?: string) => {
+    const email = emailOverride || currentUser?.email || currentUserRef.current?.email;
+    if (!email) {
+      setGeminiQuota(null);
       return;
     }
-    lastGeminiQuotaFetchRef.current = now;
-    try {
-      const emailParam = currentUser?.email ? `?userEmail=${encodeURIComponent(currentUser.email)}` : '';
-      const activeId = sessId || currentSessionId;
-      const sessionParam = activeId ? `${emailParam ? '&' : '?'}sessionId=${encodeURIComponent(activeId)}` : '';
-      const res = await apiFetch(`/api/v1/quota/gemini${emailParam}${sessionParam}`);
-      if (res.ok) {
-        const json = await res.json();
-        if (json.data) {
-          setGeminiQuota(json.data);
-        }
-      }
-    } catch {
-      // offline fallback
-    }
-  };
-
-  const fetchCodexQuota = async (sessId?: string, force = false) => {
     const now = Date.now();
-    if (!force && now - lastCodexQuotaFetchRef.current < 1500) {
+    if (!force && now - lastGeminiQuotaFetchRef.current < 2000) {
       return;
     }
-    lastCodexQuotaFetchRef.current = now;
-    try {
-      const emailParam = currentUser?.email ? `?userEmail=${encodeURIComponent(currentUser.email)}` : '';
-      const activeId = sessId || currentSessionId;
-      const sessionParam = activeId ? `${emailParam ? '&' : '?'}sessionId=${encodeURIComponent(activeId)}` : '';
-      const res = await apiFetch(`/api/v1/quota/codex${emailParam}${sessionParam}`);
-      if (res.ok) {
-        const json = await res.json();
-        if (json.data) {
-          setCodexQuota(json.data);
-        }
-      }
-    } catch {
-      // offline fallback
+    if (inFlightGeminiQuotaPromiseRef.current) {
+      return inFlightGeminiQuotaPromiseRef.current;
     }
+
+    inFlightGeminiQuotaPromiseRef.current = (async () => {
+      try {
+        lastGeminiQuotaFetchRef.current = Date.now();
+        const emailParam = `?userEmail=${encodeURIComponent(email)}`;
+        const activeId = sessId || currentSessionId;
+        const sessionParam = activeId ? `&sessionId=${encodeURIComponent(activeId)}` : '';
+        const res = await apiFetch(`/api/v1/quota/gemini${emailParam}${sessionParam}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.data) {
+            setGeminiQuota(json.data);
+            return json.data;
+          }
+        }
+      } catch {
+        // offline fallback
+      } finally {
+        inFlightGeminiQuotaPromiseRef.current = null;
+      }
+    })();
+
+    return inFlightGeminiQuotaPromiseRef.current;
   };
+
+  const fetchCodexQuota = async (sessId?: string, force = false, emailOverride?: string) => {
+    const email = emailOverride || currentUser?.email || currentUserRef.current?.email;
+    if (!email) {
+      setCodexQuota(null);
+      return;
+    }
+    const now = Date.now();
+    if (!force && now - lastCodexQuotaFetchRef.current < 2000) {
+      return;
+    }
+    if (inFlightCodexQuotaPromiseRef.current) {
+      return inFlightCodexQuotaPromiseRef.current;
+    }
+
+    inFlightCodexQuotaPromiseRef.current = (async () => {
+      try {
+        lastCodexQuotaFetchRef.current = Date.now();
+        const emailParam = `?userEmail=${encodeURIComponent(email)}`;
+        const activeId = sessId || currentSessionId;
+        const sessionParam = activeId ? `&sessionId=${encodeURIComponent(activeId)}` : '';
+        const res = await apiFetch(`/api/v1/quota/codex${emailParam}${sessionParam}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.data) {
+            setCodexQuota(json.data);
+            return json.data;
+          }
+        }
+      } catch {
+        // offline fallback
+      } finally {
+        inFlightCodexQuotaPromiseRef.current = null;
+      }
+    })();
+
+    return inFlightCodexQuotaPromiseRef.current;
+  };
+
+  const waitForWorkspaceAndProvidersReady = useCallback(
+    async (userId: string, targetSessionId?: string | null, emailOverride?: string) => {
+      setLoadingSubMessage('Detecting linked AI providers & subscriptions...');
+      try {
+        const email = emailOverride || currentUserRef.current?.email || currentUser?.email;
+
+        // 1. Fetch CLI status immediately and apply to state without waiting for quota discovery
+        const freshCliStatus = await fetchCliStatus(true).catch(() => null);
+        if (freshCliStatus && currentUserRef.current?.id === userId) {
+          setCliStatus(freshCliStatus);
+          cliStatusFetchedRef.current = true;
+          try {
+            localStorage.setItem(`harness_cli_status_${userId}`, JSON.stringify(freshCliStatus));
+          } catch {}
+        }
+
+        // 2. Discover models, quota limits, and sandbox telemetry in parallel
+        setLoadingSubMessage('Connecting to cloud microVMs & discovering models...');
+        const [freshModels] = await Promise.all([
+          fetchAvailableModels(true, targetSessionId || undefined, userId).catch(() => []),
+          fetchGeminiQuota(targetSessionId || undefined, true, email).catch(() => null),
+          fetchCodexQuota(targetSessionId || undefined, true, email).catch(() => null),
+          fetchSandboxUsage().catch(() => null),
+        ]);
+
+        if (freshModels && freshModels.length > 0 && currentUserRef.current?.id === userId) {
+          setAvailableModels(freshModels);
+        }
+      } catch (err) {
+        console.warn('Error waiting for providers and models ready', err);
+      }
+    },
+    [currentSessionId, fetchSandboxUsage]
+  );
 
   useEffect(() => {
     if (!currentUser) {
       setGeminiQuota(null);
       setCodexQuota(null);
     } else {
+      if (!initialLoadCompletedRef.current) return;
       fetchGeminiQuota(currentSessionId || undefined);
       fetchCodexQuota(currentSessionId || undefined);
     }
   }, [currentUser, currentSessionId]);
 
   useEffect(() => {
+    if (!currentUser?.id || !initialLoadCompletedRef.current) return;
     if (selectedModelOption?.hostedBy === 'codex' || selectedModelOption?.provider === 'codex') {
       fetchCodexQuota(currentSessionId || undefined);
     } else {
       fetchGeminiQuota(currentSessionId || undefined);
     }
-  }, [selectedModelOption?.id, selectedModelOption?.hostedBy, selectedModelOption?.provider]);
+  }, [currentUser?.id, selectedModelOption?.id, selectedModelOption?.hostedBy, selectedModelOption?.provider]);
 
   const handleRefreshQuota = useCallback(() => {
+    if (!currentUser?.email) return;
     fetchGeminiQuota(currentSessionId || undefined, true);
     fetchCodexQuota(currentSessionId || undefined, true);
   }, [currentSessionId, currentUser?.email]);
 
   // Re-fetch dynamic models and quota whenever activeSandbox changes
   useEffect(() => {
+    if (!currentUser?.id || !initialLoadCompletedRef.current) return;
     if (activeSandbox?.sandboxId) {
       refreshModels(true);
       handleRefreshQuota();
     } else {
       refreshModels(false);
     }
-  }, [activeSandbox?.sandboxId, refreshModels, handleRefreshQuota]);
+  }, [currentUser?.id, activeSandbox?.sandboxId, refreshModels, handleRefreshQuota]);
 
   // Auto-retry discovering models if a sandbox is active but models list is still empty
   useEffect(() => {
+    if (!currentUser?.id || !initialLoadCompletedRef.current) return;
     if (activeSandbox?.sandboxId && availableModels.length === 0) {
       const retryTimer = setTimeout(() => {
         refreshModels(true);
       }, 2500);
       return () => clearTimeout(retryTimer);
     }
-  }, [activeSandbox?.sandboxId, availableModels.length, refreshModels]);
+  }, [currentUser?.id, activeSandbox?.sandboxId, availableModels.length, refreshModels]);
 
   const handleCliStatusChange = useCallback((newStatus: CliStatus) => {
     setCliStatus(newStatus);
@@ -604,6 +706,7 @@ export const App: React.FC = () => {
   }, [currentSessionId]);
 
   const fetchQuota = async (force = false) => {
+    if (!currentUserRef.current?.id) return;
     const now = Date.now();
     if (!force && now - lastQuotaFetchTimeRef.current < 4000) {
       return;
@@ -637,11 +740,12 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
+    if (!currentUser?.id) return;
     fetchQuota();
-  }, []);
+  }, [currentUser?.id]);
 
   useEffect(() => {
-    if (rateLimit.resetInSeconds <= 0) return;
+    if (!currentUser?.id || rateLimit.resetInSeconds <= 0) return;
     const timer = setInterval(() => {
       setRateLimit((prev) => {
         if (prev.resetInSeconds <= 1) {
@@ -652,23 +756,15 @@ export const App: React.FC = () => {
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [rateLimit.resetInSeconds]);
+  }, [currentUser?.id, rateLimit.resetInSeconds]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 2500);
   };
 
-  // Day / Night Theme state: initialized from localStorage preference, or browser system setting
-  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
-    const saved = localStorage.getItem('theme_preference');
-    if (saved === 'dark') return true;
-    if (saved === 'light') return false;
-    if (typeof window !== 'undefined' && window.matchMedia) {
-      return window.matchMedia('(prefers-color-scheme: dark)').matches;
-    }
-    return true;
-  });
+  // Day / Night Theme state managed via Jotai
+  const [isDarkMode, setIsDarkMode] = useAtom(isDarkModeAtom);
 
   // Keep DOM class in sync and respond to system changes if no manual preference stored
   useEffect(() => {
@@ -797,7 +893,7 @@ export const App: React.FC = () => {
 
   // Immediate full reset whenever user logs out or is unauthenticated
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser && !localStorage.getItem('auth_token')) {
       setSessions([]);
       setMessages([]);
       setCurrentSessionId(null);
@@ -835,25 +931,45 @@ export const App: React.FC = () => {
     }
 
     setLoadingMessage('Initializing Atelier Workspace');
-    setLoadingSubMessage('Verifying cloud credentials & session...');
+    setLoadingSubMessage('Verifying credentials & detecting linked CLIs...');
 
     // Fallback safety timeout ensures loading screen never blocks the user indefinitely (e.g. slow network)
-    const safetyTimeout = setTimeout(() => {
+    const safetyTimeout = setTimeout(async () => {
+      if (!cliStatusFetchedRef.current && currentUserRef.current?.id) {
+        try {
+          const status = await fetchCliStatus(true);
+          if (status) {
+            setCliStatus(status);
+            cliStatusFetchedRef.current = true;
+          }
+        } catch {}
+      }
       setIsPageLoading(false);
       initialLoadCompletedRef.current = true;
-    }, 7000);
+    }, 10000);
 
-    authMeInFlightRef.current = apiFetch('/api/v1/auth/me')
-      .then((res) => {
+    authMeInFlightRef.current = Promise.all([
+      apiFetch('/api/v1/auth/me').then(async (res) => {
         if (!res.ok) throw new Error('Unauthenticated');
         return res.json();
-      })
-      .then(async (data) => {
+      }),
+      fetchCliStatus(true).catch(() => null),
+    ])
+      .then(async ([meData, cliData]) => {
         authMeCompletedRef.current = true;
-        if (data.success && data.data) {
-          const user = data.data;
+        if (meData.success && meData.data) {
+          const user = normalizeUser(meData.data);
           currentUserRef.current = user;
           setCurrentUser(user);
+
+          if (cliData) {
+            setCliStatus(cliData);
+            cliStatusFetchedRef.current = true;
+            try {
+              localStorage.setItem(`harness_cli_status_${user.id}`, JSON.stringify(cliData));
+            } catch {}
+          }
+
           // Auto-refresh token if within refresh window (weekly refresh requirement)
           refreshAuthToken().then((refreshed) => {
             if (refreshed?.token) {
@@ -965,56 +1081,107 @@ export const App: React.FC = () => {
 
     setLoadingSubMessage('Loading your chat sessions & workspace...');
 
-    syncSessions().then(async (merged) => {
-      // Guard: if user logged out or changed in the meantime, discard!
-      if (!currentUserRef.current?.id || currentUserRef.current.id !== currentUser.id) return;
-      if (!merged || merged.length === 0) {
-        setSessions([]);
-        setMessages([]);
-        setCurrentSessionId(null);
-        setHasMoreEarlierMessages(false);
-        setRemainingMessageCount(0);
-        if (!initialLoadCompletedRef.current) {
-          initialLoadCompletedRef.current = true;
-          setTimeout(() => setIsPageLoading(false), 300);
-        }
-        return;
-      }
-      try {
-        const activeId = localStorage.getItem(`harness_current_session_id_${currentUser.id}`);
-        const target = activeId ? merged.find((s) => s.id === activeId) : merged[0];
-        if (target) {
-          if (!activeId) setCurrentSessionId(target.id);
-          if (target.model && target.model !== 'none') {
-            setSelectedModel(target.model);
-          }
-          setLoadingSubMessage('Fetching messages for active session...');
+    // Safety timer ensures loading screen never permanently hangs if network drops
+    const loadingSafetyTimer = setTimeout(async () => {
+      if (!initialLoadCompletedRef.current) {
+        if (!cliStatusFetchedRef.current && currentUserRef.current?.id) {
           try {
-            const data = await sessionSyncService.getSession(target.id, { limit: 25 });
-            if (data && currentUserRef.current?.id === currentUser.id) {
-              setMessages(data.messages || []);
-              if (data.pagination) {
-                setHasMoreEarlierMessages(data.pagination.hasMore);
-                setRemainingMessageCount(data.pagination.remaining);
-              } else {
-                setHasMoreEarlierMessages(false);
-                setRemainingMessageCount(0);
-              }
+            const status = await fetchCliStatus(true);
+            if (status) {
+              setCliStatus(status);
+              cliStatusFetchedRef.current = true;
             }
-          } catch (err) {
-            console.error('Failed to fetch session messages during initial load', err);
+          } catch {}
+        }
+        initialLoadCompletedRef.current = true;
+        setIsPageLoading(false);
+      }
+    }, 10000);
+
+    syncSessions()
+      .then(async (merged) => {
+        // Guard: if user logged out or changed in the meantime, discard!
+        if (!currentUserRef.current?.id || currentUserRef.current.id !== currentUser.id) return;
+        if (!merged || merged.length === 0) {
+          setSessions([]);
+          setMessages([]);
+          setCurrentSessionId(null);
+          setHasMoreEarlierMessages(false);
+          setRemainingMessageCount(0);
+          await waitForWorkspaceAndProvidersReady(currentUser.id, null, currentUser.email);
+          if (!cliStatusFetchedRef.current) {
+            const status = await fetchCliStatus(true).catch(() => null);
+            if (status && currentUserRef.current?.id === currentUser.id) {
+              setCliStatus(status);
+              cliStatusFetchedRef.current = true;
+            }
+          }
+          clearTimeout(loadingSafetyTimer);
+          initialLoadCompletedRef.current = true;
+          setTimeout(() => setIsPageLoading(false), 200);
+          return;
+        }
+        let targetSessionId: string | null = null;
+        try {
+          const activeId = localStorage.getItem(`harness_current_session_id_${currentUser.id}`);
+          const target = activeId ? merged.find((s) => s.id === activeId) : merged[0];
+          if (target) {
+            targetSessionId = target.id;
+            if (!activeId) setCurrentSessionId(target.id);
+            if (target.model && target.model !== 'none') {
+              setSelectedModel(target.model);
+            }
+            setLoadingSubMessage('Fetching messages for active session...');
+            try {
+              const data = await sessionSyncService.getSession(target.id, { limit: 25 });
+              if (data && currentUserRef.current?.id === currentUser.id) {
+                setMessages(data.messages || []);
+                if (data.pagination) {
+                  setHasMoreEarlierMessages(data.pagination.hasMore);
+                  setRemainingMessageCount(data.pagination.remaining);
+                } else {
+                  setHasMoreEarlierMessages(false);
+                  setRemainingMessageCount(0);
+                }
+              }
+            } catch (err) {
+              console.error('Failed to fetch session messages during initial load', err);
+            }
+          }
+        } catch (err) {
+          console.error('Error during initial session target hydration', err);
+        } finally {
+          await waitForWorkspaceAndProvidersReady(currentUser.id, targetSessionId, currentUser.email);
+          if (!cliStatusFetchedRef.current) {
+            const status = await fetchCliStatus(true).catch(() => null);
+            if (status && currentUserRef.current?.id === currentUser.id) {
+              setCliStatus(status);
+              cliStatusFetchedRef.current = true;
+            }
+          }
+          clearTimeout(loadingSafetyTimer);
+          initialLoadCompletedRef.current = true;
+          setTimeout(() => setIsPageLoading(false), 200);
+        }
+      })
+      .catch(async (err) => {
+        console.warn('Initial session sync encountered error:', err);
+        if (!cliStatusFetchedRef.current && currentUserRef.current?.id) {
+          const status = await fetchCliStatus(true).catch(() => null);
+          if (status) {
+            setCliStatus(status);
+            cliStatusFetchedRef.current = true;
           }
         }
-      } catch (err) {
-        console.error('Error during initial session target hydration', err);
-      } finally {
-        if (!initialLoadCompletedRef.current) {
-          initialLoadCompletedRef.current = true;
-          setTimeout(() => setIsPageLoading(false), 300);
-        }
-      }
-    });
-  }, [currentUser?.id, syncSessions]);
+        clearTimeout(loadingSafetyTimer);
+        initialLoadCompletedRef.current = true;
+        setIsPageLoading(false);
+      });
+
+    return () => {
+      clearTimeout(loadingSafetyTimer);
+    };
+  }, [currentUser?.id, syncSessions, waitForWorkspaceAndProvidersReady]);
 
   const handleSelectSession = (sessionId: string) => {
     const session = sessions.find((s) => s.id === sessionId);
@@ -1154,89 +1321,94 @@ export const App: React.FC = () => {
       setSelectedSandboxId(null);
       setHasMoreEarlierMessages(false);
       setRemainingMessageCount(0);
+      localStorage.removeItem('auth_token');
 
-      // If token is already a backend signed JWT (e.g. from CLI login)
-      if (idToken.startsWith('eyJ')) {
+      let loggedInUser: UserProfile | null = null;
+
+      // Determine if token is already an internal backend signed JWT (e.g. from direct CLI session restore)
+      let isBackendJwt = false;
+      try {
+        const parts = idToken.split('.');
+        if (parts.length === 3) {
+          const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+          if (payload && typeof payload.sub === 'string' && payload.sub.startsWith('usr_') && !payload.iss?.includes('google')) {
+            isBackendJwt = true;
+          }
+        }
+      } catch {}
+
+      if (isBackendJwt) {
         localStorage.setItem('auth_token', idToken);
         const meRes = await apiFetch('/api/v1/auth/me');
         const meData = await meRes.json();
         if (meData.success && meData.data) {
-          const user = meData.data;
-          currentUserRef.current = user;
-          setCurrentUser(user);
-          firestoreService.syncUserProfile(user).catch((fErr) => {
-            console.warn('Firestore user profile sync warning', fErr);
-          });
-
-          const freshStatus = await fetchCliStatus().catch(() => null);
-          if (freshStatus) {
-            setCliStatus(freshStatus);
-          }
-          const hasAnyCli = Boolean(
-            freshStatus?.antigravity?.linked ||
-            freshStatus?.gemini?.linked ||
-            freshStatus?.claude?.linked ||
-            freshStatus?.codex?.linked
-          );
-
-          if (!hasAnyCli) {
-            setIsAuthModalOpen(true);
-            showToast(`Signed in as ${user.name}. Please link an AI CLI to execute models.`);
-          } else {
-            setIsAuthModalOpen(false);
-            showToast(`Welcome, ${user.name}!`);
-          }
-          return;
-        }
-      }
-
-      const res = await apiFetch('/api/v1/auth/google', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken, email, name, avatarUrl }),
-      });
-
-      const data = await res.json();
-      if (data.success && data.data?.token) {
-        localStorage.setItem('auth_token', data.data.token);
-        const user = data.data.user;
-        currentUserRef.current = user;
-        setCurrentUser(user);
-        firestoreService.syncUserProfile(user).catch((fErr) => {
-          console.warn('Firestore user profile sync warning', fErr);
-        });
-
-        const freshStatus = await fetchCliStatus().catch(() => null);
-        if (freshStatus) {
-          setCliStatus(freshStatus);
-        }
-        const hasAnyCli = Boolean(
-          freshStatus?.antigravity?.linked ||
-          freshStatus?.gemini?.linked ||
-          freshStatus?.claude?.linked ||
-          freshStatus?.codex?.linked
-        );
-
-        if (!hasAnyCli) {
-          setIsAuthModalOpen(true);
-          showToast(`Signed in as ${user.name}. Please link an AI CLI to execute models.`);
-        } else {
-          setIsAuthModalOpen(false);
-          showToast(`Welcome back, ${user.name}!`);
+          loggedInUser = meData.data;
         }
       } else {
-        const errorMsg = data.error?.message || 'Authentication failed';
-        showToast(errorMsg);
-        throw new Error(errorMsg);
+        const res = await apiFetch('/api/v1/auth/google', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken, email, name, avatarUrl }),
+        });
+
+        const data = await res.json();
+        if (data.success && data.data?.token) {
+          localStorage.setItem('auth_token', data.data.token);
+          loggedInUser = data.data.user;
+        } else {
+          const errorMsg = data.error?.message || data.message || 'Authentication failed';
+          showToast(errorMsg);
+          setIsPageLoading(false);
+          throw new Error(errorMsg);
+        }
       }
+
+      if (!loggedInUser) {
+        setIsPageLoading(false);
+        throw new Error('Failed to resolve authenticated user profile');
+      }
+
+      const normalizedUser = normalizeUser(loggedInUser);
+      currentUserRef.current = normalizedUser;
+      setCurrentUser(normalizedUser);
+      if (normalizedUser) {
+        firestoreService.syncUserProfile(normalizedUser).catch((fErr) => {
+          console.warn('Firestore user profile sync warning', fErr);
+        });
+      }
+
+      // Synchronize workspace sessions & messages first
+      setLoadingSubMessage('Loading your chat sessions & workspace...');
+      const merged = await syncSessions();
+      let targetSessionId: string | null = null;
+      if (merged && merged.length > 0) {
+        const activeId = localStorage.getItem(`harness_current_session_id_${loggedInUser.id}`);
+        const target = activeId ? merged.find((s) => s.id === activeId) : merged[0];
+        if (target) {
+          targetSessionId = target.id;
+          if (!activeId) setCurrentSessionId(target.id);
+          if (target.model && target.model !== 'none') setSelectedModel(target.model);
+          setLoadingSubMessage('Fetching messages for active session...');
+          try {
+            const sData = await sessionSyncService.getSession(target.id, { limit: 25 });
+            if (sData) setMessages(sData.messages || []);
+          } catch {}
+        }
+      }
+
+      // Keep 3D cube loading screen active until ALL linked AI providers, quotas, and models are fetched
+      await waitForWorkspaceAndProvidersReady(loggedInUser.id, targetSessionId, loggedInUser.email);
+
+      setIsAuthModalOpen(false);
+      showToast(`Welcome back, ${loggedInUser.name}!`);
+      setTimeout(() => {
+        setIsPageLoading(false);
+      }, 300);
     } catch (err: unknown) {
+      setIsPageLoading(false);
       const errorMsg = err instanceof Error ? err.message : 'Authentication failed';
       showToast(errorMsg);
       throw err;
-    } finally {
-      setTimeout(() => {
-        setIsPageLoading(false);
-      }, 350);
     }
   };
 
@@ -1260,10 +1432,13 @@ export const App: React.FC = () => {
       });
       const data = await res.json();
       if (data.success) {
-        const user = data.data;
+        const user = normalizeUser(data.data);
+        currentUserRef.current = user;
         setCurrentUser(user);
         setIsAuthModalOpen(false);
-        firestoreService.syncUserProfile(user).catch(() => {});
+        if (user) {
+          firestoreService.syncUserProfile(user).catch(() => {});
+        }
         showToast(
           `Linked ${
             platform === 'claude_subscription' ? 'Claude Pro / Team' : 'ChatGPT Plus / Codex'
@@ -1295,10 +1470,13 @@ export const App: React.FC = () => {
       });
       const data = await res.json();
       if (data.success) {
-        const user = data.data;
+        const user = normalizeUser(data.data);
+        currentUserRef.current = user;
         setCurrentUser(user);
         setIsAuthModalOpen(false);
-        firestoreService.syncUserProfile(user).catch(() => {});
+        if (user) {
+          firestoreService.syncUserProfile(user).catch(() => {});
+        }
         showToast(`Saved ${platform.toUpperCase()} API Key to secure sandbox`);
       } else {
         showToast(data.error?.message || 'Failed to save API key');
@@ -1913,8 +2091,8 @@ export const App: React.FC = () => {
       {/* Toast Alert */}
       {toastMessage && (
         <div className={`fixed top-16 right-4 sm:right-10 ${isInspectorOpen ? 'xl:right-[400px]' : 'xl:right-10'} z-50 px-space-md py-space-xs rounded-lg bg-surface-container-high border border-primary/40 text-on-surface shadow-2xl text-body-sm flex items-center gap-2 animate-bounce transition-all duration-300`}>
-          <span className="material-symbols-outlined text-[16px] text-primary">info</span>
-          <span>{toastMessage}</span>
+          <span className="material-symbols-outlined text-[16px] text-primary shrink-0 leading-none select-none">info</span>
+          <span className="leading-none">{toastMessage}</span>
         </div>
       )}
 

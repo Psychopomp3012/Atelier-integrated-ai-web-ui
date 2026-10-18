@@ -40,6 +40,9 @@ export class AntigravityQuotaService {
   private readonly inMemoryTelemetryMap: Map<string, CliTelemetryPersistence> = new Map();
   private readonly sessionStatsMap: Map<string, SessionStats> = new Map();
   private readonly cachedQuotaLimitsMap: Map<string, { limits: CliQuotaLimits; timestamp: number }> = new Map();
+  private readonly inFlightQuotaMap: Map<string, Promise<AntigravityQuotaStats>> = new Map();
+  private readonly inFlightLimitsMap: Map<string, Promise<CliQuotaLimits>> = new Map();
+  private readonly lastQuotaLogMap: Map<string, { snapshot: string; timestamp: number }> = new Map();
 
   constructor() {
     // Dynamic live initialization: no local file scanning or storage.
@@ -116,7 +119,10 @@ export class AntigravityQuotaService {
    * Completely avoids saving or writing any local files on the backend.
    */
   private savePersistence(data: CliTelemetryPersistence, userKey?: string, userEmail?: string): void {
-    const key = userKey || userEmail || 'default';
+    const key = userKey || userEmail;
+    if (!key || key === 'anonymous' || key === 'default') {
+      return;
+    }
     this.inMemoryTelemetryMap.set(key, data);
     firestoreBackendService.saveUserTelemetry(key, data, 'antigravity', userEmail).catch((err) => {
       logger.warn('[Antigravity Quota] Failed to save telemetry to Firestore', { error: String(err) });
@@ -137,14 +143,19 @@ export class AntigravityQuotaService {
         return usage.sandboxes[0].sandboxId;
       }
     }
+    // Strict multi-tenant isolation: if a specific userId was passed, DO NOT fall back to another user's sandbox
+    if (userId && userId !== 'default' && userId !== 'default_user') {
+      return null;
+    }
+
     const defaultActive = sandboxService.getActiveSandboxId('default');
     if (defaultActive) return defaultActive;
 
-    const globalUsage = sandboxService.getSandboxUsage();
-    if (globalUsage.sandboxes && globalUsage.sandboxes.length > 0) {
-      return globalUsage.sandboxes[0].sandboxId;
-    }
     return null;
+  }
+
+  public invalidateUserQuota(userKey: string): void {
+    this.cachedQuotaLimitsMap.delete(userKey);
   }
 
   /**
@@ -231,21 +242,35 @@ export class AntigravityQuotaService {
       return cached.limits;
     }
 
-    // Live Google Code Assist CLI live fetch via cloud sandbox
-    const liveLimits = await this.queryLiveGoogleQuota(userId, sessionId);
-    if (liveLimits && liveLimits.groups.length > 0) {
-      this.cachedQuotaLimitsMap.set(userKey, { limits: liveLimits, timestamp: now });
-      return liveLimits;
+    const inFlight = this.inFlightLimitsMap.get(userKey);
+    if (inFlight) {
+      return inFlight;
     }
 
-    // Clean initial fallback if live fetch unavailable (never store or read from firestore)
-    const initialLimits: CliQuotaLimits = {
-      description: 'Antigravity CLI native and third-party hosted limits',
-      fetchedAt: new Date().toISOString(),
-      groups: [],
-    };
+    const limitsPromise = (async () => {
+      // Live Google Code Assist CLI live fetch via cloud sandbox
+      const liveLimits = await this.queryLiveGoogleQuota(userId, sessionId);
+      if (liveLimits && liveLimits.groups.length > 0) {
+        this.cachedQuotaLimitsMap.set(userKey, { limits: liveLimits, timestamp: Date.now() });
+        return liveLimits;
+      }
 
-    return initialLimits;
+      // Clean initial fallback if live fetch unavailable (never store or read from firestore)
+      const initialLimits: CliQuotaLimits = {
+        description: 'Antigravity CLI native and third-party hosted limits',
+        fetchedAt: new Date().toISOString(),
+        groups: [],
+      };
+
+      return initialLimits;
+    })();
+
+    this.inFlightLimitsMap.set(userKey, limitsPromise);
+    try {
+      return await limitsPromise;
+    } finally {
+      this.inFlightLimitsMap.delete(userKey);
+    }
   }
 
   /**
@@ -257,97 +282,116 @@ export class AntigravityQuotaService {
     userId?: string
   ): Promise<AntigravityQuotaStats> {
     const effectiveUserId = userId || (userEmail ? cliAuthService.getUserIdByEmail(userEmail) || undefined : undefined);
-
-    if (effectiveUserId || userEmail) {
-      await cliAuthService.syncUserFromFirestore(effectiveUserId || undefined, userEmail);
+    const inFlightKey = `${effectiveUserId || userId || userEmail || 'default'}:${sessionId || ''}`;
+    const existing = this.inFlightQuotaMap.get(inFlightKey);
+    if (existing) {
+      return existing;
     }
 
-    // Multi-tenant check: Is Antigravity CLI linked for this specific user or email?
-    const isLinked = Boolean(
-      (effectiveUserId && cliAuthService.isUserCliLinked(effectiveUserId, 'antigravity')) ||
-      (userEmail && cliAuthService.isUserCliLinkedByEmail(userEmail, 'antigravity'))
-    );
+    const quotaPromise = (async () => {
+      if (effectiveUserId || userEmail) {
+        await cliAuthService.syncUserFromFirestore(effectiveUserId || undefined, userEmail);
+      }
 
-    if (!isLinked) {
-      logger.info('[Antigravity Quota] Resolved user quota status: Not Linked', {
-        userId,
-        userEmail,
-        effectiveUserId,
-        isLinked: false,
-      });
+      // Multi-tenant check: Is Antigravity CLI linked for this specific user or email?
+      const isLinked = Boolean(
+        (effectiveUserId && cliAuthService.isUserCliLinked(effectiveUserId, 'antigravity')) ||
+        (userEmail && cliAuthService.isUserCliLinkedByEmail(userEmail, 'antigravity'))
+      );
+
+      if (!isLinked) {
+        const logKey = `${effectiveUserId || userId || userEmail || 'default'}:unlinked`;
+        const lastLog = this.lastQuotaLogMap.get(logKey);
+        const now = Date.now();
+        if (!lastLog || now - lastLog.timestamp > 15_000) {
+          this.lastQuotaLogMap.set(logKey, { snapshot: 'unlinked', timestamp: now });
+          logger.info('[Antigravity Quota] Resolved user quota status: Not Linked', {
+            userId,
+            userEmail,
+            effectiveUserId,
+            isLinked: false,
+          });
+        }
+
+        return {
+          linked: false,
+          userEmail: userEmail || undefined,
+          userName: undefined,
+          totalTurns: 0,
+          totalTokens: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          thinkingTokens: 0,
+          cacheReadTokens: 0,
+          lastLatencyMs: 0,
+          avgLatencyMs: 0,
+          quotaLimits: null,
+          lastUpdated: new Date().toISOString(),
+        };
+      }
+
+      const userKey = effectiveUserId || userEmail || 'default';
+      const persistence = await this.loadPersistenceAsync(userKey, userEmail);
+      const userRecord = effectiveUserId ? cliAuthService.getUserCliRecord(effectiveUserId) : null;
+      const email = userEmail || userRecord?.antigravity?.email || userRecord?.email;
+      const name = userRecord?.name;
+
+      const sessionStats = (sessionId ? this.sessionStatsMap.get(sessionId) : null) || {
+        apiCalls: persistence.totalTurns,
+        promptTokens: persistence.promptTokens,
+        completionTokens: persistence.completionTokens,
+        thinkingTokens: persistence.thinkingTokens,
+        cacheReadTokens: persistence.cacheReadTokens,
+        totalTokens: persistence.totalTokens,
+        lastLatencyMs: persistence.lastLatencyMs || 0,
+        totalLatencyMs: persistence.totalLatencyMs || 0,
+      };
+
+      const effectiveLastLatency =
+        sessionStats.lastLatencyMs > 0
+          ? sessionStats.lastLatencyMs
+          : (persistence.lastLatencyMs || 0);
+
+      const effectiveTotalLatency =
+        sessionStats.totalLatencyMs > 0
+          ? sessionStats.totalLatencyMs
+          : (persistence.totalLatencyMs || 0);
+
+      const totalTurnsCount =
+        sessionStats.apiCalls > 0
+          ? sessionStats.apiCalls
+          : persistence.totalTurns;
+
+      const avgLatencyMs =
+        totalTurnsCount > 0
+          ? Math.round(effectiveTotalLatency / totalTurnsCount)
+          : 0;
+
+      const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, email, sessionId, effectiveUserId);
+
+      const logKey = `${effectiveUserId || userId || userEmail || 'default'}`;
+      const logSnapshot = `${isLinked}:${totalTurnsCount}:${quotaLimits.groups.length}`;
+      const lastLog = this.lastQuotaLogMap.get(logKey);
+      const now = Date.now();
+      if (!lastLog || lastLog.snapshot !== logSnapshot || now - lastLog.timestamp > 15_000) {
+        this.lastQuotaLogMap.set(logKey, { snapshot: logSnapshot, timestamp: now });
+        logger.info('[Antigravity Quota] Resolved user quota status', {
+          userId,
+          userEmail: email,
+          effectiveUserId,
+          userKey,
+          isLinked,
+          totalTurns: totalTurnsCount,
+          groupsDetected: quotaLimits.groups.map((g) => g.name),
+        });
+      }
 
       return {
-        linked: false,
-        userEmail: userEmail || undefined,
-        userName: undefined,
-        totalTurns: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        thinkingTokens: 0,
-        cacheReadTokens: 0,
-        lastLatencyMs: 0,
-        avgLatencyMs: 0,
-        quotaLimits: null,
-        lastUpdated: new Date().toISOString(),
-      };
-    }
-
-    const userKey = effectiveUserId || userEmail || 'default';
-    const persistence = await this.loadPersistenceAsync(userKey, userEmail);
-    const userRecord = effectiveUserId ? cliAuthService.getUserCliRecord(effectiveUserId) : null;
-    const email = userEmail || userRecord?.antigravity?.email || userRecord?.email;
-    const name = userRecord?.name;
-
-    const sessionStats = (sessionId ? this.sessionStatsMap.get(sessionId) : null) || {
-      apiCalls: persistence.totalTurns,
-      promptTokens: persistence.promptTokens,
-      completionTokens: persistence.completionTokens,
-      thinkingTokens: persistence.thinkingTokens,
-      cacheReadTokens: persistence.cacheReadTokens,
-      totalTokens: persistence.totalTokens,
-      lastLatencyMs: persistence.lastLatencyMs || 0,
-      totalLatencyMs: persistence.totalLatencyMs || 0,
-    };
-
-    const effectiveLastLatency =
-      sessionStats.lastLatencyMs > 0
-        ? sessionStats.lastLatencyMs
-        : (persistence.lastLatencyMs || 0);
-
-    const effectiveTotalLatency =
-      sessionStats.totalLatencyMs > 0
-        ? sessionStats.totalLatencyMs
-        : (persistence.totalLatencyMs || 0);
-
-    const totalTurnsCount =
-      sessionStats.apiCalls > 0
-        ? sessionStats.apiCalls
-        : persistence.totalTurns;
-
-    const avgLatencyMs =
-      totalTurnsCount > 0
-        ? Math.round(effectiveTotalLatency / totalTurnsCount)
-        : 0;
-
-    const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, email, sessionId, effectiveUserId);
-
-    logger.info('[Antigravity Quota] Resolved user quota status', {
-      userId,
-      userEmail: email,
-      effectiveUserId,
-      userKey,
-      isLinked,
-      totalTurns: totalTurnsCount,
-      groupsDetected: quotaLimits.groups.map((g) => g.name),
-    });
-
-    return {
-      linked: true,
-      userEmail: email,
-      userName: name,
-      totalTurns: totalTurnsCount,
-      totalTokens: sessionStats.totalTokens,
+        linked: true,
+        userEmail: email,
+        userName: name,
+        totalTurns: totalTurnsCount,
+        totalTokens: sessionStats.totalTokens,
       promptTokens: sessionStats.promptTokens,
       completionTokens: sessionStats.completionTokens,
       thinkingTokens: sessionStats.thinkingTokens,
@@ -357,7 +401,15 @@ export class AntigravityQuotaService {
       quotaLimits,
       lastUpdated: new Date().toISOString(),
     };
+  })();
+
+  this.inFlightQuotaMap.set(inFlightKey, quotaPromise);
+  try {
+    return await quotaPromise;
+  } finally {
+    this.inFlightQuotaMap.delete(inFlightKey);
   }
+}
 
   /**
    * Alias for backwards compatibility.
@@ -374,9 +426,13 @@ export class AntigravityQuotaService {
    * Records a turn completed by the Antigravity CLI directly using CLI-acquired token usage.
    */
   public async recordTurn(input: RecordTurnInput): Promise<AntigravityQuotaStats> {
-    const userKey = input.userEmail
-      ? (cliAuthService.getUserIdByEmail(input.userEmail) || input.userEmail)
-      : 'anonymous';
+    const userKey =
+      input.userId ||
+      (input.userEmail ? (cliAuthService.getUserIdByEmail(input.userEmail) || input.userEmail) : '');
+
+    if (!userKey || userKey === 'anonymous' || userKey === 'default') {
+      return this.getAntigravityQuota(input.userEmail, input.sessionId, input.userId);
+    }
 
     const persistence = await this.loadPersistenceAsync(userKey, input.userEmail);
 

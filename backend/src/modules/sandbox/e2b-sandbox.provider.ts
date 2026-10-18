@@ -17,6 +17,7 @@ import { generateId } from '../../utils/id.util.js';
 import { logger } from '../../utils/logger.util.js';
 import { envConfig } from '../../config/env.config.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
+import { cliAuthService } from '../auth/cli-auth.service.js';
 
 export interface SandboxRecord {
   sandboxId: string;
@@ -137,6 +138,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
       // Sort items by startedAt ascending so oldest is #1, second is #2, third is #3
       const sorted = items.slice().sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
 
+      let hasChanges = false;
       let index = 0;
       for (const cloudSandbox of sorted) {
         index++;
@@ -149,6 +151,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
             existing.lastActiveAt = startedTime;
           }
         } else {
+          hasChanges = true;
           this.sandboxRecords.set(sbId, {
             sandboxId: sbId,
             name: `Sandbox #${index} (${sbId.substring(0, 6)})`,
@@ -165,6 +168,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
       // Prune records deleted from cloud
       for (const localId of Array.from(this.sandboxRecords.keys())) {
         if (!activeCloudIds.has(localId)) {
+          hasChanges = true;
           const rec = this.sandboxRecords.get(localId);
           if (rec && rec.userId && rec.userId !== 'default_user') {
             firestoreBackendService.deleteSandboxRecord(rec.userId, localId).catch(() => {});
@@ -179,8 +183,10 @@ export class E2BSandboxProvider implements ISandboxProvider {
         }
       }
 
-      this.renumberSandboxes();
-      this.saveRecordsToDisk();
+      if (hasChanges) {
+        this.renumberSandboxes();
+        this.saveRecordsToDisk();
+      }
     } catch (err) {
       logger.warn('Failed to sync sandboxes from E2B cloud', { error: String(err) });
     }
@@ -200,6 +206,13 @@ export class E2BSandboxProvider implements ISandboxProvider {
     this.terminalLogs.push(entry);
     if (this.terminalLogs.length > 50) {
       this.terminalLogs.shift();
+    }
+    if (level === 'ERROR') {
+      logger.error(`[E2B MicroVM] ${message}`);
+    } else if (level === 'READY') {
+      logger.info(`[E2B MicroVM] ${message}`);
+    } else if (level === 'EXEC') {
+      logger.info(`[E2B MicroVM] ${message}`);
     }
   }
 
@@ -249,6 +262,9 @@ export class E2BSandboxProvider implements ISandboxProvider {
       return false;
     }
     const prevSandboxId = this.sessionToSandboxId.get(cleanSession);
+    if (prevSandboxId === sandboxId && record.attachedSessionIds.has(cleanSession)) {
+      return true;
+    }
     if (prevSandboxId && prevSandboxId !== sandboxId) {
       const prevRecord = this.sandboxRecords.get(prevSandboxId);
       if (prevRecord) {
@@ -308,6 +324,11 @@ export class E2BSandboxProvider implements ISandboxProvider {
         .map((s) => this.sanitizeSessionId(s))
         .filter((s) => s && s !== 'default')
     );
+
+    // If caller has no active session IDs (e.g. initial load), do NOT wipe existing attached sessions
+    if (validCleanIds.size === 0) {
+      return;
+    }
 
     let changed = false;
     for (const [sess, sbId] of Array.from(this.sessionToSandboxId.entries())) {
@@ -510,6 +531,24 @@ export class E2BSandboxProvider implements ISandboxProvider {
   }
 
   /**
+   * Safely writes a file into /home/agent-runner inside the microVM via staging in /tmp,
+   * completely avoiding DAC permission issues while maintaining strict 0700/0600 ownership.
+   */
+  private async writeAgentRunnerFile(
+    sandbox: Sandbox,
+    targetPath: string,
+    content: string,
+    mode = '600'
+  ): Promise<void> {
+    const tmpName = `/tmp/agent_sync_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    await sandbox.files.write(tmpName, content);
+    const targetDir = path.posix.dirname(targetPath);
+    await sandbox.commands.run(
+      `sudo mkdir -p "${targetDir}" && sudo cp "${tmpName}" "${targetPath}" && sudo chown agent-runner:agent-runner "${targetPath}" && sudo chmod ${mode} "${targetPath}" && sudo rm -f "${tmpName}"`
+    );
+  }
+
+  /**
    * Enforces strict Linux DAC Dual-User Privilege Separation:
    * 1. 'agent-runner' (UID system): owns credentials in /home/agent-runner with 0700/0600.
    * 2. 'user' (developer): owns /home/user/workspace (rw), but CANNOT read /home/agent-runner.
@@ -517,104 +556,94 @@ export class E2BSandboxProvider implements ISandboxProvider {
   public async syncCredentialsToSandbox(sandbox: Sandbox, userId?: string): Promise<void> {
     const homedir = os.homedir();
     try {
-      // Determine user-specific profile directory if multi-tenant profile exists
-      const userProfileDir = userId && userId !== 'default' && userId !== 'default_user'
-        ? path.join(homedir, '.agent-user-profiles', userId)
+      const safeUid = userId && userId !== 'default' && userId !== 'default_user'
+        ? userId.replace(/[^a-zA-Z0-9_-]/g, '_')
+        : undefined;
+
+      const userProfileDir = safeUid
+        ? path.join(homedir, '.agent-user-profiles', safeUid)
         : homedir;
+
+      let expectedUserEmail: string | undefined;
+      if (safeUid) {
+        const userRec = cliAuthService.getUserCliRecord(userId!);
+        expectedUserEmail = userRec?.email || userRec?.antigravity?.email || userRec?.gemini?.email;
+      }
 
       await sandbox.commands.run(
         'sudo mkdir -p /home/agent-runner/.gemini/antigravity-cli/cache /home/agent-runner/.antigravity/cache /home/agent-runner/.claude /home/agent-runner/.codex'
       ).catch(() => {});
 
-      // Seed Antigravity / Gemini OAuth credentials securely to /home/agent-runner
-      const candidateAgyCreds = [
-        path.join(userProfileDir, '.gemini', 'oauth_creds.json'),
-        path.join(homedir, '.gemini', 'oauth_creds.json'),
-        path.join(homedir, '.gemini', 'antigravity-cli', 'oauth_creds.json'),
-        path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'oauth_creds.json'),
-      ];
-
-      let agyCredsContent = '';
-      let newestAgyMtime = 0;
-      for (const cp of candidateAgyCreds) {
-        if (fs.existsSync(cp)) {
-          try {
-            const st = fs.statSync(cp);
-            if (st.mtimeMs > newestAgyMtime) {
-              const text = fs.readFileSync(cp, 'utf8');
-              const parsed = JSON.parse(text);
-              if (parsed && (parsed.access_token || parsed.refresh_token)) {
-                newestAgyMtime = st.mtimeMs;
-                agyCredsContent = text;
-              }
-            }
-          } catch {}
-        }
-      }
-
-      if (agyCredsContent) {
-        await sandbox.files.write('/home/agent-runner/.gemini/oauth_creds.json', agyCredsContent).catch(() => {});
-      }
-
-      // Seed dedicated Antigravity CLI token files (used by agy when keyring is unavailable)
-      const candidateAgyTokens = [
+      // 1. Antigravity credentials resolution (per-user isolated priority)
+      const userAgyTokenPaths = safeUid ? [
         path.join(userProfileDir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
-        path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
-        path.join(homedir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
-        path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
-        path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
-        path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
-      ];
+        path.join(userProfileDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+        path.join(userProfileDir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
+        path.join(userProfileDir, '.gemini', 'oauth_creds.json'),
+      ] : [];
 
       let agyTokenContent = '';
-      let newestAgyTokenMtime = 0;
-      for (const tp of candidateAgyTokens) {
+      for (const tp of userAgyTokenPaths) {
         if (fs.existsSync(tp)) {
           try {
             const st = fs.statSync(tp);
-            if (st.size > 20 && st.mtimeMs > newestAgyTokenMtime) {
+            if (st.size > 20) {
               const text = fs.readFileSync(tp, 'utf8');
               if (text.includes('token') || text.includes('Bearer') || text.includes('access') || text.includes('refresh')) {
-                newestAgyTokenMtime = st.mtimeMs;
                 agyTokenContent = text;
+                break;
               }
             }
           } catch {}
         }
       }
 
-      if (agyTokenContent) {
-        await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-keyring-unavailable-oauth-token', agyTokenContent).catch(() => {});
-        await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/antigravity-oauth-token', agyTokenContent).catch(() => {});
-        await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-oauth-token', agyTokenContent).catch(() => {});
-        await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/cache/jetski-keyring-unavailable-oauth-token', agyTokenContent).catch(() => {});
-        await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/jetski-oauth-token', agyTokenContent).catch(() => {});
-        await sandbox.commands.run('sudo rm -f /home/agent-runner/.gemini/antigravity-cli/oauth_creds.json').catch(() => {});
-      }
-
-      // Seed google_accounts.json so agy knows the active Google account
-      const hostGoogleAccounts = path.join(homedir, '.gemini', 'google_accounts.json');
-      if (fs.existsSync(hostGoogleAccounts)) {
-        const accountsContent = fs.readFileSync(hostGoogleAccounts, 'utf8');
-        await sandbox.files.write('/home/agent-runner/.gemini/google_accounts.json', accountsContent).catch(() => {});
-        await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/google_accounts.json', accountsContent).catch(() => {});
-      }
-
-      // Seed antigravity-cli config and state files if available
-      const hostAgyDir = path.join(homedir, '.gemini', 'antigravity-cli');
-      if (fs.existsSync(hostAgyDir)) {
-        for (const fname of ['installation_id', 'jetski_state.pbtxt', 'settings.json']) {
-          const fpath = path.join(hostAgyDir, fname);
-          if (fs.existsSync(fpath)) {
-            await sandbox.files.write(`/home/agent-runner/.gemini/antigravity-cli/${fname}`, fs.readFileSync(fpath, 'utf8')).catch(() => {});
+      // If not yet in user profile, check host tokens ONLY if email matches expectedUserEmail
+      if (!agyTokenContent) {
+        const candidateHostTokens = [
+          path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+          path.join(homedir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+          path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
+          path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+          path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+        ];
+        for (const tp of candidateHostTokens) {
+          if (fs.existsSync(tp)) {
+            try {
+              const st = fs.statSync(tp);
+              if (st.size > 20) {
+                const text = fs.readFileSync(tp, 'utf8');
+                if (text.includes('token') || text.includes('Bearer') || text.includes('access') || text.includes('refresh')) {
+                  const tokenEmail = cliAuthService.extractEmailFromToken(text);
+                  if (!expectedUserEmail || (tokenEmail && tokenEmail.toLowerCase() === expectedUserEmail.toLowerCase())) {
+                    agyTokenContent = text;
+                    break;
+                  }
+                }
+              }
+            } catch {}
           }
         }
       }
 
-      // Root .gemini user_info if available
-      const hostUserInfo = path.join(homedir, '.gemini', 'user_info.json');
-      if (fs.existsSync(hostUserInfo)) {
-        await sandbox.files.write('/home/agent-runner/.gemini/user_info.json', fs.readFileSync(hostUserInfo, 'utf8')).catch(() => {});
+      // Seed Antigravity tokens to /home/agent-runner using writeAgentRunnerFile
+      if (agyTokenContent) {
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-keyring-unavailable-oauth-token', agyTokenContent);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/antigravity-cli/antigravity-oauth-token', agyTokenContent);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-oauth-token', agyTokenContent);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/antigravity-cli/cache/jetski-keyring-unavailable-oauth-token', agyTokenContent);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/antigravity-cli/jetski-oauth-token', agyTokenContent);
+        await sandbox.commands.run('sudo rm -f /home/agent-runner/.gemini/antigravity-cli/oauth_creds.json /home/agent-runner/.gemini/oauth_creds.json').catch(() => {});
+      }
+
+      // Seed google_accounts.json and user_info.json scoped to the user email
+      const targetEmail = expectedUserEmail || (agyTokenContent ? cliAuthService.extractEmailFromToken(agyTokenContent) : null);
+      if (targetEmail) {
+        const accountsContent = JSON.stringify({ active: targetEmail, accounts: [{ email: targetEmail }] }, null, 2);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/google_accounts.json', accountsContent);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/antigravity-cli/google_accounts.json', accountsContent);
+        const userInfoContent = JSON.stringify({ email: targetEmail }, null, 2);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/user_info.json', userInfoContent);
       }
 
       // Seed settings.json: if Gemini API key is configured, use gemini-api-key; else use oauth-personal
@@ -628,25 +657,18 @@ export class E2BSandboxProvider implements ISandboxProvider {
             },
           },
         }, null, 2);
-        await sandbox.files.write('/home/agent-runner/.gemini/settings.json', agySettings).catch(() => {});
-        await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/settings.json', agySettings).catch(() => {});
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/settings.json', agySettings);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/antigravity-cli/settings.json', agySettings);
       } else {
-        const hostGeminiSettings = path.join(homedir, '.gemini', 'settings.json');
-        if (fs.existsSync(hostGeminiSettings)) {
-          const settingsContent = fs.readFileSync(hostGeminiSettings, 'utf8');
-          await sandbox.files.write('/home/agent-runner/.gemini/settings.json', settingsContent).catch(() => {});
-          await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/settings.json', settingsContent).catch(() => {});
-        } else {
-          const agyOAuthSettings = JSON.stringify({
-            security: {
-              auth: {
-                selectedType: 'oauth-personal',
-              },
+        const agyOAuthSettings = JSON.stringify({
+          security: {
+            auth: {
+              selectedType: 'oauth-personal',
             },
-          }, null, 2);
-          await sandbox.files.write('/home/agent-runner/.gemini/settings.json', agyOAuthSettings).catch(() => {});
-          await sandbox.files.write('/home/agent-runner/.gemini/antigravity-cli/settings.json', agyOAuthSettings).catch(() => {});
-        }
+          },
+        }, null, 2);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/settings.json', agyOAuthSettings);
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.gemini/antigravity-cli/settings.json', agyOAuthSettings);
       }
 
       // Seed Claude credentials securely to /home/agent-runner
@@ -656,17 +678,25 @@ export class E2BSandboxProvider implements ISandboxProvider {
         : path.join(homedir, '.claude', '.credentials.json');
 
       if (fs.existsSync(hostClaudeCreds)) {
-        await sandbox.files.write('/home/agent-runner/.claude/.credentials.json', fs.readFileSync(hostClaudeCreds, 'utf8')).catch(() => {});
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.claude/.credentials.json', fs.readFileSync(hostClaudeCreds, 'utf8'));
       }
 
       // Seed Codex credentials securely to /home/agent-runner
-      const codexCredsPath = path.join(userProfileDir, '.codex', 'auth.json');
-      const hostCodexCreds = fs.existsSync(codexCredsPath)
-        ? codexCredsPath
-        : path.join(homedir, '.codex', 'auth.json');
+      const candidateCodexPaths = [
+        safeUid ? path.join(homedir, '.agent-user-profiles', safeUid, '.codex', 'auth.json') : '',
+        path.join(userProfileDir, '.codex', 'auth.json'),
+        path.join(homedir, '.codex', 'auth.json'),
+      ];
+      let hostCodexCreds = '';
+      for (const p of candidateCodexPaths) {
+        if (p && fs.existsSync(p)) {
+          hostCodexCreds = p;
+          break;
+        }
+      }
 
-      if (fs.existsSync(hostCodexCreds)) {
-        await sandbox.files.write('/home/agent-runner/.codex/auth.json', fs.readFileSync(hostCodexCreds, 'utf8')).catch(() => {});
+      if (hostCodexCreds) {
+        await this.writeAgentRunnerFile(sandbox, '/home/agent-runner/.codex/auth.json', fs.readFileSync(hostCodexCreds, 'utf8'));
       }
 
       // Lock down permissions: strictly chmod 700 for agent-runner so other users cannot access it
@@ -682,11 +712,14 @@ export class E2BSandboxProvider implements ISandboxProvider {
 
   public async syncCredentialsToUserSandboxes(userId?: string): Promise<void> {
     if (!userId || userId === 'default_user') return;
+    const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const targets: Sandbox[] = [];
     for (const [sbId, rec] of this.sandboxRecords.entries()) {
-      if (rec.userId === userId) {
-        const inst = this.activeSandboxes.get(sbId);
-        if (inst) targets.push(inst);
+      if (rec.userId === userId || rec.userId === safeUid) {
+        try {
+          const inst = await this.getSandboxInstance(sbId);
+          if (inst) targets.push(inst);
+        } catch {}
       }
     }
     await Promise.all(targets.map((sb) => this.syncCredentialsToSandbox(sb, userId).catch(() => {})));
@@ -896,12 +929,12 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       let modelFlag = '';
       let effortConfig = '';
       if (req.model && req.model !== 'auto' && req.model !== 'default') {
-        const effortMatch = req.model.match(/^(.*)-(high|medium|low)$/i);
+        const effortMatch = req.model.match(/^(.*)-(high|medium|low|xhigh|max)$/i);
         if (effortMatch) {
           const baseModel = effortMatch[1];
           const effort = effortMatch[2].toLowerCase();
           modelFlag = `-m "${baseModel}"`;
-          effortConfig = `-c model_reasoning_effort="${effort}"`;
+          effortConfig = `-c 'model_reasoning_effort="${effort}"'`;
         } else {
           modelFlag = `-m "${req.model}"`;
         }

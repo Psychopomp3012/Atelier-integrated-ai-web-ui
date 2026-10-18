@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import type { ModelType, UserProfile, GeminiQuotaStats, CodexQuotaStats, ModelOption } from '../types';
 import { getModelDisplayInfo } from '../types';
 import type { CliStatus } from '../services/cliAuth.service';
@@ -11,6 +12,18 @@ import {
   getCommandsForProvider,
   filterSlashCommands,
 } from '../utils/slashCommands';
+import {
+  currentUserAtom,
+  isAuthModalOpenAtom,
+  isInspectorOpenAtom,
+  cliStatusAtom,
+  selectedModelAtom,
+  availableModelsAtom,
+  geminiQuotaAtom,
+  codexQuotaAtom,
+  sandboxUsageAtom,
+  isGeneratingAtom,
+} from '../state';
 
 export interface AttachedFile {
   id: string;
@@ -27,8 +40,8 @@ interface PromptBarProps {
   onClearSession?: () => void;
   onOpenInspector?: () => void;
   onExportSession?: () => void;
-  selectedModel: ModelType;
-  onSelectModel: (model: ModelType) => void;
+  selectedModel?: ModelType;
+  onSelectModel?: (model: ModelType) => void;
   currentUser?: UserProfile | null;
   cliStatus?: CliStatus | null;
   isLoading?: boolean;
@@ -49,25 +62,47 @@ export const PromptBar: React.FC<PromptBarProps> = ({
   onSendMessage,
   onStopGeneration,
   onClearSession,
-  onOpenInspector,
+  onOpenInspector: propOnOpenInspector,
   onExportSession,
-  selectedModel,
-  onSelectModel,
-  currentUser,
-  cliStatus,
-  isLoading = false,
-  geminiQuota,
-  codexQuota,
-  availableModels,
+  selectedModel: propSelectedModel,
+  onSelectModel: propOnSelectModel,
+  currentUser: propCurrentUser,
+  cliStatus: propCliStatus,
+  isLoading: propIsLoading,
+  geminiQuota: propGeminiQuota,
+  codexQuota: propCodexQuota,
+  availableModels: propAvailableModels,
   activeSandbox,
-  sandboxUsage,
+  sandboxUsage: propSandboxUsage,
   onStartSandboxVM,
   onAttachExistingSandbox,
   isStartingSandbox = false,
   isAttachingSandbox = null,
   onRefreshModels,
-  onOpenAuthModal,
+  onOpenAuthModal: propOnOpenAuthModal,
 }) => {
+  const [atomSelectedModel, setAtomSelectedModel] = useAtom(selectedModelAtom);
+  const atomCurrentUser = useAtomValue(currentUserAtom);
+  const atomCliStatus = useAtomValue(cliStatusAtom);
+  const atomIsLoading = useAtomValue(isGeneratingAtom);
+  const atomGeminiQuota = useAtomValue(geminiQuotaAtom);
+  const atomCodexQuota = useAtomValue(codexQuotaAtom);
+  const atomAvailableModels = useAtomValue(availableModelsAtom);
+  const atomSandboxUsage = useAtomValue(sandboxUsageAtom);
+  const setIsInspectorOpen = useSetAtom(isInspectorOpenAtom);
+  const setIsAuthModalOpen = useSetAtom(isAuthModalOpenAtom);
+
+  const selectedModel = propSelectedModel ?? atomSelectedModel;
+  const onSelectModel = propOnSelectModel ?? setAtomSelectedModel;
+  const currentUser = propCurrentUser !== undefined ? propCurrentUser : atomCurrentUser;
+  const cliStatus = propCliStatus !== undefined ? propCliStatus : atomCliStatus;
+  const isLoading = propIsLoading !== undefined ? propIsLoading : atomIsLoading;
+  const geminiQuota = propGeminiQuota !== undefined ? propGeminiQuota : atomGeminiQuota;
+  const codexQuota = propCodexQuota !== undefined ? propCodexQuota : atomCodexQuota;
+  const availableModels = (propAvailableModels && propAvailableModels.length > 0) ? propAvailableModels : atomAvailableModels;
+  const sandboxUsage = propSandboxUsage !== undefined ? propSandboxUsage : atomSandboxUsage;
+  const onOpenInspector = propOnOpenInspector ?? (() => setIsInspectorOpen(true));
+  const onOpenAuthModal = propOnOpenAuthModal ?? (() => setIsAuthModalOpen(true));
   const [prompt, setPrompt] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [isListening, setIsListening] = useState(false);

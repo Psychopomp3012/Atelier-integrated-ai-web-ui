@@ -16,8 +16,9 @@ export async function apiFetch(
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  return fetch(`${API_BASE_URL}${cleanEndpoint}`, {
+  return await fetch(`${API_BASE_URL}${cleanEndpoint}`, {
     ...options,
     headers,
   });
 }
+

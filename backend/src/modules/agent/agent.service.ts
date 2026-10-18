@@ -96,6 +96,7 @@ function getModelVisuals(modelId: string, modelName: string): {
 
 export class AgentService {
   private readonly sandboxModelsCache: Map<string, { models: DynamicModelOption[]; timestamp: number }> = new Map();
+  private readonly inFlightModelDiscovery: Map<string, Promise<DynamicModelOption[]>> = new Map();
   private antigravityModelIds: Set<string> = new Set();
   private codexModelIds: Set<string> = new Set();
 
@@ -457,11 +458,25 @@ export class AgentService {
       return cached.models;
     }
 
-    const models = await this.fetchDynamicModelsFromCli(sandboxId, userId, sessionId);
-    if (models.length > 0) {
-      this.sandboxModelsCache.set(sandboxId, { models, timestamp: Date.now() });
+    const existingPromise = this.inFlightModelDiscovery.get(sandboxId);
+    if (existingPromise) {
+      return existingPromise;
     }
-    return models;
+
+    const discoveryPromise = (async () => {
+      try {
+        const models = await this.fetchDynamicModelsFromCli(sandboxId, userId, sessionId);
+        if (models.length > 0) {
+          this.sandboxModelsCache.set(sandboxId, { models, timestamp: Date.now() });
+        }
+        return models;
+      } finally {
+        this.inFlightModelDiscovery.delete(sandboxId);
+      }
+    })();
+
+    this.inFlightModelDiscovery.set(sandboxId, discoveryPromise);
+    return discoveryPromise;
   }
 
   private extractCodeBlocks(text: string): CodeArtifactFile[] {
@@ -540,8 +555,17 @@ export class AgentService {
       });
     }
 
-    const isSandboxActive = sessionId ? sandboxService.hasActiveSandbox(sessionId, userId) : false;
-    const activeSandboxId = sandboxId || (sessionId ? (sandboxService.getActiveSandboxId(sessionId, userId) || sessionId) : undefined);
+    let activeSandboxId = sandboxId || (sessionId ? (sandboxService.getActiveSandboxId(sessionId, userId) || sessionId) : undefined);
+    if (!activeSandboxId && userId) {
+      const usage = sandboxService.getSandboxUsage(userId);
+      if (usage.sandboxes && usage.sandboxes.length > 0) {
+        activeSandboxId = usage.sandboxes[0].sandboxId;
+      }
+    }
+    if (activeSandboxId && sessionId && !sandboxService.hasActiveSandbox(sessionId, userId)) {
+      sandboxService.attachSessionToSandbox(sessionId, activeSandboxId);
+    }
+    const isSandboxActive = Boolean(activeSandboxId && (sessionId ? sandboxService.hasActiveSandbox(sessionId, userId) : true));
     const sandboxFiles = isSandboxActive && sessionId ? await sandboxService.listFiles(sessionId, userId).catch(() => []) : [];
     const fileListStr =
       sandboxFiles.length > 0
@@ -566,7 +590,7 @@ export class AgentService {
 
         // Intelligently default to whichever subscription CLI is linked in the sandbox
         if (modelUsed === 'auto' || modelUsed === 'default') {
-          if (cliAuthService.isCodexLinked()) {
+          if (cliAuthService.isCodexLinked(userId)) {
             targetCli = 'codex';
           } else if (cliAuthService.isClaudeLinked()) {
             targetCli = 'claude';
@@ -684,19 +708,25 @@ export class AgentService {
     const user = authSession?.user;
     const userName = user?.name ? user.name.split(' ')[0] : 'there';
     const isGoogleAuth = Boolean(user && (user.primaryPlatform === 'google' || user.email));
+    const linkedPlatforms = Array.isArray(user?.linkedPlatforms)
+      ? user.linkedPlatforms
+      : typeof user?.linkedPlatforms === 'object' && user?.linkedPlatforms !== null
+      ? Object.values(user.linkedPlatforms).filter((p: any) => Boolean(p && typeof p === 'object' && 'platform' in p))
+      : [];
+
     const isClaudeLinked = Boolean(
       cliAuthService.isClaudeLinked() ||
-      user?.linkedPlatforms?.some((p) => (p.platform === 'claude_subscription' || p.platform === 'anthropic') && p.hasValidSession)
+      linkedPlatforms.some((p: any) => (p.platform === 'claude_subscription' || p.platform === 'anthropic') && p.hasValidSession)
     );
     const isCodexLinked = Boolean(
-      cliAuthService.isCodexLinked() ||
-      user?.linkedPlatforms?.some((p) => (p.platform === 'codex_subscription' || p.platform === 'openai') && p.hasValidSession)
+      cliAuthService.isCodexLinked(user?.id) ||
+      linkedPlatforms.some((p: any) => (p.platform === 'codex_subscription' || p.platform === 'openai') && p.hasValidSession)
     );
 
     logger.info('Executing agent prompt', {
       sessionId,
       selectedModel: modelUsed,
-      user: user?.email || 'anonymous',
+      user: user?.email || user?.id || 'unauthenticated',
       isGoogleAuth,
       isClaudeLinked,
       isCodexLinked,
@@ -886,6 +916,7 @@ export class AgentService {
       if (liveResult.usage) {
         const turnData = {
           sessionId,
+          userId,
           userEmail: user?.email,
           model: modelUsed,
           promptTokens: liveResult.usage.input_tokens,

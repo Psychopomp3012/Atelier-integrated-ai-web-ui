@@ -1,12 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import type { ModelType, ModelProvider, UserProfile, ModelOption, GeminiQuotaStats, CodexQuotaStats, QuotaGroup } from '../types';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
+import type { ModelType, ModelProvider, UserProfile, ModelOption, GeminiQuotaStats, CodexQuotaStats, QuotaGroup, LinkedAIPlatformAccount } from '../types';
 import { AVAILABLE_MODELS, getModelDisplayInfo, getMinimumEffortModelId } from '../types';
-import {
-  fetchCliStatus,
-  type CliStatus,
-} from '../services/cliAuth.service';
+import type { CliStatus } from '../services/cliAuth.service';
 import { checkModelQuotaExhausted } from '../utils/quota.util';
+import {
+  currentUserAtom,
+  cliStatusAtom,
+  selectedModelAtom,
+  availableModelsAtom,
+  geminiQuotaAtom,
+  codexQuotaAtom,
+  sandboxUsageAtom,
+  isAuthModalOpenAtom,
+} from '../state';
 
 interface SandboxUsageData {
   used: number;
@@ -21,8 +29,8 @@ interface SandboxUsageData {
 }
 
 interface ModelSelectorDropdownProps {
-  selectedModel: ModelType;
-  onSelectModel: (model: ModelType) => void;
+  selectedModel?: ModelType;
+  onSelectModel?: (model: ModelType) => void;
   currentUser?: UserProfile | null;
   cliStatus?: CliStatus | null;
   disabled?: boolean;
@@ -91,41 +99,55 @@ const getShortModelName = (name: string): string => {
 };
 
 export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
-  selectedModel,
-  onSelectModel,
-  currentUser,
+  selectedModel: propSelectedModel,
+  onSelectModel: propOnSelectModel,
+  currentUser: propCurrentUser,
   cliStatus: cliStatusProp,
   disabled = false,
-  geminiQuota,
-  codexQuota,
-  availableModels = AVAILABLE_MODELS,
-  onOpenAuthModal,
+  geminiQuota: propGeminiQuota,
+  codexQuota: propCodexQuota,
+  availableModels: propAvailableModels,
+  onOpenAuthModal: propOnOpenAuthModal,
   activeSandbox,
-  sandboxUsage,
+  sandboxUsage: propSandboxUsage,
   onStartSandboxVM,
   onAttachExistingSandbox,
   isStartingSandbox = false,
   isAttachingSandbox = null,
   onRefreshModels,
 }) => {
+  const [atomSelectedModel, setAtomSelectedModel] = useAtom(selectedModelAtom);
+  const atomCurrentUser = useAtomValue(currentUserAtom);
+  const atomCliStatus = useAtomValue(cliStatusAtom);
+  const atomAvailableModels = useAtomValue(availableModelsAtom);
+  const atomGeminiQuota = useAtomValue(geminiQuotaAtom);
+  const atomCodexQuota = useAtomValue(codexQuotaAtom);
+  const atomSandboxUsage = useAtomValue(sandboxUsageAtom);
+  const setIsAuthModalOpen = useSetAtom(isAuthModalOpenAtom);
+
+  const selectedModel = propSelectedModel ?? atomSelectedModel;
+  const onSelectModel = propOnSelectModel ?? setAtomSelectedModel;
+  const currentUser = propCurrentUser !== undefined ? propCurrentUser : atomCurrentUser;
+  const activeCliStatus = cliStatusProp || atomCliStatus;
+  const geminiQuota = propGeminiQuota !== undefined ? propGeminiQuota : atomGeminiQuota;
+  const codexQuota = propCodexQuota !== undefined ? propCodexQuota : atomCodexQuota;
+  const availableModels = (propAvailableModels && propAvailableModels.length > 0)
+    ? propAvailableModels
+    : (atomAvailableModels.length > 0 ? atomAvailableModels : AVAILABLE_MODELS);
+  const sandboxUsage = propSandboxUsage !== undefined ? propSandboxUsage : atomSandboxUsage;
+  const onOpenAuthModal = propOnOpenAuthModal ?? (() => setIsAuthModalOpen(true));
+
   const [isOpen, setIsOpen] = useState(false);
   const [hoveredProvider, setHoveredProvider] = useState<ModelProvider | null>(null);
   const [hoveredModel, setHoveredModel] = useState<ModelOption | null>(null);
   const [hoveredModelTop, setHoveredModelTop] = useState<number>(0);
-  const [internalCliStatus, setInternalCliStatus] = useState<CliStatus | null>(null);
   const [isMobile, setIsMobile] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const column2Ref = useRef<HTMLDivElement>(null);
   const effortFlyoutRef = useRef<HTMLDivElement>(null);
   const mobileModalRef = useRef<HTMLDivElement>(null);
 
-  const activeCliStatus = cliStatusProp || internalCliStatus;
-
   useEffect(() => {
-    if (!cliStatusProp) {
-      fetchCliStatus().then(setInternalCliStatus);
-    }
-
     const checkMobile = () => {
       setIsMobile(window.innerWidth < 640);
     };
@@ -143,12 +165,20 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
     if (provider === 'gemini') {
       return Boolean(activeCliStatus?.antigravity?.linked || activeCliStatus?.gemini?.linked);
     }
+    const linkedPlatforms = Array.isArray(currentUser?.linkedPlatforms)
+      ? currentUser.linkedPlatforms
+      : (currentUser?.linkedPlatforms && typeof currentUser.linkedPlatforms === 'object')
+      ? Object.values(currentUser.linkedPlatforms).filter(
+          (p: any): p is LinkedAIPlatformAccount => Boolean(p && typeof p === 'object' && 'platform' in p)
+        )
+      : [];
+
     if (provider === 'claude') {
       const isCliSubscription = Boolean(
         activeCliStatus?.claude?.linked && activeCliStatus?.claude?.authMethod !== 'api_key'
       );
       const isAccountSubscription = Boolean(
-        currentUser?.linkedPlatforms?.some(
+        linkedPlatforms.some(
           (p) => p.platform === 'claude_subscription' && p.hasValidSession
         )
       );
@@ -157,7 +187,7 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
     if (provider === 'codex') {
       return Boolean(
         activeCliStatus?.codex?.linked ||
-        currentUser?.linkedPlatforms?.some(
+        linkedPlatforms.some(
           (p) => (p.platform === 'codex_subscription' || p.platform === 'openai') && p.hasValidSession
         )
       );

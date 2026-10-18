@@ -1,10 +1,12 @@
 import React from 'react';
+import { useAtomValue } from 'jotai';
 import type { ChatSession } from '../types';
 import { AtelierLogo } from './AtelierLogo';
+import { sessionsAtom, currentSessionIdAtom } from '../state';
 
 interface SidebarProps {
-  sessions: ChatSession[];
-  currentSessionId: string | null;
+  sessions?: ChatSession[];
+  currentSessionId?: string | null;
   onSelectSession: (id: string) => void;
   onDeleteSession?: (id: string) => void;
   onNewSession: () => void;
@@ -15,8 +17,8 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
-  sessions,
-  currentSessionId,
+  sessions: propSessions,
+  currentSessionId: propCurrentSessionId,
   onSelectSession,
   onDeleteSession,
   onNewSession,
@@ -25,6 +27,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isSyncing = false,
   onRefreshSessions,
 }) => {
+  const atomSessions = useAtomValue(sessionsAtom);
+  const atomCurrentSessionId = useAtomValue(currentSessionIdAtom);
+
+  const sessions = propSessions !== undefined ? propSessions : atomSessions;
+  const currentSessionId = propCurrentSessionId !== undefined ? propCurrentSessionId : atomCurrentSessionId;
   return (
     <>
       {/* Mobile Backdrop */}
@@ -203,7 +210,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               Atelier Studio
             </span>
             <div className="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/25 text-primary text-[10px] font-mono font-semibold tracking-wider shadow-[0_0_8px_rgba(99,102,241,0.15)] group-hover:shadow-[0_0_12px_rgba(99,102,241,0.3)] transition-all">
-              v0.0.5
+              v0.0.6
             </div>
           </div>
         </div>

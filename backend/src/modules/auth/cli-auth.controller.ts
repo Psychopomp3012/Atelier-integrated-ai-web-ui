@@ -5,6 +5,7 @@ import { createSuccessResponse } from '../../utils/response.util.js';
 import { logger } from '../../utils/logger.util.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { tokenUtil } from '../../utils/token.util.js';
+import { antigravityQuotaService } from '../quota/antigravity-quota.service.js';
 
 export class CliAuthController {
   public async getStatus(req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -91,13 +92,15 @@ export class CliAuthController {
       logger.warn('[Antigravity Auth] Code submission rejected: missing code in request payload');
       return reply.status(400).send({ success: false, error: { message: 'Authorization code is required' } });
     }
-    const result = await cliAuthService.submitAntigravityCliCode(body.code);
+    const userId = await this.getUserIdFromReq(req);
+    const email = await this.getUserEmailFromReq(req);
+    const result = await cliAuthService.submitAntigravityCliCode(body.code, userId, email);
     if (result.success) {
-      const userId = await this.getUserIdFromReq(req);
-      const email = await this.getUserEmailFromReq(req);
       if (userId) {
         cliAuthService.linkUserCli(userId, 'antigravity', email);
-        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+        await sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+        antigravityQuotaService.invalidateUserQuota(userId);
+        if (email) antigravityQuotaService.invalidateUserQuota(email);
       }
       return reply.status(200).send(createSuccessResponse({ success: true }));
     }
@@ -618,14 +621,14 @@ export class CliAuthController {
       window.open(authUrl, '_blank');
     }
 
-    // Live poll status until approved
-    const pollTimer = setInterval(async () => {
+    async function checkApproval() {
       try {
         const res = await fetch('/api/v1/auth/cli/status');
         if (!res.ok) return;
         const data = await res.json();
         if (data.data?.codex?.linked) {
-          clearInterval(pollTimer);
+          if (pollTimer) clearInterval(pollTimer);
+          window.removeEventListener('focus', checkApproval);
           const statusBox = document.getElementById('status-box');
           statusBox.innerHTML = '<span class="success">✓ Codex CLI Successfully Linked! Closing...</span>';
           if (window.opener) {
@@ -639,7 +642,20 @@ export class CliAuthController {
           }, 1500);
         }
       } catch (err) {}
-    }, 1500);
+    }
+
+    // Check immediately when user switches focus back to this window
+    window.addEventListener('focus', checkApproval);
+    let attempts = 0;
+    const pollTimer = setInterval(() => {
+      attempts++;
+      if (attempts > 15) {
+        clearInterval(pollTimer);
+        window.removeEventListener('focus', checkApproval);
+        return;
+      }
+      checkApproval();
+    }, 8000);
   </script>
 </body>
 </html>`;

@@ -4,13 +4,14 @@ export interface JwtPayload {
   sub: string;
   email?: string;
   name?: string;
+  avatarUrl?: string;
   iat: number;
   exp: number;
 }
 
 export interface TokenGenerator {
-  generateSessionToken(payload?: { userId: string; email?: string; name?: string }): string;
-  generateJwt(payload: { userId: string; email?: string; name?: string }, expiresInDays?: number): string;
+  generateSessionToken(payload?: { userId: string; email?: string; name?: string; avatarUrl?: string }): string;
+  generateJwt(payload: { userId: string; email?: string; name?: string; avatarUrl?: string }, expiresInDays?: number): string;
   verifyJwt(token: string): { valid: boolean; payload?: JwtPayload; error?: string };
   generateStateToken(): string;
   isTokenValid(token: string): boolean;
@@ -35,7 +36,7 @@ function base64UrlDecode(str: string): string {
 }
 
 export const tokenUtil: TokenGenerator = {
-  generateJwt(payload: { userId: string; email?: string; name?: string }, expiresInDays = 7): string {
+  generateJwt(payload: { userId: string; email?: string; name?: string; avatarUrl?: string }, expiresInDays = 7): string {
     const header = { alg: 'HS256', typ: 'JWT' };
     const now = Math.floor(Date.now() / 1000);
     const exp = now + expiresInDays * 24 * 60 * 60; // 7 days (1 week)
@@ -44,6 +45,7 @@ export const tokenUtil: TokenGenerator = {
       sub: payload.userId,
       email: payload.email,
       name: payload.name,
+      avatarUrl: payload.avatarUrl,
       iat: now,
       exp,
     };
@@ -59,11 +61,12 @@ export const tokenUtil: TokenGenerator = {
     return `${dataToSign}.${signature}`;
   },
 
-  generateSessionToken(payload?: { userId: string; email?: string; name?: string }): string {
+  generateSessionToken(payload?: { userId: string; email?: string; name?: string; avatarUrl?: string }): string {
     return this.generateJwt({
       userId: payload?.userId || `usr_${Date.now()}`,
       email: payload?.email,
       name: payload?.name,
+      avatarUrl: payload?.avatarUrl,
     }, 7);
   },
 

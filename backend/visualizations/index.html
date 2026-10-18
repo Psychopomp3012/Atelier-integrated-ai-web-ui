@@ -274,6 +274,7 @@
       <div class="segmented-group">
         <button id="tabArch" class="seg-btn active" onclick="switchTab('arch')">Architecture</button>
         <button id="tabFlow" class="seg-btn" onclick="switchTab('flow')">User Flow</button>
+        <button id="tabCodex" class="seg-btn" onclick="switchTab('codex')">Codex Auth Flow</button>
       </div>
 
       <!-- VIEW MODE -->
@@ -352,6 +353,32 @@
         </div>
       </div>
     </div>
+
+    <!-- CODEX AUTH CARD -->
+    <div id="codex-card" class="diagram-card">
+      <div class="diagram-header">
+        <div>
+          <h2>Codex Multi-Tenant Headless Device Auth Flow</h2>
+          <p>Per-user isolated CODEX_HOME, @openai/codex device-auth handshake, token persistence, and E2B microVM sync.</p>
+        </div>
+        <div class="hint-chip">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>
+          Scroll wheel to zoom &bull; Click and drag to pan
+        </div>
+      </div>
+
+      <div class="canvas-viewport" id="viewport-codex">
+        <div class="pan-container" id="container-codex">
+          <img src="codex-auth-flow.svg" alt="Codex Auth Flow Diagram" id="img-codex">
+        </div>
+        <div class="viewport-overlay-controls">
+          <button class="icon-btn" onclick="zoom('codex', -0.15)" title="Zoom Out">&minus;</button>
+          <span class="zoom-badge" id="zoom-codex-badge">100%</span>
+          <button class="icon-btn" onclick="zoom('codex', 0.15)" title="Zoom In">&plus;</button>
+          <button class="icon-btn" onclick="resetZoom('codex')" title="Reset Zoom">&#8635;</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <script>
@@ -360,7 +387,8 @@
 
     const states = {
       arch: { scale: 1, panX: 0, panY: 0, isPanning: false, startX: 0, startY: 0 },
-      flow: { scale: 1, panX: 0, panY: 0, isPanning: false, startX: 0, startY: 0 }
+      flow: { scale: 1, panX: 0, panY: 0, isPanning: false, startX: 0, startY: 0 },
+      codex: { scale: 1, panX: 0, panY: 0, isPanning: false, startX: 0, startY: 0 }
     };
 
     function updateTransform(id) {
@@ -393,27 +421,38 @@
 
     function switchTab(tab) {
       activeTab = tab;
-      const archCard = document.getElementById('arch-card');
-      const flowCard = document.getElementById('flow-card');
-      const tabArch = document.getElementById('tabArch');
-      const tabFlow = document.getElementById('tabFlow');
+      const cards = {
+        arch: document.getElementById('arch-card'),
+        flow: document.getElementById('flow-card'),
+        codex: document.getElementById('codex-card')
+      };
+      const tabs = {
+        arch: document.getElementById('tabArch'),
+        flow: document.getElementById('tabFlow'),
+        codex: document.getElementById('tabCodex')
+      };
       const downloadSvg = document.getElementById('downloadSvg');
       const downloadPng = document.getElementById('downloadPng');
 
+      for (const key of ['arch', 'flow', 'codex']) {
+        if (key === tab) {
+          cards[key].classList.add('active');
+          tabs[key].classList.add('active');
+        } else {
+          cards[key].classList.remove('active');
+          tabs[key].classList.remove('active');
+        }
+      }
+
       if (tab === 'arch') {
-        archCard.classList.add('active');
-        flowCard.classList.remove('active');
-        tabArch.classList.add('active');
-        tabFlow.classList.remove('active');
         downloadSvg.href = 'architecture-diagram.svg';
         downloadPng.href = 'architecture-diagram.png';
-      } else {
-        archCard.classList.remove('active');
-        flowCard.classList.add('active');
-        tabArch.classList.remove('active');
-        tabFlow.classList.add('active');
+      } else if (tab === 'flow') {
         downloadSvg.href = 'user-flow-diagram.svg';
         downloadPng.href = 'user-flow-diagram.png';
+      } else {
+        downloadSvg.href = 'codex-auth-flow.svg';
+        downloadPng.href = 'codex-auth-flow.png';
       }
       updateTransform(tab);
     }
@@ -422,26 +461,28 @@
       currentMode = mode;
       const btnFit = document.getElementById('modeFit');
       const btnScroll = document.getElementById('modeScroll');
-      const vpArch = document.getElementById('viewport-arch');
-      const vpFlow = document.getElementById('viewport-flow');
+      const viewports = [
+        document.getElementById('viewport-arch'),
+        document.getElementById('viewport-flow'),
+        document.getElementById('viewport-codex')
+      ];
 
       if (mode === 'fit') {
         btnFit.classList.add('active');
         btnScroll.classList.remove('active');
-        vpArch.classList.remove('scroll-mode');
-        vpFlow.classList.remove('scroll-mode');
+        viewports.forEach(vp => vp.classList.remove('scroll-mode'));
         updateTransform('arch');
         updateTransform('flow');
+        updateTransform('codex');
       } else {
         btnFit.classList.remove('active');
         btnScroll.classList.add('active');
-        vpArch.classList.add('scroll-mode');
-        vpFlow.classList.add('scroll-mode');
+        viewports.forEach(vp => vp.classList.add('scroll-mode'));
       }
     }
 
-    // Set up Pan & Wheel interaction for both viewports
-    ['arch', 'flow'].forEach(id => {
+    // Set up Pan & Wheel interaction for all viewports
+    ['arch', 'flow', 'codex'].forEach(id => {
       const vp = document.getElementById('viewport-' + id);
       const s = states[id];
 
@@ -486,11 +527,13 @@
       setViewMode('fit');
       updateTransform('arch');
       updateTransform('flow');
+      updateTransform('codex');
     });
     // In case DOM is already loaded
     setViewMode('fit');
     updateTransform('arch');
     updateTransform('flow');
+    updateTransform('codex');
   </script>
 </body>
 </html>

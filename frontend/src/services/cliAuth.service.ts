@@ -49,11 +49,20 @@ export function invalidateCliStatusCache(): void {
 }
 
 export async function fetchCliStatus(force = false): Promise<CliStatus> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+  if (!token) {
+    return {
+      antigravity: { linked: false },
+      gemini: { linked: false },
+      claude: { linked: false },
+      codex: { linked: false },
+    };
+  }
   const now = Date.now();
   if (!force && lastCliStatus && now - lastCliStatusFetchTime < CLI_STATUS_CACHE_TTL) {
     return lastCliStatus;
   }
-  if (!force && inFlightCliStatusPromise) {
+  if (inFlightCliStatusPromise) {
     return inFlightCliStatusPromise;
   }
 
@@ -263,43 +272,35 @@ export function openClaudeCliLoginPopup(
     );
 
     let resolved = false;
+    let checkTimer: ReturnType<typeof setInterval> | null = null;
 
     const messageHandler = (event: MessageEvent) => {
       if (event.data?.type === 'CLAUDE_CLI_AUTH_SUCCESS') {
         resolved = true;
         window.removeEventListener('message', messageHandler);
-        clearInterval(pollTimer);
+        if (checkTimer) clearInterval(checkTimer);
         resolve({ success: true, email: event.data.email });
       }
     };
 
     window.addEventListener('message', messageHandler);
 
-    const pollTimer = setInterval(() => {
-      fetchCliStatus().then((status) => {
-        if (status.claude?.linked) {
-          resolved = true;
-          clearInterval(pollTimer);
-          window.removeEventListener('message', messageHandler);
-          try {
-            if (popup && !popup.closed) popup.close();
-          } catch {}
-          resolve({ success: true, email: status.claude.email });
-        } else if (!popup || popup.closed) {
-          clearInterval(pollTimer);
-          window.removeEventListener('message', messageHandler);
-          if (!resolved) {
-            fetchCliStatus().then((finalStatus) => {
-              if (finalStatus.claude?.linked) {
-                resolve({ success: true, email: finalStatus.claude.email });
-              } else {
-                resolve({ success: false });
-              }
-            });
-          }
+    // Detect popup closure without constantly polling the backend
+    checkTimer = setInterval(() => {
+      if (!popup || popup.closed) {
+        if (checkTimer) clearInterval(checkTimer);
+        window.removeEventListener('message', messageHandler);
+        if (!resolved) {
+          fetchCliStatus().then((finalStatus) => {
+            if (finalStatus.claude?.linked) {
+              resolve({ success: true, email: finalStatus.claude.email });
+            } else {
+              resolve({ success: false });
+            }
+          });
         }
-      });
-    }, 1200);
+      }
+    }, 1500);
   });
 }
 
@@ -359,12 +360,13 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
     );
 
     let resolved = false;
+    let checkTimer: ReturnType<typeof setInterval> | null = null;
 
     const messageHandler = (event: MessageEvent) => {
       if (event.data?.type === 'CODEX_CLI_AUTH_SUCCESS') {
         resolved = true;
         window.removeEventListener('message', messageHandler);
-        clearInterval(pollTimer);
+        if (checkTimer) clearInterval(checkTimer);
         invalidateCliStatusCache();
         resolve({ success: true, email: event.data.email });
       }
@@ -372,31 +374,22 @@ export function openCodexCliLoginPopup(): Promise<{ success: boolean; email?: st
 
     window.addEventListener('message', messageHandler);
 
-    const pollTimer = setInterval(() => {
-      fetchCliStatus(true).then((status) => {
-        if (status.codex?.linked) {
-          resolved = true;
-          clearInterval(pollTimer);
-          window.removeEventListener('message', messageHandler);
-          try {
-            if (popup && !popup.closed) popup.close();
-          } catch {}
-          resolve({ success: true, email: status.codex.email });
-        } else if (!popup || popup.closed) {
-          clearInterval(pollTimer);
-          window.removeEventListener('message', messageHandler);
-          if (!resolved) {
-            fetchCliStatus(true).then((finalStatus) => {
-              if (finalStatus.codex?.linked) {
-                resolve({ success: true, email: finalStatus.codex.email });
-              } else {
-                resolve({ success: false });
-              }
-            });
-          }
+    // Detect popup closure without constantly polling the backend
+    checkTimer = setInterval(() => {
+      if (!popup || popup.closed) {
+        if (checkTimer) clearInterval(checkTimer);
+        window.removeEventListener('message', messageHandler);
+        if (!resolved) {
+          fetchCliStatus(true).then((finalStatus) => {
+            if (finalStatus.codex?.linked) {
+              resolve({ success: true, email: finalStatus.codex.email });
+            } else {
+              resolve({ success: false });
+            }
+          });
         }
-      });
-    }, 1200);
+      }
+    }, 1500);
   });
 }
 

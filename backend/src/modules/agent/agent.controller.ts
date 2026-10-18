@@ -6,6 +6,7 @@ import { createSuccessResponse, createErrorResponse } from '../../utils/response
 import { tokenUtil } from '../../utils/token.util.js';
 import { authService } from '../auth/auth.service.js';
 import { AppError } from '../../utils/error.util.js';
+import { logger } from '../../utils/logger.util.js';
 
 export class AgentController {
   private getClientKey(req: FastifyRequest): string {
@@ -102,15 +103,24 @@ export class AgentController {
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
 
-    const result = await agentService.executePrompt(parseResult.data, token);
+    try {
+      const result = await agentService.executePrompt(parseResult.data, token);
 
-    return reply.status(200).send(
-      createSuccessResponse(result, undefined, {
-        limit: rateStatus.limit,
-        remaining: rateStatus.remaining,
-        resetInSeconds: rateStatus.resetInSeconds,
-      })
-    );
+      return reply.status(200).send(
+        createSuccessResponse(result, undefined, {
+          limit: rateStatus.limit,
+          remaining: rateStatus.remaining,
+          resetInSeconds: rateStatus.resetInSeconds,
+        })
+      );
+    } catch (err: any) {
+      logger.error('Prompt execution failed', err, {
+        sessionId: parseResult.data.sessionId,
+        selectedModel: parseResult.data.selectedModel,
+        promptPreview: parseResult.data.prompt.slice(0, 50),
+      });
+      throw err;
+    }
   }
 
   public async executePromptStream(req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -184,6 +194,13 @@ export class AgentController {
         }
       });
     } catch (err: any) {
+      logger.error('Prompt streaming execution failed', err, {
+        sessionId: parseResult?.data?.sessionId,
+        selectedModel: parseResult?.data?.selectedModel,
+        promptPreview: parseResult?.data?.prompt?.slice(0, 50),
+        errorMessage: err?.message,
+        stack: err?.stack,
+      });
       if (!reply.raw.destroyed && !reply.raw.writableEnded) {
         sendEvent('error', { message: err?.message || 'Streaming failed' });
       }

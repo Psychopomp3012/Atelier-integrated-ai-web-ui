@@ -47,9 +47,16 @@ export const sessionSyncService = {
       onProgress(localSessions);
     }
 
-    // 2. Fetch authenticated user sessions from backend API
+    // 2. Fetch authenticated user sessions from backend API with 5s timeout
     try {
-      const res = await apiFetch('/api/v1/sessions');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      let res: Response;
+      try {
+        res = await apiFetch('/api/v1/sessions', { signal: controller.signal });
+      } finally {
+        clearTimeout(timeoutId);
+      }
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.data)) {
@@ -114,7 +121,16 @@ export const sessionSyncService = {
       if (options?.beforeId) params.append('beforeId', options.beforeId);
       if (options?.all) params.append('all', 'true');
 
-      const res = await apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}?${params.toString()}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      let res: Response;
+      try {
+        res = await apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}?${params.toString()}`, {
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.data) {

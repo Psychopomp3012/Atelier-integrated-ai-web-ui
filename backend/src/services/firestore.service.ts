@@ -18,7 +18,7 @@ export interface UserProfileData {
   email?: string;
   avatarUrl?: string;
   primaryPlatform?: string;
-  linkedPlatforms?: Record<string, any>;
+  linkedPlatforms?: any[];
   updatedAt?: string;
   lastLoginAt?: string;
 }
@@ -303,15 +303,46 @@ export class FirestoreBackendService {
     return cleanSession;
   }
 
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs = 6000, fallback: T): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<T>((resolve) => {
+      timer = setTimeout(() => {
+        logger.warn(`Firestore operation timed out after ${timeoutMs}ms, falling back safely`);
+        resolve(fallback);
+      }, timeoutMs);
+    });
+    try {
+      const result = await Promise.race([promise, timeoutPromise]);
+      if (timer) clearTimeout(timer);
+      return result;
+    } catch (err) {
+      if (timer) clearTimeout(timer);
+      throw err;
+    }
+  }
+
+  private inFlightUserSessions = new Map<string, Promise<ChatSession[]>>();
+  private lastSessionsLog = new Map<string, { count: number; timestamp: number }>();
+
   public async getUserSessions(
     userId: string,
     options?: { includeAllMessages?: boolean }
   ): Promise<ChatSession[]> {
-    if (this.isAvailable && this.db) {
+    if (!this.isAvailable || !this.db || !userId) {
+      return [];
+    }
+
+    const inFlightKey = `${userId}:${!!options?.includeAllMessages}`;
+    const existing = this.inFlightUserSessions.get(inFlightKey);
+    if (existing) {
+      return existing;
+    }
+
+    const promise = (async () => {
       try {
-        const sessionsRef = this.db.collection('users').doc(userId).collection('sessions');
-        const snapshot = await sessionsRef.limit(50).get();
-        if (!snapshot.empty) {
+        const sessionsRef = this.db!.collection('users').doc(userId).collection('sessions');
+        const snapshot = await this.withTimeout(sessionsRef.limit(50).get(), 6000, null);
+        if (snapshot && !snapshot.empty) {
           const sessions: ChatSession[] = [];
           snapshot.forEach((doc: QueryDocumentSnapshot) => {
             const data = doc.data();
@@ -330,15 +361,24 @@ export class FirestoreBackendService {
           sessions.sort(
             (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
           );
-          logger.info(`Loaded ${sessions.length} sessions from Firebase for user ${userId}`);
+          const lastLog = this.lastSessionsLog.get(userId);
+          const now = Date.now();
+          if (!lastLog || lastLog.count !== sessions.length || now - lastLog.timestamp > 15_000) {
+            this.lastSessionsLog.set(userId, { count: sessions.length, timestamp: now });
+            logger.info(`Loaded ${sessions.length} sessions from Firebase for user ${userId}`);
+          }
           return sessions;
         }
       } catch (err) {
         logger.warn('Failed to read sessions from Firebase Firestore', { error: String(err) });
+      } finally {
+        this.inFlightUserSessions.delete(inFlightKey);
       }
-    }
+      return [];
+    })();
 
-    return [];
+    this.inFlightUserSessions.set(inFlightKey, promise);
+    return promise;
   }
 
   public async getSessionById(
@@ -351,8 +391,8 @@ export class FirestoreBackendService {
     if (this.isAvailable && this.db) {
       try {
         const docRef = this.db.collection('users').doc(userId).collection('sessions').doc(sessionId);
-        const docSnap = await docRef.get();
-        if (docSnap.exists) {
+        const docSnap = await this.withTimeout(docRef.get(), 6000, null);
+        if (docSnap && docSnap.exists) {
           const data = docSnap.data()!;
           rawSession = {
             id: data.id || docSnap.id,
@@ -428,9 +468,18 @@ export class FirestoreBackendService {
     if (this.isAvailable && this.db) {
       try {
         const userRef = this.db.collection('users').doc(user.id);
+        const linkedPlatforms = Array.isArray(user.linkedPlatforms)
+          ? user.linkedPlatforms
+          : typeof user.linkedPlatforms === 'object' && user.linkedPlatforms !== null
+          ? Object.values(user.linkedPlatforms).filter(
+              (p: any) => Boolean(p && typeof p === 'object' && 'platform' in p)
+            )
+          : [];
+
         await userRef.set(
           {
             ...user,
+            linkedPlatforms,
             updatedAt: FieldValue.serverTimestamp(),
           },
           { merge: true }
@@ -448,7 +497,20 @@ export class FirestoreBackendService {
         const userRef = this.db.collection('users').doc(userId);
         const snap = await userRef.get();
         if (snap.exists) {
-          return snap.data() as UserProfileData;
+          const data = snap.data() as UserProfileData;
+          if (data) {
+            if (Array.isArray(data.linkedPlatforms)) {
+              // already array
+            } else if (data.linkedPlatforms && typeof data.linkedPlatforms === 'object') {
+              const platformValues = Object.values(data.linkedPlatforms).filter(
+                (p: any) => Boolean(p && typeof p === 'object' && 'platform' in p)
+              );
+              data.linkedPlatforms = platformValues;
+            } else {
+              delete (data as any).linkedPlatforms;
+            }
+          }
+          return data;
         }
       } catch (err) {
         logger.warn('Failed to fetch user profile from Firestore', { error: String(err) });
@@ -458,6 +520,8 @@ export class FirestoreBackendService {
   }
 
   // --- Sandbox Metadata Persistence in Firebase Firestore ---
+
+  private lastSavedSandboxSnapshot = new Map<string, string>();
 
   public async saveSandboxRecord(userId: string, record: {
     sandboxId: string;
@@ -470,7 +534,24 @@ export class FirestoreBackendService {
     lastUpdateCheckAt?: number;
   }): Promise<void> {
     if (this.isAvailable && this.db && userId) {
+      const cacheKey = `${userId}:${record.sandboxId}`;
       try {
+        const recordSnapshot = JSON.stringify({
+          sandboxId: record.sandboxId,
+          name: record.name,
+          userId: record.userId,
+          attachedSessionIds: [...(record.attachedSessionIds || [])].sort(),
+          provider: record.provider,
+        });
+
+        // Prevent redundant Firestore writes and duplicate logs if record has not changed
+        if (this.lastSavedSandboxSnapshot.get(cacheKey) === recordSnapshot) {
+          return;
+        }
+
+        // Lock in snapshot immediately before awaiting to prevent concurrent race conditions
+        this.lastSavedSandboxSnapshot.set(cacheKey, recordSnapshot);
+
         const ref = this.db.collection('users').doc(userId).collection('sandboxes').doc(record.sandboxId);
         await ref.set(
           {
@@ -481,6 +562,7 @@ export class FirestoreBackendService {
         );
         logger.info(`Persisted sandbox record ${record.sandboxId} to Firebase for user ${userId}`);
       } catch (err) {
+        this.lastSavedSandboxSnapshot.delete(cacheKey);
         logger.warn('Failed to save sandbox record to Firebase Firestore', { error: String(err) });
       }
     }
@@ -493,7 +575,21 @@ export class FirestoreBackendService {
         if (!snap.empty) {
           const list: any[] = [];
           snap.forEach((doc: QueryDocumentSnapshot) => {
-            list.push(doc.data());
+            const data = doc.data();
+            list.push(data);
+            if (data?.sandboxId) {
+              const cacheKey = `${userId}:${data.sandboxId}`;
+              this.lastSavedSandboxSnapshot.set(
+                cacheKey,
+                JSON.stringify({
+                  sandboxId: data.sandboxId,
+                  name: data.name,
+                  userId: data.userId || userId,
+                  attachedSessionIds: [...(Array.isArray(data.attachedSessionIds) ? data.attachedSessionIds : [])].sort(),
+                  provider: data.provider,
+                })
+              );
+            }
           });
           return list;
         }
@@ -507,6 +603,7 @@ export class FirestoreBackendService {
   public async deleteSandboxRecord(userId: string, sandboxId: string): Promise<void> {
     if (this.isAvailable && this.db && userId && sandboxId) {
       try {
+        this.lastSavedSandboxSnapshot.delete(`${userId}:${sandboxId}`);
         await this.db.collection('users').doc(userId).collection('sandboxes').doc(sandboxId).delete();
         logger.info(`Deleted sandbox record ${sandboxId} from Firebase Firestore for user ${userId}`);
       } catch (err) {
@@ -524,7 +621,7 @@ export class FirestoreBackendService {
         const snap = await this.db.collection('users').doc(userId).get();
         if (snap.exists) {
           const data = snap.data();
-          const links = data?.cliLinks || data?.linkedPlatforms;
+          const links = data?.cliLinks || (!Array.isArray(data?.linkedPlatforms) ? data?.linkedPlatforms : null);
           if (links && typeof links === 'object' && Object.keys(links).length > 0) return links;
         }
       }
@@ -534,7 +631,7 @@ export class FirestoreBackendService {
         const emailDocSnap = await this.db.collection('users').doc(cleanEmail).get();
         if (emailDocSnap.exists) {
           const data = emailDocSnap.data();
-          const links = data?.cliLinks || data?.linkedPlatforms;
+          const links = data?.cliLinks || (!Array.isArray(data?.linkedPlatforms) ? data?.linkedPlatforms : null);
           if (links && typeof links === 'object' && Object.keys(links).length > 0) return links;
         }
 
@@ -542,7 +639,7 @@ export class FirestoreBackendService {
         const querySnap = await this.db.collection('users').where('email', '==', cleanEmail).get();
         for (const doc of querySnap.docs) {
           const data = doc.data();
-          const links = data?.cliLinks || data?.linkedPlatforms;
+          const links = data?.cliLinks || (!Array.isArray(data?.linkedPlatforms) ? data?.linkedPlatforms : null);
           if (links && typeof links === 'object' && Object.keys(links).length > 0) return links;
         }
       }
@@ -553,10 +650,11 @@ export class FirestoreBackendService {
   }
 
   public async saveUserCliLinks(userId: string, cliLinks: Record<string, any>, userEmail?: string): Promise<void> {
-    if (!this.isAvailable || !this.db || !userId) return;
+    if (!this.isAvailable || !this.db || !userId || userId === 'anonymous' || userId === 'default') return;
     try {
       const cleanEmail = (userEmail || cliLinks.email || '').toLowerCase().trim();
       let targetDocId = userId;
+      if (targetDocId === 'anonymous' || targetDocId === 'default') return;
 
       // If userId looks like an email, check if a canonical user ID doc exists
       if (userId.includes('@') && cleanEmail) {
@@ -570,7 +668,6 @@ export class FirestoreBackendService {
         id: targetDocId,
         ...(cleanEmail ? { email: cleanEmail } : {}),
         cliLinks,
-        linkedPlatforms: cliLinks,
         updatedAt: FieldValue.serverTimestamp(),
       };
 
@@ -582,7 +679,6 @@ export class FirestoreBackendService {
           {
             ...(cleanEmail ? { email: cleanEmail } : {}),
             cliLinks,
-            linkedPlatforms: cliLinks,
             updatedAt: FieldValue.serverTimestamp(),
           },
           { merge: true }
@@ -651,10 +747,11 @@ export class FirestoreBackendService {
     provider: 'antigravity' | 'codex' = 'antigravity',
     userEmail?: string
   ): Promise<void> {
-    if (!this.isAvailable || !this.db || !userId) return;
+    if (!this.isAvailable || !this.db || !userId || userId === 'anonymous' || userId === 'default') return;
     try {
       const cleanEmail = (userEmail || '').toLowerCase().trim();
       let targetDocId = userId;
+      if (targetDocId === 'anonymous' || targetDocId === 'default') return;
       if (userId.includes('@') && cleanEmail) {
         const querySnap = await this.db.collection('users').where('email', '==', cleanEmail).limit(1).get();
         if (!querySnap.empty && querySnap.docs[0].id) {

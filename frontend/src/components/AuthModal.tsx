@@ -66,7 +66,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const lastStatusJsonRef = useRef<string>('');
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || !currentUser) return;
     const update = () => {
       fetchCliStatus()
         .then((status) => {
@@ -80,9 +80,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         .catch(() => {});
     };
     update();
-    const timer = setInterval(update, 3000);
-    return () => clearInterval(timer);
-  }, [isOpen]);
+    window.addEventListener('focus', update);
+    return () => {
+      window.removeEventListener('focus', update);
+    };
+  }, [isOpen, currentUser]);
 
   const handleCopyCode = (code: string) => {
     navigator.clipboard.writeText(code);
@@ -93,28 +95,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Antigravity CLI Authentication state & handlers
   const [agyCodeInput, setAgyCodeInput] = useState('');
   const [showAgyCodeInput, setShowAgyCodeInput] = useState(false);
+  const [agyProcessingStep, setAgyProcessingStep] = useState<string | null>(null);
+  const [agyAuthError, setAgyAuthError] = useState<string | null>(null);
+  const [agySuccess, setAgySuccess] = useState(false);
+  const agyInputContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (showAgyCodeInput && agyInputContainerRef.current) {
+      agyInputContainerRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [showAgyCodeInput, agyProcessingStep, agyAuthError]);
 
   const handleLinkGeminiCli = async () => {
     if (isSubmitting) return;
     setIsSubmitting(true);
     setAuthError(null);
+    setAgyAuthError(null);
+    setAgySuccess(false);
     setShowAgyCodeInput(true);
     try {
-      const res = openGeminiCliLoginPopup();
-      if (res.success) {
-        // Poll status in background in case user finishes
-        const poll = setInterval(async () => {
-          const updated = await fetchCliStatus();
-          if (updated.antigravity?.linked) {
-            clearInterval(poll);
-            closeGeminiCliLoginPopup();
-            setTimeout(() => closeGeminiCliLoginPopup(), 200);
-            setCliStatus(updated);
-            setShowAgyCodeInput(false);
-          }
-        }, 2000);
-        setTimeout(() => clearInterval(poll), 90000);
-      }
+      openGeminiCliLoginPopup();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Antigravity CLI linking was cancelled';
       setAuthError(msg);
@@ -127,10 +127,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     let raw = agyCodeInput.trim();
     if (!raw) return;
 
+    setAuthError(null);
+    setAgyAuthError(null);
+    setAgySuccess(false);
+
     // Auto-extract code if the user pasted the full redirect URL
     if (raw.includes('code=')) {
       try {
-        const u = new URL(raw);
+        const u = new URL(raw.startsWith('http') ? raw : `http://localhost/${raw}`);
         raw = u.searchParams.get('code') || raw;
       } catch {
         const m = raw.match(/[?&]code=([^&]+)/);
@@ -140,40 +144,51 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     // Google OAuth codes begin with "4/". Detect if the user pasted the state parameter
     if (!raw.startsWith('4/')) {
-      setAuthError(
-        'Invalid authorization code format: Google authorization codes always begin with "4/". You appear to have copied the state token from the browser address bar. Please switch to the opened Google authorization tab and click the "Copy to Clipboard" button (or copy the code in the box), then paste it here.'
+      setAgyAuthError(
+        'Invalid authorization code: Google authorization codes always begin with "4/". You appear to have copied the state token from the browser address bar. Please switch to the opened Google authorization tab and click the "Copy to Clipboard" button (or copy the code in the box), then paste it here.'
       );
       return;
     }
 
     setIsSubmitting(true);
-    setAuthError(null);
+    setAgyProcessingStep('Exchanging authorization code with Google OAuth...');
     try {
-      const res = await submitAntigravityAuthCode(raw);
+      // Ensure minimum 850ms so the user clearly perceives the active processing feedback
+      const [res] = await Promise.all([
+        submitAntigravityAuthCode(raw),
+        new Promise((r) => setTimeout(r, 850)),
+      ]);
+
       if (res.success) {
+        setAgyProcessingStep('Verifying Antigravity CLI credentials & active session...');
         closeGeminiCliLoginPopup();
         setTimeout(() => closeGeminiCliLoginPopup(), 200);
         setTimeout(() => closeGeminiCliLoginPopup(), 600);
-        setAgyCodeInput('');
-        setShowAgyCodeInput(false);
-        let updated = await fetchCliStatus();
+        let updated = await fetchCliStatus(true);
         if (!updated.antigravity?.linked) {
-          await new Promise((r) => setTimeout(r, 600));
-          updated = await fetchCliStatus();
+          await new Promise((r) => setTimeout(r, 700));
+          updated = await fetchCliStatus(true);
         }
         setCliStatus(updated);
         onCliStatusChange?.(updated);
+        setAgySuccess(true);
+        setAgyProcessingStep('Antigravity CLI linked successfully! 🎉');
+        await new Promise((r) => setTimeout(r, 900));
+        setAgyCodeInput('');
+        setShowAgyCodeInput(false);
+        setAgySuccess(false);
       } else {
-        setAuthError(
+        setAgyAuthError(
           res.error ||
-            'Could not verify Antigravity authorization code. Please click Link Antigravity CLI to get a fresh URL and try again.'
+            'Could not verify Antigravity authorization code. Please click "Link Antigravity CLI" to get a fresh URL and try again.'
         );
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to submit authorization code';
-      setAuthError(msg);
+      setAgyAuthError(msg);
     } finally {
       setIsSubmitting(false);
+      setAgyProcessingStep(null);
     }
   };
 
@@ -278,11 +293,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               verificationUri: details.authUrl,
               deviceCode: details.sessionId,
             });
-            // Poll in background while device code is displayed
-            const pollTimer = setInterval(async () => {
+            // Check status immediately on window focus, or via a gentle 8s fallback interval
+            const checkDeviceAuthStatus = async () => {
               const status = await fetchCliStatus();
               if (status.codex?.linked) {
-                clearInterval(pollTimer);
+                if (pollTimer) clearInterval(pollTimer);
+                window.removeEventListener('focus', checkDeviceAuthStatus);
                 setPendingDeviceAuth(null);
                 setCliStatus(status);
                 onCliStatusChange?.(status);
@@ -290,8 +306,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   await refreshAuthToken();
                 } catch {}
               }
-            }, 1500);
-            setTimeout(() => clearInterval(pollTimer), 120000);
+            };
+            window.addEventListener('focus', checkDeviceAuthStatus);
+            const pollTimer = setInterval(checkDeviceAuthStatus, 8000);
+            setTimeout(() => {
+              clearInterval(pollTimer);
+              window.removeEventListener('focus', checkDeviceAuthStatus);
+            }, 120000);
           }
         } catch {}
       }
@@ -377,7 +398,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
-      <div className="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl bg-surface-container-low border border-outline-variant/40 shadow-2xl p-4 sm:p-6 text-on-surface relative">
+      <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl bg-surface-container-low border border-outline-variant/40 shadow-2xl p-4 sm:p-6 text-on-surface relative">
         {/* Close Button */}
         <button
           onClick={() => {
@@ -407,9 +428,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
 
             {authError && (
-              <div className="p-space-sm rounded-lg bg-error-container/20 border border-error/40 text-error text-body-sm text-left flex items-start gap-2">
-                <span className="material-symbols-outlined text-[18px] shrink-0 mt-0.5">error</span>
-                <span className="text-xs break-words">{authError}</span>
+              <div className="p-space-sm rounded-lg bg-error-container/20 border border-error/40 text-error text-body-sm text-left flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] shrink-0 leading-none select-none">error</span>
+                <span className="text-xs break-words leading-none">{authError}</span>
               </div>
             )}
 
@@ -472,6 +493,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </p>
               </div>
             </div>
+
+            {authError && (
+              <div className="p-3 rounded-xl bg-error-container/20 border border-error/40 text-error text-xs flex items-center gap-2 animate-fadeIn">
+                <span className="material-symbols-outlined text-[18px] shrink-0 leading-none select-none">error</span>
+                <span className="break-words leading-snug flex-1">{authError}</span>
+                <button
+                  type="button"
+                  onClick={() => setAuthError(null)}
+                  className="p-1 hover:bg-error/10 rounded cursor-pointer text-error/80 hover:text-error"
+                  title="Dismiss error"
+                >
+                  <span className="material-symbols-outlined text-[14px]">close</span>
+                </button>
+              </div>
+            )}
 
             {pendingDeviceAuth ? (
               /* Device Code Authorization Card */
@@ -666,9 +702,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         type="button"
                         onClick={handleSubmitClaudeCode}
                         disabled={!claudeCodeInput.trim() || isSubmitting}
-                        className="px-3 py-1.5 rounded-md bg-secondary text-on-secondary font-medium text-xs cursor-pointer disabled:opacity-40 text-center"
+                        className="px-3.5 py-1.5 rounded-md bg-secondary text-on-secondary font-medium text-xs cursor-pointer disabled:opacity-40 text-center flex items-center justify-center gap-1.5 shrink-0"
                       >
-                        Submit
+                        {isSubmitting ? (
+                          <>
+                            <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
+                            <span>Submitting...</span>
+                          </>
+                        ) : (
+                          'Submit'
+                        )}
                       </button>
                     </div>
                   )}
@@ -819,34 +862,143 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       </div>
 
                       {showAgyCodeInput && (
-                        <div className="p-2.5 rounded-lg bg-surface-container/40 border border-outline-variant/20 flex flex-col gap-2 mt-1">
+                        <div
+                          ref={agyInputContainerRef}
+                          className={`p-3.5 rounded-xl border transition-all flex flex-col gap-3 mt-1 relative overflow-hidden ${
+                          agyProcessingStep 
+                            ? 'bg-[#4285F4]/5 border-[#4285F4]/50 shadow-md shadow-[#4285F4]/10 ring-1 ring-[#4285F4]/20' 
+                            : agyAuthError
+                            ? 'bg-error-container/10 border-error/30'
+                            : 'bg-surface-container/40 border-outline-variant/20'
+                        }`}>
+                          {/* Indeterminate loading bar when processing */}
+                          {agyProcessingStep && (
+                            <div className="absolute top-0 left-0 right-0 h-1 bg-[#4285F4]/20 overflow-hidden">
+                              <div className="w-1/2 h-full bg-gradient-to-r from-[#4285F4] via-[#669DF6] to-[#34A853] rounded-full animate-indeterminate" />
+                            </div>
+                          )}
+
                           <div className="text-[11px] text-on-surface-variant flex flex-col gap-0.5">
                             <span className="font-semibold text-on-surface">3-Step Authorization:</span>
                             <span>1. Click <strong>Link Antigravity CLI</strong> to open Google sign-in.</span>
                             <span>2. Sign in, then click the <strong>Copy to Clipboard</strong> button on the webpage (starts with <strong>4/</strong>). Do not copy the URL bar.</span>
                             <span>3. Paste the code below and click <strong>Submit Code</strong> (you can then close the Google window).</span>
                           </div>
+
+                          {/* Dynamic Processing Status Card */}
+                          {agyProcessingStep && (
+                            <div className={`flex items-center gap-3 p-3 rounded-xl border text-xs text-on-surface animate-fadeIn transition-all ${
+                              agySuccess
+                                ? 'bg-emerald-500/10 border-emerald-500/30'
+                                : 'bg-[#4285F4]/10 border-[#4285F4]/30 shadow-xs'
+                            }`}>
+                              {agySuccess ? (
+                                <div className="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                                  <span className="material-symbols-outlined text-[18px]">check_circle</span>
+                                </div>
+                              ) : (
+                                <div className="w-7 h-7 rounded-full bg-[#4285F4]/20 text-[#4285F4] flex items-center justify-center shrink-0">
+                                  <span className="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
+                                </div>
+                              )}
+                              <div className="flex flex-col flex-1 min-w-0">
+                                <span className="font-semibold text-on-surface text-xs leading-tight">
+                                  {agyProcessingStep}
+                                </span>
+                                {!agySuccess && (
+                                  <span className="text-[10px] text-outline mt-0.5">
+                                    Communicating with OAuth server & activating CLI sandbox link...
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Inline Error Card */}
+                          {agyAuthError && !agyProcessingStep && (
+                            <div className="flex items-start gap-2.5 p-3 rounded-xl bg-error-container/20 border border-error/40 text-error text-xs animate-fadeIn">
+                              <span className="material-symbols-outlined text-[18px] shrink-0 mt-0.5 leading-none">error</span>
+                              <div className="flex-1 flex flex-col gap-1.5 min-w-0">
+                                <span className="leading-snug break-words">{agyAuthError}</span>
+                                <div className="flex items-center gap-2 pt-0.5">
+                                  <button
+                                    type="button"
+                                    onClick={handleLinkGeminiCli}
+                                    className="px-2.5 py-1 rounded-md bg-error/15 hover:bg-error/25 text-error font-medium text-[11px] cursor-pointer transition-colors"
+                                  >
+                                    Open Google Sign-in again
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setAgyAuthError(null)}
+                                    className="px-2 py-1 text-outline hover:text-on-surface text-[11px] cursor-pointer"
+                                  >
+                                    Dismiss
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
                           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5">
-                            <input
-                              type="text"
-                              placeholder="Paste authorization code (starts with 4/)..."
-                              value={agyCodeInput}
-                              onChange={(e) => setAgyCodeInput(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') handleSubmitAgyCode();
-                              }}
-                              className="flex-1 bg-surface-container-lowest border border-outline-variant/30 rounded-md px-2.5 py-1.5 text-xs text-on-surface outline-none focus:border-primary font-mono"
-                            />
+                            <div className="relative flex-1">
+                              <input
+                                type="text"
+                                placeholder="Paste authorization code (starts with 4/)..."
+                                value={agyCodeInput}
+                                onChange={(e) => {
+                                  setAgyCodeInput(e.target.value);
+                                  if (agyAuthError) setAgyAuthError(null);
+                                }}
+                                disabled={Boolean(agyProcessingStep)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' && !agyProcessingStep) handleSubmitAgyCode();
+                                }}
+                                className={`w-full bg-surface-container-lowest border rounded-lg px-3 py-2 text-xs text-on-surface outline-none font-mono transition-all ${
+                                  agyProcessingStep
+                                    ? 'opacity-60 border-[#4285F4]/50 cursor-not-allowed bg-surface-container-low pl-8'
+                                    : agyAuthError
+                                    ? 'border-error/50 focus:border-error'
+                                    : 'border-outline-variant/30 focus:border-primary'
+                                }`}
+                              />
+                              {agyProcessingStep && (
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-[15px] text-[#4285F4] animate-spin">
+                                  sync
+                                </span>
+                              )}
+                            </div>
                             <button
                               type="button"
                               onClick={handleSubmitAgyCode}
-                              disabled={!agyCodeInput.trim() || isSubmitting}
-                              className="px-3 py-1.5 rounded-md bg-[#4285F4] text-white font-medium text-xs cursor-pointer disabled:opacity-40 hover:bg-[#3367D6] transition-colors text-center"
+                              disabled={!agyCodeInput.trim() || isSubmitting || Boolean(agyProcessingStep)}
+                              className={`flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg font-semibold text-xs transition-all text-center shrink-0 min-w-[125px] cursor-pointer ${
+                                agySuccess
+                                  ? 'bg-emerald-600 text-white shadow-sm'
+                                  : agyProcessingStep
+                                  ? 'bg-[#4285F4]/80 text-white cursor-wait shadow-sm'
+                                  : 'bg-[#4285F4] text-white hover:bg-[#3367D6] shadow-sm disabled:opacity-40 disabled:cursor-not-allowed'
+                              }`}
                             >
-                              {isSubmitting ? 'Submitting...' : 'Submit Code'}
+                              {agySuccess ? (
+                                <>
+                                  <span className="material-symbols-outlined text-[15px]">check</span>
+                                  <span>Linked!</span>
+                                </>
+                              ) : agyProcessingStep ? (
+                                <>
+                                  <span className="material-symbols-outlined text-[15px] animate-spin">progress_activity</span>
+                                  <span>Verifying...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="material-symbols-outlined text-[15px]">send</span>
+                                  <span>Submit Code</span>
+                                </>
+                              )}
                             </button>
                           </div>
-                          {agyCodeInput.trim() && !agyCodeInput.trim().startsWith('4/') && !agyCodeInput.includes('code=') && (
+                          {agyCodeInput.trim() && !agyCodeInput.trim().startsWith('4/') && !agyCodeInput.includes('code=') && !agyProcessingStep && !agyAuthError && (
                             <div className="flex items-center gap-1.5 text-[11px] text-amber-400 font-medium">
                               <span className="material-symbols-outlined text-[14px]">warning</span>
                               <span>Authorization codes start with <strong>4/</strong>. Please copy the code displayed on the webpage, not the address bar.</span>

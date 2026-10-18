@@ -1,5 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import { apiFetch } from '../utils/api.util';
+import {
+  currentUserAtom,
+  isAuthModalOpenAtom,
+  isInspectorOpenAtom,
+  currentSessionIdAtom,
+  selectedSandboxIdAtom,
+} from '../state';
 
 export interface SandboxFileNode {
   name: string;
@@ -21,14 +29,26 @@ interface CloudInspectorProps {
 }
 
 export const CloudInspector: React.FC<CloudInspectorProps> = ({
-  isOpen = false,
-  onClose,
-  sessionId,
+  isOpen: propIsOpen,
+  onClose: propOnClose,
+  sessionId: propSessionId,
   sandboxId: propSandboxId,
-  userId,
-  onOpenAuthModal,
+  userId: propUserId,
+  onOpenAuthModal: propOnOpenAuthModal,
   refreshTrigger,
 }) => {
+  const [atomInspectorOpen, setAtomInspectorOpen] = useAtom(isInspectorOpenAtom);
+  const atomCurrentUser = useAtomValue(currentUserAtom);
+  const atomSessionId = useAtomValue(currentSessionIdAtom);
+  const atomSandboxId = useAtomValue(selectedSandboxIdAtom);
+  const setIsAuthModalOpen = useSetAtom(isAuthModalOpenAtom);
+
+  const isOpen = propIsOpen !== undefined ? propIsOpen : atomInspectorOpen;
+  const onClose = propOnClose ?? (() => setAtomInspectorOpen(false));
+  const sessionId = propSessionId !== undefined ? propSessionId : (atomSessionId || undefined);
+  const effectiveSandboxId = propSandboxId !== undefined ? propSandboxId : (atomSandboxId || undefined);
+  const userId = propUserId !== undefined ? propUserId : (atomCurrentUser?.id || undefined);
+  const onOpenAuthModal = propOnOpenAuthModal ?? (() => setIsAuthModalOpen(true));
   const [files, setFiles] = useState<SandboxFileNode[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -79,8 +99,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
 
   const currentSandbox = useMemo(() => {
     if (!userId || !quotaUsage?.sandboxes || quotaUsage.sandboxes.length === 0) return null;
-    if (propSandboxId) {
-      const found = quotaUsage.sandboxes.find((sb) => sb.sandboxId === propSandboxId);
+    if (effectiveSandboxId) {
+      const found = quotaUsage.sandboxes.find((sb) => sb.sandboxId === effectiveSandboxId);
       if (found) return found;
     }
     const cleanSession = (sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
@@ -88,7 +108,7 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       quotaUsage.sandboxes.find((sb) => sb.attachedSessionIds?.includes(cleanSession)) ||
       quotaUsage.sandboxes[0]
     );
-  }, [userId, quotaUsage, sessionId, propSandboxId]);
+  }, [userId, quotaUsage, sessionId, effectiveSandboxId]);
 
   const fetchFiles = useCallback(async (quiet = false) => {
     if (!userId) {
@@ -101,7 +121,7 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
 
     try {
       const activeSession = sessionId || 'default';
-      const targetSb = propSandboxId || currentSandbox?.sandboxId;
+      const targetSb = effectiveSandboxId || currentSandbox?.sandboxId;
       const params = new URLSearchParams();
       if (targetSb) params.set('sandboxId', targetSb);
       params.set('sessionId', activeSession);
@@ -123,7 +143,7 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       setIsRefreshing(false);
       fetchUsage();
     }
-  }, [userId, sessionId, propSandboxId, currentSandbox?.sandboxId, fetchUsage]);
+  }, [userId, sessionId, effectiveSandboxId, currentSandbox?.sandboxId, fetchUsage]);
 
   const [isStartingSandbox, setIsStartingSandbox] = useState(false);
 
@@ -175,7 +195,7 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
     setIsLoadingFile(true);
     try {
       const activeSession = sessionId || 'default';
-      const targetSb = propSandboxId || currentSandbox?.sandboxId;
+      const targetSb = effectiveSandboxId || currentSandbox?.sandboxId;
       const params = new URLSearchParams();
       params.set('path', file.path);
       if (targetSb) params.set('sandboxId', targetSb);
