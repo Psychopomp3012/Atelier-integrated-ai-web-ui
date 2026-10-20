@@ -148,9 +148,15 @@ export class CliAuthService {
     if (!email) return null;
     const links = this.loadUserCliLinks();
     const clean = email.toLowerCase().trim();
+    // 1. Direct root account email matching (strictly isolated priority)
+    for (const [userId, rec] of Object.entries(links)) {
+      if (rec.email?.toLowerCase().trim() === clean) {
+        return userId;
+      }
+    }
+    // 2. Secondary platform linking match
     for (const [userId, rec] of Object.entries(links)) {
       if (
-        rec.email?.toLowerCase().trim() === clean ||
         rec.antigravity?.email?.toLowerCase().trim() === clean ||
         rec.gemini?.email?.toLowerCase().trim() === clean ||
         rec.claude?.email?.toLowerCase().trim() === clean ||
@@ -306,51 +312,57 @@ export class CliAuthService {
       const hostAgy = this.getWorkspaceAntigravityUserInfo();
       const hostCodex = this.getCodexAuthInfo();
 
-      if (hostAgy?.email || hostCodex?.email) {
-        const hostEmail = (hostAgy?.email || hostCodex?.email || '').toLowerCase().trim();
-        if (hostEmail) {
+      if (hostAgy?.email) {
+        const agyEmail = hostAgy.email.toLowerCase().trim();
+        const targetUser = Object.keys(links).find((k) => {
+          const entry = links[k];
+          return (
+            entry?.email?.toLowerCase().trim() === agyEmail ||
+            entry?.antigravity?.email?.toLowerCase().trim() === agyEmail ||
+            entry?.gemini?.email?.toLowerCase().trim() === agyEmail
+          );
+        });
+        if (targetUser && links[targetUser]?.antigravity?.linked !== false) {
+          links[targetUser].antigravity = {
+            linked: true,
+            email: hostAgy.email,
+            name: hostAgy.name,
+            linkedAt: links[targetUser].antigravity?.linkedAt || new Date().toISOString(),
+          };
+          links[targetUser].gemini = {
+            linked: true,
+            email: hostAgy.email,
+            name: hostAgy.name,
+            linkedAt: links[targetUser].gemini?.linkedAt || new Date().toISOString(),
+          };
+        }
+      }
+
+      if (hostCodex.linked) {
+        const codexEmail = (hostCodex.email || '').toLowerCase().trim();
+        if (codexEmail) {
           const targetUser = Object.keys(links).find((k) => {
             const entry = links[k];
             return (
-              entry?.email?.toLowerCase().trim() === hostEmail ||
-              entry?.antigravity?.email?.toLowerCase().trim() === hostEmail ||
-              entry?.gemini?.email?.toLowerCase().trim() === hostEmail ||
-              entry?.codex?.email?.toLowerCase().trim() === hostEmail
+              entry?.email?.toLowerCase().trim() === codexEmail ||
+              entry?.codex?.email?.toLowerCase().trim() === codexEmail
             );
-          }) || hostEmail;
-
-          if (!links[targetUser]) links[targetUser] = { email: hostEmail };
-
-          if (hostAgy?.email && links[targetUser]?.antigravity?.linked !== false) {
-            links[targetUser].antigravity = {
-              linked: true,
-              email: hostAgy.email,
-              name: hostAgy.name,
-              linkedAt: links[targetUser].antigravity?.linkedAt || new Date().toISOString(),
-            };
-            links[targetUser].gemini = {
-              linked: true,
-              email: hostAgy.email,
-              name: hostAgy.name,
-              linkedAt: links[targetUser].gemini?.linkedAt || new Date().toISOString(),
-            };
-          }
-
-          if (hostCodex.linked && links[targetUser]?.codex?.linked !== false) {
+          });
+          if (targetUser && links[targetUser]?.codex?.linked !== false) {
             links[targetUser].codex = {
               linked: true,
-              email: hostCodex.email || hostEmail || 'ChatGPT Account',
+              email: hostCodex.email || codexEmail,
               linkedAt: links[targetUser].codex?.linkedAt || new Date().toISOString(),
             };
             try {
               const { codexQuotaService } = await import('../quota/codex-quota.service.js');
-              await codexQuotaService.syncLocalTelemetryToFirestore(targetUser, hostEmail).catch(() => {});
+              await codexQuotaService.syncLocalTelemetryToFirestore(targetUser, codexEmail).catch(() => {});
             } catch {}
           }
-
-          this.saveUserCliLinks(links);
         }
       }
+
+      this.saveUserCliLinks(links);
 
       for (const [userId, rec] of Object.entries(links)) {
         if (rec && typeof rec === 'object' && Object.keys(rec).length > 0) {
@@ -443,6 +455,11 @@ export class CliAuthService {
           fs.rmSync(userGeminiDir, { recursive: true, force: true });
         } catch {}
       }
+    }
+    if (userId) {
+      import('../sandbox/sandbox.service.js')
+        .then(({ sandboxService }) => sandboxService.purgeUserCredentialsFromSandboxes(userId, cli))
+        .catch((err) => logger.warn('Failed to purge credentials from running sandboxes on unlink', { userId, cli, error: String(err) }));
     }
     logger.info(`Unlinked ${cli} CLI for user ${userId}`, { targetEmail });
   }
@@ -828,17 +845,99 @@ export class CliAuthService {
   }
 
   public extractEmailFromToken(tokenContent: string): string | null {
+    if (!tokenContent) return null;
     try {
       const parsed = JSON.parse(tokenContent);
-      if (parsed.id_token) {
-        const parts = parsed.id_token.split('.');
+      const idToken = parsed.id_token || parsed.tokens?.id_token || parsed.token?.id_token;
+      if (idToken && typeof idToken === 'string') {
+        const parts = idToken.split('.');
         if (parts.length >= 2) {
           const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
           if (payload?.email) return payload.email.toLowerCase().trim();
         }
       }
-      if (parsed.email) return parsed.email.toLowerCase().trim();
+      if (parsed.email && typeof parsed.email === 'string') return parsed.email.toLowerCase().trim();
+      if (parsed.user_email && typeof parsed.user_email === 'string') return parsed.user_email.toLowerCase().trim();
+      if (parsed.account && typeof parsed.account === 'string' && parsed.account.includes('@')) return parsed.account.toLowerCase().trim();
     } catch {}
+
+    // Fallback regex to find any JWT payload in token text and extract email
+    try {
+      const jwtMatch = tokenContent.match(/eyJ[a-zA-Z0-9_-]+\.([a-zA-Z0-9_-]+)\.[a-zA-Z0-9_-]+/);
+      if (jwtMatch && jwtMatch[1]) {
+        const payload = JSON.parse(Buffer.from(jwtMatch[1], 'base64').toString('utf8'));
+        if (payload?.email) return payload.email.toLowerCase().trim();
+      }
+    } catch {}
+
+    return null;
+  }
+
+  public findValidAntigravityTokenForEmail(targetEmail?: string, userId?: string): string | null {
+    if (!targetEmail) return null;
+    const cleanEmail = targetEmail.toLowerCase().trim();
+    const homedir = os.homedir();
+
+    // 1. Check in user profile directory if userId is supplied
+    if (userId && userId !== 'default' && userId !== 'default_user') {
+      const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const userProfileCandidates = [
+        path.join(homedir, '.agent-user-profiles', safeUid, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+        path.join(homedir, '.agent-user-profiles', safeUid, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+        path.join(homedir, '.agent-user-profiles', safeUid, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
+        path.join(homedir, '.agent-user-profiles', safeUid, '.gemini', 'oauth_creds.json'),
+      ];
+      for (const p of userProfileCandidates) {
+        if (fs.existsSync(p)) {
+          try {
+            const text = fs.readFileSync(p, 'utf8');
+            const email = this.extractEmailFromToken(text);
+            if (email && email.toLowerCase() === cleanEmail) {
+              return text;
+            }
+          } catch {}
+        }
+      }
+    }
+
+    // 2. Check in stashed tokens directory for an authentic token matching targetEmail
+    const stashDir = path.join(this.getGeminiDir(), 'stashed_tokens');
+    if (fs.existsSync(stashDir)) {
+      try {
+        const files = fs.readdirSync(stashDir);
+        for (const f of files) {
+          const p = path.join(stashDir, f);
+          try {
+            const text = fs.readFileSync(p, 'utf8');
+            const email = this.extractEmailFromToken(text);
+            if (email && email.toLowerCase() === cleanEmail) {
+              return text;
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+
+    // 3. Check candidate host paths ONLY if the email matches targetEmail
+    const candidatePaths = [
+      path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+      path.join(homedir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+      path.join(homedir, 'snap', 'antigravity-cli', 'common', '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+    ];
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        try {
+          const text = fs.readFileSync(p, 'utf8');
+          const email = this.extractEmailFromToken(text);
+          if (email && email.toLowerCase() === cleanEmail) {
+            return text;
+          }
+        } catch {}
+      }
+    }
+
     return null;
   }
 
@@ -878,22 +977,58 @@ export class CliAuthService {
     const userCacheDir = path.join(userAgyDir, 'cache');
     try {
       fs.mkdirSync(userCacheDir, { recursive: true, mode: 0o700 });
-      const hostToken = this.getLatestHostAntigravityToken();
-      if (hostToken) {
-        fs.writeFileSync(path.join(userCacheDir, 'antigravity-keyring-unavailable-oauth-token'), hostToken, { mode: 0o600 });
-        fs.writeFileSync(path.join(userCacheDir, 'antigravity-oauth-token'), hostToken, { mode: 0o600 });
-        fs.writeFileSync(path.join(userCacheDir, 'jetski-keyring-unavailable-oauth-token'), hostToken, { mode: 0o600 });
-        fs.writeFileSync(path.join(userAgyDir, 'antigravity-oauth-token'), hostToken, { mode: 0o600 });
-        fs.writeFileSync(path.join(userAgyDir, 'jetski-oauth-token'), hostToken, { mode: 0o600 });
+      const cleanEmail = userEmail ? userEmail.toLowerCase().trim() : undefined;
+      const validToken = this.findValidAntigravityTokenForEmail(cleanEmail, userId);
+
+      if (validToken) {
+        fs.writeFileSync(path.join(userCacheDir, 'antigravity-keyring-unavailable-oauth-token'), validToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userCacheDir, 'antigravity-oauth-token'), validToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userCacheDir, 'jetski-keyring-unavailable-oauth-token'), validToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userAgyDir, 'antigravity-oauth-token'), validToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userAgyDir, 'jetski-oauth-token'), validToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userGeminiDir, 'oauth_creds.json'), validToken, { mode: 0o600 });
+        fs.writeFileSync(path.join(userAgyDir, 'oauth_creds.json'), validToken, { mode: 0o600 });
+
+        const settingsObj = { security: { auth: { selectedType: 'oauth-personal' } } };
+        fs.writeFileSync(path.join(userGeminiDir, 'settings.json'), JSON.stringify(settingsObj, null, 2), { mode: 0o600 });
+        fs.writeFileSync(path.join(userAgyDir, 'settings.json'), JSON.stringify(settingsObj, null, 2), { mode: 0o600 });
+      } else {
+        // Multi-tenant security guard: Purge any mismatched tokens belonging to other users
+        const staleFiles = [
+          path.join(userCacheDir, 'antigravity-keyring-unavailable-oauth-token'),
+          path.join(userCacheDir, 'antigravity-oauth-token'),
+          path.join(userCacheDir, 'jetski-keyring-unavailable-oauth-token'),
+          path.join(userAgyDir, 'antigravity-oauth-token'),
+          path.join(userAgyDir, 'jetski-oauth-token'),
+          path.join(userGeminiDir, 'oauth_creds.json'),
+          path.join(userAgyDir, 'oauth_creds.json'),
+        ];
+        for (const sf of staleFiles) {
+          if (fs.existsSync(sf)) {
+            try {
+              const currentContent = fs.readFileSync(sf, 'utf8');
+              const currentEmail = this.extractEmailFromToken(currentContent);
+              if (cleanEmail && currentEmail && currentEmail.toLowerCase() !== cleanEmail) {
+                fs.unlinkSync(sf);
+                logger.warn('[Auth Profile] Purged mismatched token from user profile to prevent leak', {
+                  userId: safeUserId,
+                  purgedEmail: currentEmail,
+                  expectedEmail: cleanEmail,
+                });
+              }
+            } catch {}
+          }
+        }
       }
-      const emailToSave = userEmail || (hostToken ? this.extractEmailFromToken(hostToken) : undefined);
+
+      const emailToSave = cleanEmail || (validToken ? this.extractEmailFromToken(validToken) : undefined);
       if (emailToSave) {
         const accJson = JSON.stringify({ active: emailToSave, accounts: [{ email: emailToSave }] }, null, 2);
         fs.writeFileSync(path.join(userGeminiDir, 'google_accounts.json'), accJson, { mode: 0o600 });
         fs.writeFileSync(path.join(userAgyDir, 'google_accounts.json'), accJson, { mode: 0o600 });
         fs.writeFileSync(path.join(userGeminiDir, 'user_info.json'), JSON.stringify({ email: emailToSave }, null, 2), { mode: 0o600 });
       }
-      logger.info(`Persisted Antigravity credentials to user profile: ${safeUserId}`, { email: emailToSave });
+      logger.info(`Persisted Antigravity credentials to user profile: ${safeUserId}`, { email: emailToSave, hasToken: Boolean(validToken) });
     } catch (err) {
       logger.warn('Failed to persist Antigravity credentials to user profile', { error: String(err) });
     }
@@ -1467,6 +1602,10 @@ export class CliAuthService {
     const email = userEmail || userRecord?.antigravity?.email || userRecord?.gemini?.email || userRecord?.email;
     const name = userRecord?.name;
     const linkedAt = userRecord?.antigravity?.linkedAt;
+
+    if (antigravityLinked && effectiveUserId) {
+      this.persistUserAntigravityProfile(effectiveUserId, email);
+    }
 
     const agyStatus = {
       linked: antigravityLinked,

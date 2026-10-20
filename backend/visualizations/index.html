@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Architecture & User Flow Visualizations</title>
+  <title>System Architecture & Class Diagram Visualizations</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -67,6 +67,8 @@
       padding: 0.2rem;
       border-radius: 0.5rem;
       border: 1px solid #334155;
+      overflow-x: auto;
+      max-width: 100%;
     }
     .seg-btn {
       padding: 0.35rem 0.75rem;
@@ -81,6 +83,7 @@
       display: flex;
       align-items: center;
       gap: 0.35rem;
+      white-space: nowrap;
     }
     .seg-btn:hover {
       color: #f1f5f9;
@@ -99,42 +102,28 @@
       border: 1px solid #334155;
       border-radius: 0.5rem;
       cursor: pointer;
-      text-decoration: none;
       display: inline-flex;
       align-items: center;
       gap: 0.35rem;
-      transition: all 0.2s;
+      text-decoration: none;
+      transition: all 0.15s ease;
     }
     .action-btn:hover {
       background: #334155;
       color: #ffffff;
-    }
-    .zoom-badge {
-      font-family: monospace;
-      font-size: 0.75rem;
-      color: #94a3b8;
-      padding: 0 0.3rem;
-      min-width: 42px;
-      text-align: center;
+      border-color: #475569;
     }
     main {
       flex: 1;
       padding: 1.25rem 1.5rem;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      max-width: 100vw;
+      position: relative;
     }
     .diagram-card {
-      width: 100%;
-      max-width: 1500px;
-      background: #0d1322;
-      border: 1px solid #1e293b;
-      border-radius: 0.85rem;
-      padding: 1.25rem;
-      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
       display: none;
       flex-direction: column;
+      flex: 1;
     }
     .diagram-card.active {
       display: flex;
@@ -201,64 +190,72 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      overflow: hidden;
+      position: relative;
     }
     .canvas-viewport.scroll-mode .pan-container {
-      width: 100%;
+      display: inline-block;
+      width: auto;
       height: auto;
-      display: block;
     }
-    .pan-container img {
+    .canvas-viewport img {
       max-width: 95%;
       max-height: 95%;
-      width: auto;
-      height: 95%;
       object-fit: contain;
-      pointer-events: none;
-      border-radius: 0.35rem;
+      transition: transform 0.08s ease-out;
       transform-origin: center center;
-      transition: transform 0.05s ease-out;
-      will-change: transform;
+      pointer-events: none;
     }
-    .canvas-viewport.scroll-mode .pan-container img {
-      transform: none !important;
+    .canvas-viewport.scroll-mode img {
       max-width: 100%;
-      width: 100%;
-      height: auto;
-      object-fit: initial;
+      max-height: none;
+      transform: none !important;
+      display: inline-block;
     }
     .viewport-overlay-controls {
       position: absolute;
-      bottom: 1rem;
-      right: 1rem;
+      bottom: 1.25rem;
+      right: 1.25rem;
       background: rgba(15, 23, 42, 0.85);
       backdrop-filter: blur(8px);
       border: 1px solid #334155;
-      padding: 0.3rem 0.5rem;
       border-radius: 0.5rem;
+      padding: 0.3rem;
       display: flex;
       align-items: center;
-      gap: 0.35rem;
+      gap: 0.25rem;
       z-index: 10;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+    }
+    .canvas-viewport.scroll-mode .viewport-overlay-controls {
+      display: none;
     }
     .icon-btn {
       background: transparent;
       border: none;
-      color: #cbd5e1;
+      color: #94a3b8;
       width: 28px;
       height: 28px;
-      border-radius: 0.35rem;
-      display: inline-flex;
+      border-radius: 0.375rem;
+      cursor: pointer;
+      display: flex;
       align-items: center;
       justify-content: center;
-      cursor: pointer;
       font-size: 1rem;
-      font-weight: bold;
-      transition: all 0.15s;
+      font-weight: 600;
+      transition: all 0.15s ease;
     }
     .icon-btn:hover {
       background: #334155;
-      color: #38bdf8;
+      color: #f8fafc;
+    }
+    .zoom-badge {
+      font-size: 0.75rem;
+      color: #cbd5e1;
+      padding: 0 0.4rem;
+      font-variant-numeric: tabular-nums;
+      min-width: 44px;
+      text-align: center;
+      font-weight: 500;
     }
   </style>
 </head>
@@ -266,13 +263,14 @@
   <header>
     <div class="brand">
       <span class="brand-badge">ATELIER</span>
-      <h1>Architecture & User Flow</h1>
+      <h1>Codebase Architecture & Class Diagrams</h1>
     </div>
 
     <div class="controls">
       <!-- DIAGRAM SELECTOR -->
       <div class="segmented-group">
-        <button id="tabArch" class="seg-btn active" onclick="switchTab('arch')">Architecture</button>
+        <button id="tabCodebase" class="seg-btn active" onclick="switchTab('codebase')">Master Class Diagram</button>
+        <button id="tabArch" class="seg-btn" onclick="switchTab('arch')">System Architecture</button>
         <button id="tabFlow" class="seg-btn" onclick="switchTab('flow')">User Flow</button>
         <button id="tabCodex" class="seg-btn" onclick="switchTab('codex')">Codex Auth Flow</button>
       </div>
@@ -280,21 +278,19 @@
       <!-- VIEW MODE -->
       <div class="segmented-group">
         <button id="modeFit" class="seg-btn active" onclick="setViewMode('fit')" title="Scale diagram to fit entire view on screen">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="m9 9 6 6m0-6-6 6"/></svg>
           Fit Screen
         </button>
         <button id="modeScroll" class="seg-btn" onclick="setViewMode('scroll')" title="Scrollable full-width view">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
           Full Width
         </button>
       </div>
 
       <!-- EXPORT BUTTONS -->
-      <a id="downloadSvg" href="architecture-diagram.svg" download class="action-btn">
+      <a id="downloadSvg" href="codebase-class-diagram.svg" download class="action-btn">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
         SVG
       </a>
-      <a id="downloadPng" href="architecture-diagram.png" download class="action-btn">
+      <a id="downloadPng" href="codebase-class-diagram.png" download class="action-btn">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
         PNG
       </a>
@@ -302,15 +298,41 @@
   </header>
 
   <main>
-    <!-- ARCHITECTURE CARD -->
-    <div id="arch-card" class="diagram-card active">
+    <!-- MASTER CODEBASE CLASS DIAGRAM CARD -->
+    <div id="codebase-card" class="diagram-card active">
+      <div class="diagram-header">
+        <div>
+          <h2>Master Codebase Class Diagram</h2>
+          <p>Full mapping of 18 Classes, 262 Methods, 177 Functions, React Component Hierarchy, and Service Bridges.</p>
+        </div>
+        <div class="hint-chip">
+          Scroll wheel to zoom &bull; Click and drag to pan
+        </div>
+      </div>
+
+      <div class="canvas-viewport" id="viewport-codebase">
+        <div class="pan-container" id="container-codebase">
+          <img src="codebase-class-diagram.svg" alt="Master Codebase Class Diagram" id="img-codebase">
+        </div>
+        <div class="viewport-overlay-controls">
+          <button class="icon-btn" onclick="zoom('codebase', -0.15)" title="Zoom Out">&minus;</button>
+          <span class="zoom-badge" id="zoom-codebase-badge">100%</span>
+          <button class="icon-btn" onclick="zoom('codebase', 0.15)" title="Zoom In">&plus;</button>
+          <button class="icon-btn" onclick="resetZoom('codebase')" title="Reset Zoom">&#8635;</button>
+        </div>
+      </div>
+    </div>
+
+
+
+    <!-- SYSTEM ARCHITECTURE CARD -->
+    <div id="arch-card" class="diagram-card">
       <div class="diagram-header">
         <div>
           <h2>System Architecture Overview (Beta Architecture)</h2>
           <p>MicroVM sandbox isolation, Linux DAC boundaries, Fastify backend, and React 19 Frontend.</p>
         </div>
         <div class="hint-chip">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>
           Scroll wheel to zoom &bull; Click and drag to pan
         </div>
       </div>
@@ -336,7 +358,6 @@
           <p>7-Day JWT Authentication, MicroVM Spin-up, CLI Pre-Provisioning, and Post-Boot Credential Hot-Swap.</p>
         </div>
         <div class="hint-chip">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>
           Scroll wheel to zoom &bull; Click and drag to pan
         </div>
       </div>
@@ -362,7 +383,6 @@
           <p>Per-user isolated CODEX_HOME, @openai/codex device-auth handshake, token persistence, and E2B microVM sync.</p>
         </div>
         <div class="hint-chip">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>
           Scroll wheel to zoom &bull; Click and drag to pan
         </div>
       </div>
@@ -382,13 +402,20 @@
   </main>
 
   <script>
-    let activeTab = 'arch';
+    const allTabIds = ['codebase', 'arch', 'flow', 'codex'];
+    let activeTab = 'codebase';
     let currentMode = 'fit';
 
-    const states = {
-      arch: { scale: 1, panX: 0, panY: 0, isPanning: false, startX: 0, startY: 0 },
-      flow: { scale: 1, panX: 0, panY: 0, isPanning: false, startX: 0, startY: 0 },
-      codex: { scale: 1, panX: 0, panY: 0, isPanning: false, startX: 0, startY: 0 }
+    const states = {};
+    allTabIds.forEach(id => {
+      states[id] = { scale: 1, panX: 0, panY: 0, isPanning: false, startX: 0, startY: 0 };
+    });
+
+    const fileMap = {
+      codebase: 'codebase-class-diagram',
+      arch: 'architecture-diagram',
+      flow: 'user-flow-diagram',
+      codex: 'codex-auth-flow'
     };
 
     function updateTransform(id) {
@@ -406,7 +433,9 @@
     function zoom(id, delta) {
       if (currentMode !== 'fit') setViewMode('fit');
       const s = states[id];
-      const newScale = Math.min(Math.max(s.scale + delta, 0.25), 3.5);
+      // Adaptive step scaling with current zoom level: allows smooth zoom capped at 4000% (40x)
+      const step = Math.max(0.1, s.scale * 0.25);
+      const newScale = Math.min(40.0, Math.max(0.1, s.scale + (delta > 0 ? step : -step)));
       s.scale = Number(newScale.toFixed(2));
       updateTransform(id);
     }
@@ -421,39 +450,24 @@
 
     function switchTab(tab) {
       activeTab = tab;
-      const cards = {
-        arch: document.getElementById('arch-card'),
-        flow: document.getElementById('flow-card'),
-        codex: document.getElementById('codex-card')
-      };
-      const tabs = {
-        arch: document.getElementById('tabArch'),
-        flow: document.getElementById('tabFlow'),
-        codex: document.getElementById('tabCodex')
-      };
+      allTabIds.forEach(key => {
+        const card = document.getElementById(key + '-card');
+        const tabBtn = document.getElementById('tab' + key.charAt(0).toUpperCase() + key.slice(1));
+        if (key === tab) {
+          if (card) card.classList.add('active');
+          if (tabBtn) tabBtn.classList.add('active');
+        } else {
+          if (card) card.classList.remove('active');
+          if (tabBtn) tabBtn.classList.remove('active');
+        }
+      });
+
+      const baseFile = fileMap[tab] || 'codebase-class-diagram';
       const downloadSvg = document.getElementById('downloadSvg');
       const downloadPng = document.getElementById('downloadPng');
+      if (downloadSvg) downloadSvg.href = `${baseFile}.svg`;
+      if (downloadPng) downloadPng.href = `${baseFile}.png`;
 
-      for (const key of ['arch', 'flow', 'codex']) {
-        if (key === tab) {
-          cards[key].classList.add('active');
-          tabs[key].classList.add('active');
-        } else {
-          cards[key].classList.remove('active');
-          tabs[key].classList.remove('active');
-        }
-      }
-
-      if (tab === 'arch') {
-        downloadSvg.href = 'architecture-diagram.svg';
-        downloadPng.href = 'architecture-diagram.png';
-      } else if (tab === 'flow') {
-        downloadSvg.href = 'user-flow-diagram.svg';
-        downloadPng.href = 'user-flow-diagram.png';
-      } else {
-        downloadSvg.href = 'codex-auth-flow.svg';
-        downloadPng.href = 'codex-auth-flow.png';
-      }
       updateTransform(tab);
     }
 
@@ -461,30 +475,25 @@
       currentMode = mode;
       const btnFit = document.getElementById('modeFit');
       const btnScroll = document.getElementById('modeScroll');
-      const viewports = [
-        document.getElementById('viewport-arch'),
-        document.getElementById('viewport-flow'),
-        document.getElementById('viewport-codex')
-      ];
+      const viewports = allTabIds.map(id => document.getElementById('viewport-' + id)).filter(Boolean);
 
       if (mode === 'fit') {
-        btnFit.classList.add('active');
-        btnScroll.classList.remove('active');
+        if (btnFit) btnFit.classList.add('active');
+        if (btnScroll) btnScroll.classList.remove('active');
         viewports.forEach(vp => vp.classList.remove('scroll-mode'));
-        updateTransform('arch');
-        updateTransform('flow');
-        updateTransform('codex');
+        allTabIds.forEach(id => updateTransform(id));
       } else {
-        btnFit.classList.remove('active');
-        btnScroll.classList.add('active');
+        if (btnFit) btnFit.classList.remove('active');
+        if (btnScroll) btnScroll.classList.add('active');
         viewports.forEach(vp => vp.classList.add('scroll-mode'));
       }
     }
 
     // Set up Pan & Wheel interaction for all viewports
-    ['arch', 'flow', 'codex'].forEach(id => {
+    allTabIds.forEach(id => {
       const vp = document.getElementById('viewport-' + id);
       const s = states[id];
+      if (!vp) return;
 
       vp.addEventListener('mousedown', (e) => {
         if (currentMode !== 'fit') return;
@@ -525,15 +534,10 @@
     // Initialize layout
     document.addEventListener('DOMContentLoaded', () => {
       setViewMode('fit');
-      updateTransform('arch');
-      updateTransform('flow');
-      updateTransform('codex');
+      allTabIds.forEach(id => updateTransform(id));
     });
-    // In case DOM is already loaded
     setViewMode('fit');
-    updateTransform('arch');
-    updateTransform('flow');
-    updateTransform('codex');
+    allTabIds.forEach(id => updateTransform(id));
   </script>
 </body>
 </html>

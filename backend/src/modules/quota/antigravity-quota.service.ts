@@ -155,7 +155,16 @@ export class AntigravityQuotaService {
   }
 
   public invalidateUserQuota(userKey: string): void {
-    this.cachedQuotaLimitsMap.delete(userKey);
+    for (const key of Array.from(this.cachedQuotaLimitsMap.keys())) {
+      if (key === userKey || key.startsWith(`${userKey}:`)) {
+        this.cachedQuotaLimitsMap.delete(key);
+      }
+    }
+    for (const key of Array.from(this.inFlightQuotaMap.keys())) {
+      if (key === userKey || key.startsWith(`${userKey}:`)) {
+        this.inFlightQuotaMap.delete(key);
+      }
+    }
   }
 
   /**
@@ -209,6 +218,8 @@ export class AntigravityQuotaService {
           }));
 
           logger.info('[Antigravity Quota] Resolved live Google Code Assist quota', {
+            sandboxId: activeSandboxId,
+            userId,
             groupsCount: groups.length,
             groups: groups.map((g) => g.name),
           });
@@ -236,13 +247,15 @@ export class AntigravityQuotaService {
     sessionId?: string,
     userId?: string
   ): Promise<CliQuotaLimits> {
-    const cached = this.cachedQuotaLimitsMap.get(userKey);
+    const activeSandboxId = this.resolveSandboxId(userId, sessionId);
+    const cacheKey = `${userKey}:${activeSandboxId || 'none'}`;
+    const cached = this.cachedQuotaLimitsMap.get(cacheKey);
     const now = Date.now();
     if (cached && now - cached.timestamp < 10000) {
       return cached.limits;
     }
 
-    const inFlight = this.inFlightLimitsMap.get(userKey);
+    const inFlight = this.inFlightLimitsMap.get(cacheKey);
     if (inFlight) {
       return inFlight;
     }
@@ -251,7 +264,7 @@ export class AntigravityQuotaService {
       // Live Google Code Assist CLI live fetch via cloud sandbox
       const liveLimits = await this.queryLiveGoogleQuota(userId, sessionId);
       if (liveLimits && liveLimits.groups.length > 0) {
-        this.cachedQuotaLimitsMap.set(userKey, { limits: liveLimits, timestamp: Date.now() });
+        this.cachedQuotaLimitsMap.set(cacheKey, { limits: liveLimits, timestamp: Date.now() });
         return liveLimits;
       }
 
@@ -265,11 +278,11 @@ export class AntigravityQuotaService {
       return initialLimits;
     })();
 
-    this.inFlightLimitsMap.set(userKey, limitsPromise);
+    this.inFlightLimitsMap.set(cacheKey, limitsPromise);
     try {
       return await limitsPromise;
     } finally {
-      this.inFlightLimitsMap.delete(userKey);
+      this.inFlightLimitsMap.delete(cacheKey);
     }
   }
 

@@ -10,6 +10,7 @@ import {
   isAuthModalOpenAtom,
   isDarkModeAtom,
   isInspectorOpenAtom,
+  isTelemetryModalOpenAtom,
   sandboxUsageAtom,
   selectedModelAtom,
   currentSessionIdAtom,
@@ -29,6 +30,7 @@ interface SandboxUsageData {
     attachedSessionIds: string[];
     lastUpdateCheckAt?: number;
     isUpdating?: boolean;
+    isProvisioning?: boolean;
   }>;
 }
 
@@ -51,7 +53,7 @@ interface HeaderProps {
   isDarkMode?: boolean;
   onToggleTheme?: () => void;
   currentSessionId?: string | null;
-  onSandboxChanged?: (sandboxId: string) => void;
+  onSandboxChanged?: (sandboxId: string, usage?: SandboxUsageData) => void;
   sandboxUsage?: SandboxUsageData | null;
   validSessionIds?: string[];
   activeSandbox?: { sandboxId: string; name: string } | null;
@@ -102,8 +104,9 @@ export const Header: React.FC<HeaderProps> = ({
   const onToggleInspector = propOnToggleInspector ?? (() => setAtomInspectorOpen((prev) => !prev));
   const onOpenAuthModal = propOnOpenAuthModal ?? (() => setIsAuthModalOpen(true));
 
-  const [showLimitsPopover, setShowLimitsPopover] = useState(false);
+  const [showLimitsPopover, setShowLimitsPopover] = useAtom(isTelemetryModalOpenAtom);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const mobileLimitsModalRef = useRef<HTMLDivElement>(null);
 
   const [showSandboxDropdown, setShowSandboxDropdown] = useState(false);
   const [internalSandboxUsage, setInternalSandboxUsage] = useState<SandboxUsageData | null>(null);
@@ -138,7 +141,7 @@ export const Header: React.FC<HeaderProps> = ({
       if (data.success && data.data) {
         setInternalSandboxUsage(data.data);
       }
-    } catch {}
+    } catch { }
   };
 
   // Only perform standalone fetch if sandboxUsage prop is not provided by parent App
@@ -151,7 +154,12 @@ export const Header: React.FC<HeaderProps> = ({
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
-      if (popoverRef.current && !popoverRef.current.contains(target)) {
+      if (
+        popoverRef.current &&
+        !popoverRef.current.contains(target) &&
+        (!mobileLimitsModalRef.current || !mobileLimitsModalRef.current.contains(target)) &&
+        !(target as HTMLElement)?.closest?.('[role="dialog"]')
+      ) {
         setShowLimitsPopover(false);
       }
       if (
@@ -206,7 +214,7 @@ export const Header: React.FC<HeaderProps> = ({
         }
         setSwitchingSandboxId(null);
         fetchSandboxUsage();
-        onSandboxChanged?.(targetSandboxId);
+        onSandboxChanged?.(targetSandboxId, data.data?.usage);
         setShowSandboxDropdown(false);
       }
     } catch (err) {
@@ -448,6 +456,31 @@ export const Header: React.FC<HeaderProps> = ({
     return 'Active';
   }, [isAntigravity, fraction5h, fractionWeekly, relevantGroup]);
 
+  // Ultra-compact single indicator strictly for mobile screens (e.g. "100%")
+  const mobileQuotaBadgeText = useMemo(() => {
+    if (isAnyLimitExhausted) return '0%';
+
+    if (isAntigravity) {
+      if (fraction5h !== undefined) {
+        return `${Math.round(fraction5h * 100)}%`;
+      }
+      if (fractionWeekly !== undefined) {
+        return `${Math.round(fractionWeekly * 100)}%`;
+      }
+    }
+
+    const singleFraction =
+      relevantGroup?.buckets?.[0]?.remaining_fraction ??
+      fraction5h ??
+      fractionWeekly;
+
+    if (singleFraction !== undefined) {
+      return `${Math.round(singleFraction * 100)}%`;
+    }
+
+    return 'OK';
+  }, [isAnyLimitExhausted, isAntigravity, fraction5h, fractionWeekly, relevantGroup]);
+
   const formatResetCountdown = (isoDate?: string, remainingFraction?: number): string => {
     if (remainingFraction !== undefined && remainingFraction >= 1.0) {
       return 'Quota available';
@@ -469,6 +502,406 @@ export const Header: React.FC<HeaderProps> = ({
     }
     return `Refreshes in ${minutes}m`;
   };
+
+  const renderLimitsContent = (isMobileModal = false) => (
+    <>
+      {/* Header with Switcher Tabs */}
+      <div className="flex items-center justify-between pb-space-sm border-b border-outline-variant/20 mb-space-sm">
+        <div className="flex items-center gap-1.5">
+          {isNoneSelected ? (
+            <span className="material-symbols-outlined text-outline text-[18px]">
+              speed
+            </span>
+          ) : isCodex ? (
+            <img src="/provider-icons/codex.svg" alt="Codex" className="w-4 h-4 object-contain shrink-0" />
+          ) : isClaude ? (
+            <img src="/provider-icons/claude.svg" alt="Claude" className="w-4 h-4 object-contain shrink-0" />
+          ) : (
+            <img src="/provider-icons/antigravity.svg" alt="Antigravity" className="w-4 h-4 object-contain shrink-0" />
+          )}
+          <span id="cli-telemetry-title" className="font-semibold text-sm text-on-surface">
+            {isNoneSelected
+              ? 'CLI Telemetry'
+              : isCodex
+                ? 'OpenAI Codex Telemetry'
+                : isClaude
+                  ? 'Anthropic Claude Telemetry'
+                  : 'Antigravity CLI Telemetry'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {isNoneSelected ? (
+            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-surface-container-highest text-outline border border-outline-variant/20">
+              STANDBY
+            </span>
+          ) : isModelLinked ? (
+            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              CONNECTED
+            </span>
+          ) : null}
+          {isMobileModal && (
+            <button
+              type="button"
+              onClick={() => setShowLimitsPopover(false)}
+              className="w-7 h-7 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/30 flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-all cursor-pointer"
+              title="Close modal"
+            >
+              <span className="material-symbols-outlined text-[18px]">close</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {isNoneSelected ? (
+        /* Standby View when No Model is Selected */
+        <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 text-center space-y-3">
+          <div className="w-10 h-10 rounded-full bg-surface-container-highest text-outline flex items-center justify-center mx-auto border border-outline-variant/30">
+            <span className="material-symbols-outlined text-[20px]">tune</span>
+          </div>
+          <div>
+            <div className="font-semibold text-xs text-on-surface">
+              Live Telemetry on Standby
+            </div>
+            <p className="text-[11px] text-on-surface-variant mt-1 leading-relaxed">
+              No model is currently selected. Select a model (Antigravity, Codex, or Claude) in the prompt bar below to activate real-time CLI telemetry, live quota tracking, and session analytics.
+            </p>
+          </div>
+
+          {/* Connected Providers Status */}
+          <div className="pt-2 border-t border-outline-variant/15 text-left space-y-1.5">
+            <div className="text-[10px] font-mono uppercase tracking-wider text-outline px-1">
+              CLI Providers Status
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="flex items-center gap-2 p-2 rounded-lg bg-surface-container border border-outline-variant/20 text-[11px]">
+                <img src="/provider-icons/antigravity.svg" alt="Antigravity" className="w-3.5 h-3.5 object-contain shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-medium text-on-surface truncate">Antigravity CLI</div>
+                  <div className="text-[10px] text-primary flex items-center gap-1 font-mono">
+                    <span className="w-1.5 h-1.5 rounded-full bg-primary inline-block"></span>
+                    Ready
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 p-2 rounded-lg bg-surface-container border border-outline-variant/20 text-[11px]">
+                <img src="/provider-icons/codex.svg" alt="Codex" className="w-3.5 h-3.5 object-contain shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-medium text-on-surface truncate">Codex CLI</div>
+                  <div className="text-[10px] text-emerald-400 flex items-center gap-1 font-mono">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span>
+                    Ready
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : !isModelLinked ? (
+        /* Locked Quota Card when Not Linked */
+        <div className="p-3.5 rounded-xl bg-surface-container-low border border-outline-variant/30 mb-2 text-center space-y-2">
+          <div className="w-8 h-8 rounded-full bg-amber-500/10 text-amber-400 flex items-center justify-center mx-auto border border-amber-500/20">
+            <span className="material-symbols-outlined text-[18px]">lock</span>
+          </div>
+          <div>
+            <div className="font-semibold text-xs text-on-surface">
+              {isCodex ? 'OpenAI Codex CLI Not Linked' : isClaude ? 'Claude CLI Not Linked' : 'Antigravity CLI Not Linked'}
+            </div>
+            <p className="text-[11px] text-on-surface-variant mt-0.5 leading-snug">
+              {isCodex
+                ? 'Link your ChatGPT account via Codex CLI to enable live execution and telemetry.'
+                : isClaude
+                  ? 'Link your Anthropic account via Claude CLI to enable live execution and telemetry.'
+                  : 'Sign in with your Google account to enable live Antigravity CLI execution and telemetry.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setShowLimitsPopover(false);
+              onOpenAuthModal();
+            }}
+            className="w-full py-1.5 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+          >
+            <span className="material-symbols-outlined text-[14px]">login</span>
+            <span>{isCodex ? 'Link Codex CLI' : isClaude ? 'Link Claude CLI' : 'Link Google Account'}</span>
+          </button>
+        </div>
+      ) : !activeSandbox ? (
+        <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 text-center space-y-3">
+          <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center mx-auto border border-primary/20">
+            <span className="material-symbols-outlined text-[20px]">dns</span>
+          </div>
+          <div>
+            <div className="font-semibold text-xs text-on-surface">
+              Sandbox VM Required for Telemetry
+            </div>
+            <p className="text-[11px] text-on-surface-variant mt-1 leading-relaxed">
+              Please start a sandbox/VM and select it to see quota for CLI telemetry. All CLIs run strictly in your isolated microVM.
+            </p>
+          </div>
+
+          {sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0 ? (
+            <div className="space-y-2 pt-1 text-left">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-outline px-1">
+                Select Sandbox VM to Attach:
+              </div>
+              <div className="space-y-1.5 max-h-36 overflow-y-auto custom-scrollbar">
+                {sandboxUsage.sandboxes.map((sb, idx) => (
+                  <button
+                    key={sb.sandboxId}
+                    type="button"
+                    onClick={() => {
+                      handleSwitchSandbox(sb.sandboxId);
+                      onRefreshQuota?.();
+                    }}
+                    disabled={switchingSandboxId === sb.sandboxId}
+                    className="w-full flex items-center justify-between p-2 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 hover:border-primary/40 text-xs transition-all cursor-pointer text-left"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="material-symbols-outlined text-[16px] text-primary shrink-0">
+                        {switchingSandboxId === sb.sandboxId ? 'sync' : 'link'}
+                      </span>
+                      <span className="font-medium text-on-surface truncate">
+                        {sb.name || `Sandbox #${idx + 1}`}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-primary font-semibold shrink-0">
+                      {switchingSandboxId === sb.sandboxId ? 'Attaching...' : 'Attach'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              {sandboxUsage.used < sandboxUsage.max && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await handleCreateSandbox();
+                    onRefreshQuota?.();
+                  }}
+                  disabled={isCreatingSandbox}
+                  className="w-full mt-1 py-1.5 px-2 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/30 text-on-surface-variant hover:text-on-surface text-[11px] font-medium transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <span className={`material-symbols-outlined text-[13px] ${isCreatingSandbox ? 'animate-spin' : ''}`}>
+                    {isCreatingSandbox ? 'progress_activity' : 'add_circle'}
+                  </span>
+                  <span>{isCreatingSandbox ? 'Launching...' : '+ Start New Sandbox VM'}</span>
+                </button>
+              )}
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={async () => {
+                await handleCreateSandbox();
+                onRefreshQuota?.();
+              }}
+              disabled={isCreatingSandbox}
+              className="w-full py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+            >
+              <span className={`material-symbols-outlined text-[15px] ${isCreatingSandbox ? 'animate-spin' : ''}`}>
+                {isCreatingSandbox ? 'progress_activity' : 'bolt'}
+              </span>
+              <span>{isCreatingSandbox ? 'Booting Cloud MicroVM...' : 'Start Sandbox VM'}</span>
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {/* Account & Active Model Bar */}
+          <div className="p-2.5 rounded-xl bg-surface-container-low border border-outline-variant/20 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              <div className="min-w-0">
+                <div className="text-[11px] font-medium text-on-surface truncate">
+                  {linkedEmail || 'Linked Account'}
+                </div>
+                <div className="text-[10px] text-on-surface-variant truncate flex items-center gap-1 mt-0.5">
+                  <span>Active Model:</span>
+                  {modelName.toLowerCase().includes('none') ? (
+                    <span className="material-symbols-outlined text-[13px] text-outline">tune</span>
+                  ) : modelName.toLowerCase().includes('claude') ? (
+                    <img src="/provider-icons/claude.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
+                  ) : modelName.toLowerCase().includes('gpt') || modelName.toLowerCase().includes('codex') || modelName.toLowerCase().startsWith('o') ? (
+                    <img src="/model-icons/openai.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
+                  ) : modelName.toLowerCase().includes('gemini') ? (
+                    <img src="/model-icons/google-gemini.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
+                  ) : (
+                    <img src="/provider-icons/antigravity.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
+                  )}
+                  <span className="text-primary font-mono font-medium">{modelName}</span>
+                </div>
+              </div>
+            </div>
+            <span className="text-[10px] font-medium text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20 shrink-0">
+              Connected
+            </span>
+          </div>
+
+          {/* Quota Groups */}
+          {isCodex ? (
+            <div className="space-y-3">
+              {/* Authentic Rolling Quota Bar (if available from Codex session rate limits) */}
+              {quotaLimits && quotaLimits.groups && quotaLimits.groups.length > 0 ? (
+                <div className="space-y-3">
+                  {quotaLimits.groups.map((group, gIdx) => (
+                    <div
+                      key={group.name || gIdx}
+                      className="p-3.5 rounded-xl bg-surface-container-low border border-outline-variant/20 space-y-3"
+                    >
+                      <div>
+                        <div className="font-bold text-xs uppercase tracking-wider text-on-surface flex items-center gap-1.5">
+                          <img src="/provider-icons/codex.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
+                          <span>{group.name}</span>
+                        </div>
+                        {group.description && (
+                          <div className="text-[11px] text-[#9ca3af] mt-0.5">
+                            {group.description}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="space-y-3 pt-0.5">
+                        {group.buckets.map((bucket) => {
+                          const pct = Math.max(0, Math.min(100, bucket.remaining_fraction * 100));
+                          return (
+                            <div key={bucket.id || bucket.name} className="space-y-1">
+                              <div className="text-xs font-semibold text-on-surface">
+                                {bucket.name}
+                              </div>
+
+                              <div className="flex items-center gap-1.5 font-mono text-xs">
+                                <span className="text-outline font-semibold select-none">[</span>
+                                <div className="flex-1 h-3.5 bg-surface-container-highest dark:bg-[#1f2937] rounded-xs overflow-hidden border border-outline-variant/30">
+                                  <div
+                                    className="h-full bg-emerald-500 rounded-xs transition-all duration-500"
+                                    style={{ width: `${pct}%` }}
+                                  />
+                                </div>
+                                <span className="text-outline font-semibold select-none">]</span>
+                                <span className="w-14 text-right text-xs font-mono font-semibold text-on-surface">
+                                  {pct.toFixed(2)}%
+                                </span>
+                              </div>
+
+                              <div className="text-[11px] font-mono text-emerald-500">
+                                {formatResetCountdown(bucket.reset_time, bucket.remaining_fraction)}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/20 text-center space-y-2 text-xs">
+                  <div className="flex items-center justify-center gap-2 text-emerald-400">
+                    <span className="material-symbols-outlined text-[18px]">check_circle</span>
+                    <span className="font-semibold">Codex Sandbox Environment Ready</span>
+                  </div>
+                  <p className="text-[11px] text-outline leading-relaxed">
+                    Live dynamic session rate limits are fetched directly on response streams via OpenAI's Codex backend.
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : quotaLimits && quotaLimits.groups && quotaLimits.groups.length > 0 ? (
+            <div className="space-y-3">
+              {quotaLimits.groups.map((group, idx) => {
+                const isCurrentActiveGroup = relevantGroup?.name === group.name;
+                return (
+                  <div
+                    key={group.name || idx}
+                    className={`p-3.5 rounded-xl border space-y-3 transition-colors ${isCurrentActiveGroup
+                      ? 'bg-surface-container border-primary/40 ring-1 ring-primary/20'
+                      : 'bg-surface-container-low border-outline-variant/20'
+                      }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-bold text-xs uppercase tracking-wider text-on-surface flex items-center gap-1.5">
+                          {group.name.toLowerCase().includes('claude') ? (
+                            <img src="/provider-icons/claude.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
+                          ) : group.name.toLowerCase().includes('gpt') ? (
+                            <img src="/model-icons/openai.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
+                          ) : group.name.toLowerCase().includes('gemini') ? (
+                            <img src="/model-icons/google-gemini.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
+                          ) : (
+                            <img src="/provider-icons/antigravity.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
+                          )}
+                          <span>{group.name.toUpperCase()}</span>
+                        </div>
+                        {isCurrentActiveGroup && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-primary/10 text-primary border border-primary/20 shrink-0">
+                            Active Model Quota
+                          </span>
+                        )}
+                      </div>
+                      {group.description && (
+                        <div className="text-[11px] text-[#9ca3af] mt-0.5">
+                          {group.description}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-3 pt-0.5">
+                      {group.buckets.map((bucket) => {
+                        const pct = Math.max(0, Math.min(100, bucket.remaining_fraction * 100));
+                        return (
+                          <div key={bucket.id || bucket.name} className="space-y-1">
+                            <div className="text-xs font-semibold text-on-surface">
+                              {bucket.name}
+                            </div>
+
+                            <div className="flex items-center gap-1.5 font-mono text-xs">
+                              <span className="text-outline font-semibold select-none">[</span>
+                              <div className="flex-1 h-3.5 bg-surface-container-highest dark:bg-[#2d1225] rounded-xs overflow-hidden border border-outline-variant/30">
+                                <div
+                                  className="h-full bg-[#10b981] rounded-xs transition-all duration-500"
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                              <span className="text-outline font-semibold select-none">]</span>
+                              <span className="w-14 text-right text-xs font-mono font-semibold text-on-surface">
+                                {pct.toFixed(2)}%
+                              </span>
+                            </div>
+
+                            <div className="text-[11px] font-mono text-[#10b981]">
+                              {formatResetCountdown(bucket.reset_time, bucket.remaining_fraction)}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/20 text-center space-y-2 text-xs">
+              <div className="flex items-center justify-center gap-2 text-outline">
+                <span className="material-symbols-outlined text-[18px] animate-spin">
+                  progress_activity
+                </span>
+                <span>Acquiring live limits from /quota...</span>
+              </div>
+              <p className="text-[11px] text-outline">
+                Antigravity CLI is evaluating capacity for your linked Google account.
+              </p>
+            </div>
+          )}
+
+          {/* Quota Description Footer */}
+          {quotaLimits?.description && (
+            <p className="text-[10px] text-outline leading-tight pt-1 border-t border-outline-variant/15">
+              {quotaLimits.description}
+            </p>
+          )}
+        </div>
+      )}
+    </>
+  );
 
   return (
     <header className={`fixed top-0 left-0 right-0 lg:left-[260px] ${isInspectorOpen ? 'xl:right-[380px]' : 'xl:right-0'} h-14 bg-background/90 backdrop-blur-md border-b border-outline-variant/30 px-3 md:px-gutter-desktop flex items-center justify-between z-40 transition-all duration-300`}>
@@ -499,8 +932,8 @@ export const Header: React.FC<HeaderProps> = ({
               activeSandbox
                 ? `Cloud Sandbox: ${activeSandbox.name} (Active)`
                 : sandboxUsage && sandboxUsage.used >= sandboxUsage.max
-                ? `No Sandbox Active (Standby) - Quota Full (${sandboxUsage.used}/${sandboxUsage.max} Running)`
-                : 'No Sandbox Running (Standby) - Click to Start Sandbox VM'
+                  ? `No Sandbox Active (Standby) - Quota Full (${sandboxUsage.used}/${sandboxUsage.max} Running)`
+                  : 'No Sandbox Running (Standby) - Click to Start Sandbox VM'
             }
           >
             {activeSandbox ? (
@@ -521,13 +954,12 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
             {user && sandboxUsage && (
               <span
-                className={`text-[9px] sm:text-[10px] px-1 sm:px-1.5 py-0.2 rounded font-mono font-medium shrink-0 ${
-                  activeSandbox
-                    ? sandboxUsage.used >= sandboxUsage.max
-                      ? 'bg-amber-500/20 text-amber-300'
-                      : 'bg-emerald-500/15 text-emerald-300'
-                    : 'bg-surface-container-high text-on-surface-variant'
-                }`}
+                className={`text-[9px] sm:text-[10px] px-1 sm:px-1.5 py-0.2 rounded font-mono font-medium shrink-0 ${activeSandbox
+                  ? sandboxUsage.used >= sandboxUsage.max
+                    ? 'bg-amber-500/20 text-amber-300'
+                    : 'bg-emerald-500/15 text-emerald-300'
+                  : 'bg-surface-container-high text-on-surface-variant'
+                  }`}
               >
                 {sandboxUsage.used}/{sandboxUsage.max}
               </span>
@@ -553,11 +985,10 @@ export const Header: React.FC<HeaderProps> = ({
                   </div>
                   {sandboxUsage && (
                     <span
-                      className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${
-                        sandboxUsage.used >= sandboxUsage.max
-                          ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                          : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                      }`}
+                      className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${sandboxUsage.used >= sandboxUsage.max
+                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        }`}
                     >
                       {sandboxUsage.used}/{sandboxUsage.max} {sandboxUsage.used >= sandboxUsage.max ? 'FULL' : 'SLOTS'}
                     </span>
@@ -638,6 +1069,7 @@ export const Header: React.FC<HeaderProps> = ({
                           role="button"
                           tabIndex={0}
                           onClick={() => {
+                            if (sb.isProvisioning) return;
                             if (!isCurrent && !isSwitching) {
                               handleSwitchSandbox(sb.sandboxId);
                             } else if (isCurrent) {
@@ -647,6 +1079,7 @@ export const Header: React.FC<HeaderProps> = ({
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' || e.key === ' ') {
                               e.preventDefault();
+                              if (sb.isProvisioning) return;
                               if (!isCurrent && !isSwitching) {
                                 handleSwitchSandbox(sb.sandboxId);
                               } else if (isCurrent) {
@@ -654,16 +1087,19 @@ export const Header: React.FC<HeaderProps> = ({
                               }
                             }
                           }}
-                          className={`p-2.5 rounded-lg border transition-all select-none active:scale-[0.99] ${
-                            isCurrent
-                              ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
-                              : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
-                          }`}
-                          title={isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
+                          className={`p-2.5 rounded-lg border transition-all select-none active:scale-[0.99] ${sb.isProvisioning
+                            ? 'bg-surface-container-low/60 border-primary/20 opacity-80 cursor-wait'
+                            : isCurrent
+                            ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
+                            : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
+                            }`}
+                          title={sb.isProvisioning ? `${displayName} is initializing cloud microVM and toolchains...` : isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
                         >
                           <div className="flex items-center justify-between mb-1">
                             <div className="flex items-center gap-1.5 min-w-0">
-                              {isSwitching ? (
+                              {sb.isProvisioning ? (
+                                <span className="material-symbols-outlined text-[16px] text-primary shrink-0 animate-spin">progress_activity</span>
+                              ) : isSwitching ? (
                                 <span className="material-symbols-outlined text-[16px] text-primary shrink-0 animate-spin">progress_activity</span>
                               ) : isCurrent ? (
                                 <span className="material-symbols-outlined text-[16px] text-primary shrink-0">check_circle</span>
@@ -675,21 +1111,30 @@ export const Header: React.FC<HeaderProps> = ({
                               </span>
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
-                              {sb.isUpdating && (
-                                <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/30 px-1.5 py-0.5 rounded font-medium flex items-center gap-1" title="24h maintenance in progress: updating sandbox CLIs">
-                                  <span className="material-symbols-outlined text-[11px] animate-spin">sync</span>
-                                  Updating CLIs
+                              {sb.isProvisioning ? (
+                                <span className="text-[10px] bg-primary/10 text-primary border border-primary/30 px-1.5 py-0.5 rounded font-medium flex items-center gap-1 animate-pulse" title="Cloud microVM is booting and configuring security boundary">
+                                  <span className="material-symbols-outlined text-[11px] animate-spin">progress_activity</span>
+                                  Booting VM
                                 </span>
-                              )}
-                              {isCurrent && (
-                                <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
-                                  Active Chat
-                                </span>
-                              )}
-                              {isSwitching && (
-                                <span className="text-[10px] text-primary font-medium animate-pulse">
-                                  Attaching...
-                                </span>
+                              ) : (
+                                <>
+                                  {sb.isUpdating && (
+                                    <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/30 px-1.5 py-0.5 rounded font-medium flex items-center gap-1" title="24h maintenance in progress: updating sandbox CLIs">
+                                      <span className="material-symbols-outlined text-[11px] animate-spin">sync</span>
+                                      Updating CLIs
+                                    </span>
+                                  )}
+                                  {isCurrent && (
+                                    <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
+                                      Active Chat
+                                    </span>
+                                  )}
+                                  {isSwitching && (
+                                    <span className="text-[10px] text-primary font-medium animate-pulse">
+                                      Attaching...
+                                    </span>
+                                  )}
+                                </>
                               )}
                               <button
                                 type="button"
@@ -697,9 +1142,9 @@ export const Header: React.FC<HeaderProps> = ({
                                   e.stopPropagation();
                                   handleDeleteSandbox(sb.sandboxId, displayName, realChatCount, isCurrent);
                                 }}
-                                disabled={deletingSandboxId === sb.sandboxId}
-                                className="p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors cursor-pointer"
-                                title="Delete this sandbox to free up 1 slot"
+                                disabled={deletingSandboxId === sb.sandboxId || sb.isProvisioning}
+                                className={`p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors ${sb.isProvisioning ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+                                title={sb.isProvisioning ? 'Sandbox is initializing' : 'Delete this sandbox to free up 1 slot'}
                               >
                                 <span className="material-symbols-outlined text-[15px]">
                                   {deletingSandboxId === sb.sandboxId ? 'sync' : 'delete'}
@@ -730,28 +1175,27 @@ export const Header: React.FC<HeaderProps> = ({
                         isCreatingSandbox ||
                         (sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max)
                       }
-                      className={`w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all ${
-                        isCreatingSandbox
-                          ? 'bg-surface-container text-outline cursor-wait opacity-60'
-                          : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
+                      className={`w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all ${isCreatingSandbox
+                        ? 'bg-surface-container text-outline cursor-wait opacity-60'
+                        : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
                           ? 'bg-surface-container text-outline cursor-not-allowed opacity-60'
                           : 'bg-primary text-on-primary hover:bg-primary/90 shadow-xs cursor-pointer'
-                      }`}
+                        }`}
                       title={
                         sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
                           ? `Quota limit reached (${sandboxUsage.used}/${sandboxUsage.max} full). Delete an existing sandbox using the trash icon to create a new one.`
                           : 'Create a brand new isolated sandbox environment'
                       }
                     >
-                      <span className="material-symbols-outlined text-[16px]">
-                        {isCreatingSandbox ? 'sync' : 'add_circle'}
+                      <span className={`material-symbols-outlined text-[16px] ${isCreatingSandbox ? 'animate-spin' : ''}`}>
+                        {isCreatingSandbox ? 'progress_activity' : 'add_circle'}
                       </span>
                       <span>
                         {isCreatingSandbox
                           ? 'Launching Cloud MicroVM...'
                           : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
-                          ? `Quota Full (${sandboxUsage.used}/${sandboxUsage.max})`
-                          : '+ New Isolated Sandbox'}
+                            ? `Quota Full (${sandboxUsage.used}/${sandboxUsage.max})`
+                            : 'New Isolated Sandbox'}
                       </span>
                     </button>
                   )}
@@ -798,11 +1242,10 @@ export const Header: React.FC<HeaderProps> = ({
                       <div className="flex items-center gap-2">
                         {sandboxUsage && (
                           <span
-                            className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${
-                              sandboxUsage.used >= sandboxUsage.max
-                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                                : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                            }`}
+                            className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${sandboxUsage.used >= sandboxUsage.max
+                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                              : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                              }`}
                           >
                             {sandboxUsage.used}/{sandboxUsage.max} {sandboxUsage.used >= sandboxUsage.max ? 'FULL' : 'SLOTS'}
                           </span>
@@ -892,6 +1335,7 @@ export const Header: React.FC<HeaderProps> = ({
                               role="button"
                               tabIndex={0}
                               onClick={() => {
+                                if (sb.isProvisioning) return;
                                 if (!isCurrent && !isSwitching) {
                                   handleSwitchSandbox(sb.sandboxId);
                                 } else if (isCurrent) {
@@ -901,6 +1345,7 @@ export const Header: React.FC<HeaderProps> = ({
                               onKeyDown={(e) => {
                                 if (e.key === 'Enter' || e.key === ' ') {
                                   e.preventDefault();
+                                  if (sb.isProvisioning) return;
                                   if (!isCurrent && !isSwitching) {
                                     handleSwitchSandbox(sb.sandboxId);
                                   } else if (isCurrent) {
@@ -908,16 +1353,19 @@ export const Header: React.FC<HeaderProps> = ({
                                   }
                                 }
                               }}
-                              className={`p-2.5 rounded-lg border transition-all select-none active:scale-[0.99] ${
-                                isCurrent
-                                  ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
-                                  : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
-                              }`}
-                              title={isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
+                              className={`p-2.5 rounded-lg border transition-all select-none active:scale-[0.99] ${sb.isProvisioning
+                                ? 'bg-surface-container-low/60 border-primary/20 opacity-80 cursor-wait'
+                                : isCurrent
+                                ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
+                                : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
+                                }`}
+                              title={sb.isProvisioning ? `${displayName} is initializing cloud microVM and toolchains...` : isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
                             >
                               <div className="flex items-center justify-between mb-1">
                                 <div className="flex items-center gap-1.5 min-w-0">
-                                  {isSwitching ? (
+                                  {sb.isProvisioning ? (
+                                    <span className="material-symbols-outlined text-[16px] text-primary shrink-0 animate-spin">progress_activity</span>
+                                  ) : isSwitching ? (
                                     <span className="material-symbols-outlined text-[16px] text-primary shrink-0 animate-spin">progress_activity</span>
                                   ) : isCurrent ? (
                                     <span className="material-symbols-outlined text-[16px] text-primary shrink-0">check_circle</span>
@@ -929,21 +1377,30 @@ export const Header: React.FC<HeaderProps> = ({
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-1 shrink-0">
-                                  {sb.isUpdating && (
-                                    <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/30 px-1.5 py-0.5 rounded font-medium flex items-center gap-1" title="24h maintenance in progress: updating sandbox CLIs">
-                                      <span className="material-symbols-outlined text-[11px] animate-spin">sync</span>
-                                      Updating CLIs
+                                  {sb.isProvisioning ? (
+                                    <span className="text-[10px] bg-primary/10 text-primary border border-primary/30 px-1.5 py-0.5 rounded font-medium flex items-center gap-1 animate-pulse" title="Cloud microVM is booting and configuring security boundary">
+                                      <span className="material-symbols-outlined text-[11px] animate-spin">progress_activity</span>
+                                      Booting VM
                                     </span>
-                                  )}
-                                  {isCurrent && (
-                                    <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
-                                      Active Chat
-                                    </span>
-                                  )}
-                                  {isSwitching && (
-                                    <span className="text-[10px] text-primary font-medium animate-pulse">
-                                      Attaching...
-                                    </span>
+                                  ) : (
+                                    <>
+                                      {sb.isUpdating && (
+                                        <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/30 px-1.5 py-0.5 rounded font-medium flex items-center gap-1" title="24h maintenance in progress: updating sandbox CLIs">
+                                          <span className="material-symbols-outlined text-[11px] animate-spin">sync</span>
+                                          Updating CLIs
+                                        </span>
+                                      )}
+                                      {isCurrent && (
+                                        <span className="text-[10px] bg-primary text-on-primary px-1.5 py-0.2 rounded font-medium">
+                                          Active Chat
+                                        </span>
+                                      )}
+                                      {isSwitching && (
+                                        <span className="text-[10px] text-primary font-medium animate-pulse">
+                                          Attaching...
+                                        </span>
+                                      )}
+                                    </>
                                   )}
                                   <button
                                     type="button"
@@ -951,9 +1408,9 @@ export const Header: React.FC<HeaderProps> = ({
                                       e.stopPropagation();
                                       handleDeleteSandbox(sb.sandboxId, displayName, realChatCount, isCurrent);
                                     }}
-                                    disabled={deletingSandboxId === sb.sandboxId}
-                                    className="p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors cursor-pointer"
-                                    title="Delete this sandbox to free up 1 slot"
+                                    disabled={deletingSandboxId === sb.sandboxId || sb.isProvisioning}
+                                    className={`p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors ${sb.isProvisioning ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+                                    title={sb.isProvisioning ? 'Sandbox is initializing' : 'Delete this sandbox to free up 1 slot'}
                                   >
                                     <span className="material-symbols-outlined text-[15px]">
                                       {deletingSandboxId === sb.sandboxId ? 'sync' : 'delete'}
@@ -984,28 +1441,27 @@ export const Header: React.FC<HeaderProps> = ({
                             isCreatingSandbox ||
                             (sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max)
                           }
-                          className={`w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${
-                            isCreatingSandbox
-                              ? 'bg-surface-container text-outline cursor-wait opacity-60'
-                              : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
+                          className={`w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${isCreatingSandbox
+                            ? 'bg-surface-container text-outline cursor-wait opacity-60'
+                            : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
                               ? 'bg-surface-container text-outline cursor-not-allowed opacity-60'
                               : 'bg-primary text-on-primary hover:bg-primary/90 shadow-xs cursor-pointer'
-                          }`}
+                            }`}
                           title={
                             sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
                               ? `Quota limit reached (${sandboxUsage.used}/${sandboxUsage.max} full). Delete an existing sandbox using the trash icon to create a new one.`
                               : 'Create a brand new isolated sandbox environment'
                           }
                         >
-                          <span className="material-symbols-outlined text-[16px]">
-                            {isCreatingSandbox ? 'sync' : 'add_circle'}
+                          <span className={`material-symbols-outlined text-[16px] ${isCreatingSandbox ? 'animate-spin' : ''}`}>
+                            {isCreatingSandbox ? 'progress_activity' : 'add_circle'}
                           </span>
                           <span>
                             {isCreatingSandbox
                               ? 'Launching Cloud MicroVM...'
                               : sandboxUsage !== null && sandboxUsage.used >= sandboxUsage.max
-                              ? `Quota Full (${sandboxUsage.used}/${sandboxUsage.max})`
-                              : '+ New Isolated Sandbox'}
+                                ? `Quota Full (${sandboxUsage.used}/${sandboxUsage.max})`
+                                : 'New Isolated Sandbox'}
                           </span>
                         </button>
                       )}
@@ -1036,12 +1492,13 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => setShowLimitsPopover(!showLimitsPopover)}
-              className="hidden sm:flex items-center gap-1.5 px-space-sm py-1 rounded border border-dashed border-outline-variant/40 bg-surface-container-low text-outline hover:text-on-surface hover:border-outline-variant/80 font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0"
+              className="flex items-center gap-1 sm:gap-1.5 px-1.5 sm:px-space-sm py-1 rounded border border-dashed border-outline-variant/40 bg-surface-container-low text-outline hover:text-on-surface hover:border-outline-variant/80 font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0"
               title="No model selected. Click to view status or select a model below to activate live quota telemetry."
             >
               <span className="material-symbols-outlined text-[14px] text-outline shrink-0">speed</span>
-              <span className="text-[11px] font-mono text-outline whitespace-nowrap">Telemetry: Standby</span>
-              <span className="material-symbols-outlined text-[13px] text-outline shrink-0">
+              <span className="text-[11px] font-mono text-outline whitespace-nowrap hidden sm:inline">Telemetry: Standby</span>
+              <span className="text-[10px] font-mono text-outline whitespace-nowrap sm:hidden">Standby</span>
+              <span className="material-symbols-outlined text-[13px] text-outline shrink-0 hidden sm:inline">
                 {showLimitsPopover ? 'expand_less' : 'expand_more'}
               </span>
             </button>
@@ -1049,22 +1506,20 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => setShowLimitsPopover(!showLimitsPopover)}
-              className={`hidden sm:flex items-center gap-1.5 px-space-sm py-1 rounded border font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                !isModelLinked
-                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/15'
-                  : isAnyLimitExhausted
+              className={`flex items-center gap-1 sm:gap-1.5 px-1.5 sm:px-space-sm py-1 rounded border font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 ${!isModelLinked
+                ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/15'
+                : isAnyLimitExhausted
                   ? 'bg-rose-500/10 text-rose-300 border-rose-500/30 hover:bg-rose-500/15'
                   : 'bg-surface-container-low text-on-surface hover:bg-surface-container border-outline-variant/20'
-              }`}
+                }`}
               title={
                 !isModelLinked
                   ? `${providerLabel} CLI not linked. Click to link account.`
                   : isAntigravity && fraction5h !== undefined && fractionWeekly !== undefined
-                  ? `Antigravity CLI Quota (${relevantGroup?.name || 'All'}): 5-hour rolling: ${Math.round(
+                    ? `Antigravity CLI Quota (${relevantGroup?.name || 'All'}): 5-hour rolling: ${Math.round(
                       fraction5h * 100
                     )}%, Weekly tier: ${Math.round(fractionWeekly * 100)}%. Click to view details.`
-                  : `Click to view authentic ${providerLabel} CLI quota & telemetry${
-                      relevantGroup ? ` (${relevantGroup.name})` : ''
+                    : `Click to view authentic ${providerLabel} CLI quota & telemetry${relevantGroup ? ` (${relevantGroup.name})` : ''
                     }`
               }
             >
@@ -1073,404 +1528,61 @@ export const Header: React.FC<HeaderProps> = ({
                   <span className="material-symbols-outlined text-[14px] text-amber-400 shrink-0">
                     lock
                   </span>
-                  <span className="text-amber-400 font-medium whitespace-nowrap">
+                  <span className="text-amber-400 font-medium whitespace-nowrap hidden sm:inline">
                     {`${providerLabel} Not Linked`}
+                  </span>
+                  <span className="text-amber-400 font-medium whitespace-nowrap sm:hidden text-[10px]">
+                    Unlinked
                   </span>
                 </>
               ) : (
                 <>
                   {providerIcon}
-                  <span className="whitespace-nowrap">{`${providerLabel}: ${quotaBadgeText}`}</span>
+                  <span className="whitespace-nowrap hidden sm:inline">{`${providerLabel}: ${quotaBadgeText}`}</span>
+                  <span className="whitespace-nowrap sm:hidden font-mono text-[10px] font-semibold">{mobileQuotaBadgeText}</span>
                 </>
               )}
-              <span className="material-symbols-outlined text-[13px] text-outline shrink-0">
+              <span className="material-symbols-outlined text-[13px] text-outline shrink-0 hidden sm:inline">
                 {showLimitsPopover ? 'expand_less' : 'expand_more'}
               </span>
             </button>
           )}
 
-          {/* Detailed Real CLI Usage Telemetry Popover */}
+          {/* Detailed Real CLI Usage Telemetry Popover (Desktop) & Mobile Modal Portal */}
           {showLimitsPopover && (
-            <div className="absolute right-0 top-full mt-2 w-[390px] sm:w-[440px] max-h-[85vh] overflow-y-auto p-space-md rounded-2xl bg-surface-container border border-outline-variant/30 shadow-2xl backdrop-blur-xl z-50 animate-in fade-in slide-in-from-top-1">
-              {/* Header with Switcher Tabs */}
-              <div className="flex items-center justify-between pb-space-sm border-b border-outline-variant/20 mb-space-sm">
-                <div className="flex items-center gap-1.5">
-                  {isNoneSelected ? (
-                    <span className="material-symbols-outlined text-outline text-[18px]">
-                      speed
-                    </span>
-                  ) : isCodex ? (
-                    <img src="/provider-icons/codex.svg" alt="Codex" className="w-4 h-4 object-contain shrink-0" />
-                  ) : isClaude ? (
-                    <img src="/provider-icons/claude.svg" alt="Claude" className="w-4 h-4 object-contain shrink-0" />
-                  ) : (
-                    <img src="/provider-icons/antigravity.svg" alt="Antigravity" className="w-4 h-4 object-contain shrink-0" />
-                  )}
-                  <span className="font-semibold text-sm text-on-surface">
-                    {isNoneSelected
-                      ? 'CLI Telemetry'
-                      : isCodex
-                      ? 'OpenAI Codex Telemetry'
-                      : isClaude
-                      ? 'Anthropic Claude Telemetry'
-                      : 'Antigravity CLI Telemetry'}
-                  </span>
-                </div>
-                {isNoneSelected ? (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-surface-container-highest text-outline border border-outline-variant/20">
-                    STANDBY
-                  </span>
-                ) : isModelLinked ? (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                    CONNECTED
-                  </span>
-                ) : null}
+            <>
+              {/* Desktop Popover */}
+              <div className="hidden sm:block absolute right-0 top-full mt-2 w-[390px] sm:w-[440px] max-h-[85vh] overflow-y-auto p-space-md rounded-2xl bg-surface-container border border-outline-variant/30 shadow-2xl backdrop-blur-xl z-50 animate-in fade-in slide-in-from-top-1">
+                {renderLimitsContent(false)}
               </div>
 
-              {isNoneSelected ? (
-                /* Standby View when No Model is Selected */
-                <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 text-center space-y-3">
-                  <div className="w-10 h-10 rounded-full bg-surface-container-highest text-outline flex items-center justify-center mx-auto border border-outline-variant/30">
-                    <span className="material-symbols-outlined text-[20px]">tune</span>
-                  </div>
-                  <div>
-                    <div className="font-semibold text-xs text-on-surface">
-                      Live Telemetry on Standby
-                    </div>
-                    <p className="text-[11px] text-on-surface-variant mt-1 leading-relaxed">
-                      No model is currently selected. Select a model (Antigravity, Codex, or Claude) in the prompt bar below to activate real-time CLI telemetry, live quota tracking, and session analytics.
-                    </p>
-                  </div>
-
-                  {/* Connected Providers Status */}
-                  <div className="pt-2 border-t border-outline-variant/15 text-left space-y-1.5">
-                    <div className="text-[10px] font-mono uppercase tracking-wider text-outline px-1">
-                      CLI Providers Status
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="flex items-center gap-2 p-2 rounded-lg bg-surface-container border border-outline-variant/20 text-[11px]">
-                        <img src="/provider-icons/antigravity.svg" alt="Antigravity" className="w-3.5 h-3.5 object-contain shrink-0" />
-                        <div className="min-w-0">
-                          <div className="font-medium text-on-surface truncate">Antigravity CLI</div>
-                          <div className="text-[10px] text-primary flex items-center gap-1 font-mono">
-                            <span className="w-1.5 h-1.5 rounded-full bg-primary inline-block"></span>
-                            Ready
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 p-2 rounded-lg bg-surface-container border border-outline-variant/20 text-[11px]">
-                        <img src="/provider-icons/codex.svg" alt="Codex" className="w-3.5 h-3.5 object-contain shrink-0" />
-                        <div className="min-w-0">
-                          <div className="font-medium text-on-surface truncate">Codex CLI</div>
-                          <div className="text-[10px] text-emerald-400 flex items-center gap-1 font-mono">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span>
-                            Ready
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : !isModelLinked ? (
-                /* Locked Quota Card when Not Linked */
-                <div className="p-3.5 rounded-xl bg-surface-container-low border border-outline-variant/30 mb-2 text-center space-y-2">
-                  <div className="w-8 h-8 rounded-full bg-amber-500/10 text-amber-400 flex items-center justify-center mx-auto border border-amber-500/20">
-                    <span className="material-symbols-outlined text-[18px]">lock</span>
-                  </div>
-                  <div>
-                    <div className="font-semibold text-xs text-on-surface">
-                      {isCodex ? 'OpenAI Codex CLI Not Linked' : isClaude ? 'Claude CLI Not Linked' : 'Antigravity CLI Not Linked'}
-                    </div>
-                    <p className="text-[11px] text-on-surface-variant mt-0.5 leading-snug">
-                      {isCodex
-                        ? 'Link your ChatGPT account via Codex CLI to enable live execution and telemetry.'
-                        : isClaude
-                        ? 'Link your Anthropic account via Claude CLI to enable live execution and telemetry.'
-                        : 'Sign in with your Google account to enable live Antigravity CLI execution and telemetry.'}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowLimitsPopover(false);
-                      onOpenAuthModal();
-                    }}
-                    className="w-full py-1.5 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+              {/* Mobile Modal via React Portal */}
+              {createPortal(
+                <div
+                  className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/75 backdrop-blur-xs sm:hidden animate-fade-in"
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget) setShowLimitsPopover(false);
+                  }}
+                >
+                  <div
+                    ref={mobileLimitsModalRef}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="cli-telemetry-title"
+                    className="w-full max-w-md bg-surface-container border border-outline-variant/30 rounded-t-3xl sm:rounded-2xl shadow-2xl p-4 animate-in slide-in-from-bottom duration-150 max-h-[85vh] flex flex-col"
+                    onClick={(e) => e.stopPropagation()}
                   >
-                    <span className="material-symbols-outlined text-[14px]">login</span>
-                    <span>{isCodex ? 'Link Codex CLI' : isClaude ? 'Link Claude CLI' : 'Link Google Account'}</span>
-                  </button>
-                </div>
-              ) : !activeSandbox ? (
-                  <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 text-center space-y-3">
-                    <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center mx-auto border border-primary/20">
-                      <span className="material-symbols-outlined text-[20px]">dns</span>
-                    </div>
-                    <div>
-                      <div className="font-semibold text-xs text-on-surface">
-                        Sandbox VM Required for Telemetry
-                      </div>
-                      <p className="text-[11px] text-on-surface-variant mt-1 leading-relaxed">
-                        Please start a sandbox/VM and select it to see quota for CLI telemetry. All CLIs run strictly in your isolated microVM.
-                      </p>
-                    </div>
+                    {/* Pull Bar Handle for mobile */}
+                    <div className="w-10 h-1 bg-outline-variant/50 rounded-full mx-auto mb-2 shrink-0 sm:hidden" />
 
-                    {sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0 ? (
-                      <div className="space-y-2 pt-1 text-left">
-                        <div className="text-[10px] font-mono uppercase tracking-wider text-outline px-1">
-                          Select Sandbox VM to Attach:
-                        </div>
-                        <div className="space-y-1.5 max-h-36 overflow-y-auto custom-scrollbar">
-                          {sandboxUsage.sandboxes.map((sb, idx) => (
-                            <button
-                              key={sb.sandboxId}
-                              type="button"
-                              onClick={() => {
-                                handleSwitchSandbox(sb.sandboxId);
-                                onRefreshQuota?.();
-                              }}
-                              disabled={switchingSandboxId === sb.sandboxId}
-                              className="w-full flex items-center justify-between p-2 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 hover:border-primary/40 text-xs transition-all cursor-pointer text-left"
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="material-symbols-outlined text-[16px] text-primary shrink-0">
-                                  {switchingSandboxId === sb.sandboxId ? 'sync' : 'link'}
-                                </span>
-                                <span className="font-medium text-on-surface truncate">
-                                  {sb.name || `Sandbox #${idx + 1}`}
-                                </span>
-                              </div>
-                              <span className="text-[10px] text-primary font-semibold shrink-0">
-                                {switchingSandboxId === sb.sandboxId ? 'Attaching...' : 'Attach'}
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                        {sandboxUsage.used < sandboxUsage.max && (
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await handleCreateSandbox();
-                              onRefreshQuota?.();
-                            }}
-                            disabled={isCreatingSandbox}
-                            className="w-full mt-1 py-1.5 px-2 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant/30 text-on-surface-variant hover:text-on-surface text-[11px] font-medium transition-colors cursor-pointer flex items-center justify-center gap-1.5"
-                          >
-                            <span className="material-symbols-outlined text-[13px]">add_circle</span>
-                            <span>{isCreatingSandbox ? 'Launching...' : '+ Start New Sandbox VM'}</span>
-                          </button>
-                        )}
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await handleCreateSandbox();
-                          onRefreshQuota?.();
-                        }}
-                        disabled={isCreatingSandbox}
-                        className="w-full py-2 px-3 rounded-lg bg-primary hover:bg-primary-fixed-dim text-on-primary font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
-                      >
-                        <span className="material-symbols-outlined text-[15px]">
-                          {isCreatingSandbox ? 'sync' : 'bolt'}
-                        </span>
-                        <span>{isCreatingSandbox ? 'Booting Cloud MicroVM...' : 'Start Sandbox VM'}</span>
-                      </button>
-                    )}
+                    <div className="overflow-y-auto custom-scrollbar flex-1 pr-0.5">
+                      {renderLimitsContent(true)}
+                    </div>
                   </div>
-                ) : (
-                <div className="space-y-4">
-                  {/* Account & Active Model Bar */}
-                  <div className="p-2.5 rounded-xl bg-surface-container-low border border-outline-variant/20 flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-[11px] font-medium text-on-surface truncate">
-                          {linkedEmail || 'Linked Account'}
-                        </div>
-                        <div className="text-[10px] text-on-surface-variant truncate flex items-center gap-1 mt-0.5">
-                          <span>Active Model:</span>
-                          {modelName.toLowerCase().includes('none') ? (
-                            <span className="material-symbols-outlined text-[13px] text-outline">tune</span>
-                          ) : modelName.toLowerCase().includes('claude') ? (
-                            <img src="/provider-icons/claude.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
-                          ) : modelName.toLowerCase().includes('gpt') || modelName.toLowerCase().includes('codex') || modelName.toLowerCase().startsWith('o') ? (
-                            <img src="/model-icons/openai.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
-                          ) : modelName.toLowerCase().includes('gemini') ? (
-                            <img src="/model-icons/google-gemini.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
-                          ) : (
-                            <img src="/provider-icons/antigravity.svg" alt="" className="w-3 h-3 object-contain inline shrink-0" />
-                          )}
-                          <span className="text-primary font-mono font-medium">{modelName}</span>
-                        </div>
-                      </div>
-                    </div>
-                    <span className="text-[10px] font-medium text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20 shrink-0">
-                      Connected
-                    </span>
-                  </div>
-                  {/* Quota Groups */}
-                  {isCodex ? (
-                    <div className="space-y-3">
-                      {/* Authentic Rolling Quota Bar (if available from Codex session rate limits) */}
-                      {quotaLimits && quotaLimits.groups && quotaLimits.groups.length > 0 && (
-                        <div className="space-y-3">
-                          {quotaLimits.groups.map((group, gIdx) => (
-                            <div
-                              key={group.name || gIdx}
-                              className="p-3.5 rounded-xl bg-surface-container-low border border-outline-variant/20 space-y-3"
-                            >
-                              <div>
-                                <div className="font-bold text-xs uppercase tracking-wider text-on-surface flex items-center gap-1.5">
-                                  <img src="/provider-icons/codex.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
-                                  <span>{group.name}</span>
-                                </div>
-                                {group.description && (
-                                  <div className="text-[11px] text-[#9ca3af] mt-0.5">
-                                    {group.description}
-                                  </div>
-                                )}
-                              </div>
-
-                              <div className="space-y-3 pt-0.5">
-                                {group.buckets.map((bucket) => {
-                                  const pct = Math.max(0, Math.min(100, bucket.remaining_fraction * 100));
-                                  return (
-                                    <div key={bucket.id || bucket.name} className="space-y-1">
-                                      <div className="text-xs font-semibold text-on-surface">
-                                        {bucket.name}
-                                      </div>
-
-                                      {/* Terminal bracket progress bar */}
-                                      <div className="flex items-center gap-1.5 font-mono text-xs">
-                                        <span className="text-outline font-semibold select-none">[</span>
-                                        <div className="flex-1 h-3.5 bg-surface-container-highest dark:bg-[#2d1225] rounded-xs overflow-hidden border border-outline-variant/30">
-                                          <div
-                                            className="h-full bg-[#10b981] rounded-xs transition-all duration-500"
-                                            style={{ width: `${pct}%` }}
-                                          />
-                                        </div>
-                                        <span className="text-outline font-semibold select-none">]</span>
-                                        <span className="w-14 text-right text-xs font-mono font-semibold text-on-surface">
-                                          {pct.toFixed(2)}%
-                                        </span>
-                                      </div>
-
-                                      <div className="text-[11px] font-mono text-[#10b981]">
-                                        {formatResetCountdown(bucket.reset_time, bucket.remaining_fraction)}
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <p className="text-[11px] text-outline leading-tight px-1">
-                        OpenAI Codex runs against your ChatGPT account via the local CLI daemon. Rate limits and capacity are enforced dynamically by OpenAI.
-                      </p>
-                    </div>
-                  ) : quotaLimits && quotaLimits.groups && quotaLimits.groups.length > 0 ? (
-                    <div className="space-y-4">
-                      {quotaLimits.groups.map((group, gIdx) => {
-                        const isCurrentActiveGroup = relevantGroup?.name === group.name;
-                        return (
-                          <div
-                            key={group.name || gIdx}
-                            className={`p-3.5 rounded-xl bg-surface-container-low border transition-all space-y-3 ${
-                              isCurrentActiveGroup
-                                ? 'border-primary/40 ring-1 ring-primary/20 shadow-xs'
-                                : 'border-outline-variant/20'
-                            }`}
-                          >
-                            <div>
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="font-bold text-xs uppercase tracking-wider text-on-surface flex items-center gap-1.5">
-                                  {group.name.toLowerCase().includes('chatgpt') ? (
-                                    <img src="/provider-icons/codex.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
-                                  ) : group.name.toLowerCase().includes('claude') ? (
-                                    <img src="/provider-icons/claude.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
-                                  ) : group.name.toLowerCase().includes('gpt') ? (
-                                    <img src="/model-icons/openai.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
-                                  ) : group.name.toLowerCase().includes('gemini') ? (
-                                    <img src="/model-icons/google-gemini.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
-                                  ) : (
-                                    <img src="/provider-icons/antigravity.svg" alt="" className="w-3.5 h-3.5 object-contain inline shrink-0" />
-                                  )}
-                                  <span>{group.name.toUpperCase()}</span>
-                                </div>
-                                {isCurrentActiveGroup && (
-                                  <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-primary/10 text-primary border border-primary/20 shrink-0">
-                                    Active Model Quota
-                                  </span>
-                                )}
-                              </div>
-                              {group.description && (
-                                <div className="text-[11px] text-[#9ca3af] mt-0.5">
-                                  {group.description}
-                                </div>
-                              )}
-                            </div>
-
-                          <div className="space-y-3 pt-0.5">
-                            {group.buckets.map((bucket) => {
-                              const pct = Math.max(0, Math.min(100, bucket.remaining_fraction * 100));
-                              return (
-                                <div key={bucket.id || bucket.name} className="space-y-1">
-                                  <div className="text-xs font-semibold text-on-surface">
-                                    {bucket.name}
-                                  </div>
-
-                                  {/* Terminal bracket progress bar */}
-                                  <div className="flex items-center gap-1.5 font-mono text-xs">
-                                    <span className="text-outline font-semibold select-none">[</span>
-                                    <div className="flex-1 h-3.5 bg-surface-container-highest dark:bg-[#2d1225] rounded-xs overflow-hidden border border-outline-variant/30">
-                                      <div
-                                        className="h-full bg-[#10b981] rounded-xs transition-all duration-500"
-                                        style={{ width: `${pct}%` }}
-                                      />
-                                    </div>
-                                    <span className="text-outline font-semibold select-none">]</span>
-                                    <span className="w-14 text-right text-xs font-mono font-semibold text-on-surface">
-                                      {pct.toFixed(2)}%
-                                    </span>
-                                  </div>
-
-                                  <div className="text-[11px] font-mono text-[#10b981]">
-                                    {formatResetCountdown(bucket.reset_time, bucket.remaining_fraction)}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    </div>
-                  ) : (
-                    <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/20 text-center space-y-2 text-xs">
-                      <div className="flex items-center justify-center gap-2 text-outline">
-                        <span className="material-symbols-outlined text-[18px] animate-spin">
-                          progress_activity
-                        </span>
-                        <span>Acquiring live limits from /quota...</span>
-                      </div>
-                      <p className="text-[11px] text-outline">
-                        Antigravity CLI is evaluating capacity for your linked Google account.
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Quota Description Footer */}
-                  {quotaLimits?.description && (
-                    <p className="text-[10px] text-outline leading-tight pt-1 border-t border-outline-variant/15">
-                      {quotaLimits.description}
-                    </p>
-                  )}
-                </div>
+                </div>,
+                document.body
               )}
-            </div>
+            </>
           )}
         </div>
 
@@ -1488,11 +1600,10 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Cloud Inspector Toggle (Desktop & Mobile) */}
         <button
           onClick={onToggleInspector}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-code-sm text-code-sm border cursor-pointer shrink-0 transition-all active:scale-95 ${
-            isInspectorOpen
-              ? 'bg-primary/15 text-primary border-primary/35 shadow-xs'
-              : 'bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface border-outline-variant/30'
-          }`}
+          className={`flex items-center gap-1.5 p-1.5 sm:px-2.5 sm:py-1 rounded-lg font-code-sm text-code-sm border cursor-pointer shrink-0 transition-all active:scale-95 ${isInspectorOpen
+            ? 'bg-primary/15 text-primary border-primary/35 shadow-xs'
+            : 'bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface border-outline-variant/30'
+            }`}
           title={isInspectorOpen ? 'Hide Cloud Inspector' : 'Show Cloud Inspector'}
         >
           <span className="material-symbols-outlined text-[16px]">troubleshoot</span>

@@ -63,8 +63,7 @@ export class AuthController {
   }
 
   public async verifyDeviceAuth(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    const token = req.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null);
     if (!token) {
       throw new AppError('Authentication required to link subscriptions', 401, 'UNAUTHORIZED');
     }
@@ -94,8 +93,7 @@ export class AuthController {
   }
 
   public async getMe(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    const token = req.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null);
     if (!token) {
       logger.warn('[Auth] getMe rejected: Missing or invalid Authorization Bearer header');
       throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
@@ -115,8 +113,7 @@ export class AuthController {
   }
 
   public async connectPlatform(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    const token = req.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null);
     if (!token) {
       throw new AppError('Authentication required to link platforms', 401, 'UNAUTHORIZED');
     }
@@ -131,15 +128,18 @@ export class AuthController {
   }
 
   public async syncProfile(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    const token = req.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null);
     if (!token) {
       throw new AppError('Authentication required to sync profile', 401, 'UNAUTHORIZED');
     }
-    const verified = tokenUtil.verifyJwt(token);
-    if (!verified.valid || !verified.payload?.sub) {
-      throw new AppError('Invalid authentication token', 401, 'UNAUTHORIZED');
-    }
+    const userId = req.userId || (() => {
+      const verified = tokenUtil.verifyJwt(token);
+      if (!verified.valid || !verified.payload?.sub) {
+        throw new AppError('Invalid authentication token', 401, 'UNAUTHORIZED');
+      }
+      return verified.payload.sub;
+    })();
+
     const body = (req.body || {}) as any;
     const linkedPlatforms = Array.isArray(body.linkedPlatforms)
       ? body.linkedPlatforms
@@ -148,7 +148,7 @@ export class AuthController {
       : [];
 
     await firestoreBackendService.syncUserProfile({
-      id: verified.payload.sub,
+      id: userId,
       name: body.name,
       email: body.email,
       avatarUrl: body.avatarUrl,
@@ -160,8 +160,7 @@ export class AuthController {
   }
 
   public async logout(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    const token = req.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null);
     if (token) {
       await authService.logout(token);
     }

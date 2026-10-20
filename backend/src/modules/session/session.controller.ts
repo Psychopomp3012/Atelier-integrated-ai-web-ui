@@ -7,6 +7,9 @@ import { AppError } from '../../utils/error.util.js';
 
 export class SessionController {
   private getUserId(req: FastifyRequest): string {
+    if (req.userId) {
+      return req.userId;
+    }
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
@@ -14,10 +17,6 @@ export class SessionController {
       if (verified.valid && verified.payload?.sub) {
         return verified.payload.sub;
       }
-    }
-    const query = req.query as { userId?: string };
-    if (query?.userId && query.userId !== 'default_user') {
-      return query.userId;
     }
     throw new AppError('Authentication required: Sign in to access personal chat sessions', 401, 'UNAUTHORIZED');
   }

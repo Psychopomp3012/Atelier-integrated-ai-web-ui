@@ -32,14 +32,26 @@ import { AuthModal } from './components/AuthModal';
 import { MarkdownContent } from './components/MarkdownContent';
 import { LoadingScreen } from './components/LoadingScreen';
 import { signOutFirebase } from './services/firebaseAuth.service';
-import { firestoreService } from './services/firestore.service';
 import { sessionSyncService } from './services/sessionSync.service';
 import { fetchCliStatus, refreshAuthToken, closeGeminiCliLoginPopup, type CliStatus } from './services/cliAuth.service';
-import { apiFetch } from './utils/api.util';
-import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSession, StepItem, ModelOption } from './types';
+import { apiFetch, isTokenExpired } from './utils/api.util';
+import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSession, StepItem, ModelOption, GeminiQuotaStats, CodexQuotaStats } from './types';
 import { NONE_MODEL, getModelDisplayInfo, getMinimumEffortModelId } from './types';
 import { fetchAvailableModels } from './services/models.service';
-import { computeSessionTokens } from './utils/token.util';
+import { computeSessionTokens } from './utils/tokenMetrics.util';
+import { checkModelQuotaExhausted } from './utils/quota.util';
+
+const syncUserProfileViaBackend = async (user: UserProfile): Promise<void> => {
+  try {
+    await apiFetch('/api/v1/auth/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(user),
+    });
+  } catch (err) {
+    console.warn('Backend user profile sync warning', err);
+  }
+};
 
 // ---------------------------------------------------------------------------
 // Parses user message content to separate attachment metadata from prompt text
@@ -102,6 +114,94 @@ function normalizeUser(user: UserProfile | null): UserProfile | null {
     linkedPlatforms,
   };
 }
+
+export const isModelOptionLinked = (
+  model?: ModelOption | null,
+  currentCliStatus?: CliStatus | null,
+  user?: UserProfile | null
+): boolean => {
+  if (!model || model.id === 'none') return true;
+  const isAgyLinked = Boolean(
+    currentCliStatus?.antigravity?.linked || currentCliStatus?.gemini?.linked
+  );
+
+  if (model.hostedBy === 'antigravity') {
+    return isAgyLinked;
+  }
+  if (model.id.startsWith('gemini-') || model.id.startsWith('antigravity-')) {
+    return isAgyLinked;
+  }
+
+  const linkedPlatforms = Array.isArray(user?.linkedPlatforms)
+    ? user.linkedPlatforms
+    : (user?.linkedPlatforms && typeof user.linkedPlatforms === 'object')
+    ? Object.values(user.linkedPlatforms).filter(
+        (p): p is LinkedAIPlatformAccount => Boolean(p && typeof p === 'object' && 'platform' in p)
+      )
+    : [];
+
+  if (model.hostedBy === 'claude' || model.provider === 'claude' || model.id.startsWith('claude-')) {
+    const isCliSubscription = Boolean(
+      currentCliStatus?.claude?.linked && currentCliStatus?.claude?.authMethod !== 'api_key'
+    );
+    const isAccountSubscription = Boolean(
+      linkedPlatforms.some(
+        (p) => p.platform === 'claude_subscription' && p.hasValidSession
+      )
+    );
+    return isCliSubscription || isAccountSubscription;
+  }
+
+  if (
+    model.hostedBy === 'codex' ||
+    model.provider === 'codex' ||
+    model.id.startsWith('codex-') ||
+    model.id.startsWith('gpt-') ||
+    model.id.startsWith('o1') ||
+    model.id.startsWith('o3')
+  ) {
+    return Boolean(
+      currentCliStatus?.codex?.linked ||
+      linkedPlatforms.some(
+        (p) => (p.platform === 'codex_subscription' || p.platform === 'openai') && p.hasValidSession
+      )
+    );
+  }
+
+  return isAgyLinked;
+};
+
+export const getBestLinkedModelId = (
+  modelsList: ModelOption[],
+  currentStatus: CliStatus | null | undefined,
+  user: UserProfile | null | undefined,
+  geminiQ?: GeminiQuotaStats | null,
+  codexQ?: CodexQuotaStats | null
+): string | null => {
+  if (!modelsList || modelsList.length === 0) return null;
+
+  // 1. Filter models whose backing CLI/account is actively linked
+  const linkedModels = modelsList.filter(
+    (m) => m.id !== 'none' && isModelOptionLinked(m, currentStatus, user)
+  );
+  if (linkedModels.length === 0) return null;
+
+  // 2. Filter for models that are not quota exhausted if quotas are known
+  const availableLinked = linkedModels.filter(
+    (m) => !checkModelQuotaExhausted(m, geminiQ, codexQ, currentStatus)
+  );
+  const candidates = availableLinked.length > 0 ? availableLinked : linkedModels;
+
+  // 3. Prefer primary Antigravity / Gemini model (e.g., Flash or general default) if linked
+  const preferred =
+    candidates.find((m) => m.id.includes('flash') || m.id.includes('gemini')) ||
+    candidates[0];
+
+  if (preferred.effortOptions && preferred.effortOptions.length > 0) {
+    return getMinimumEffortModelId(preferred);
+  }
+  return preferred.id;
+};
 
 export const App: React.FC = () => {
   // Session history state managed via Jotai
@@ -220,11 +320,43 @@ export const App: React.FC = () => {
   }, [selectedSandboxId]);
 
   const validSessionIds = useMemo(() => sessions.map((s) => s.id), [sessions.map((s) => s.id).join(',')]);
+  const activeSandbox = useMemo(() => {
+    if (!currentUser || !sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) return null;
+    if (selectedSandboxId) {
+      const selected = sandboxUsage.sandboxes.find((s) => s.sandboxId === selectedSandboxId);
+      if (selected) return selected;
+    }
+    if (currentSessionId) {
+      const cleanSession = currentSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
+      const attached = sandboxUsage.sandboxes.find((s) => s.attachedSessionIds?.includes(cleanSession));
+      if (attached) return attached;
+    }
+    if (sandboxUsage.sandboxes.length > 0) {
+      return sandboxUsage.sandboxes[0];
+    }
+    return null;
+  }, [currentUser, sandboxUsage, currentSessionId, selectedSandboxId]);
+
+  const activeSandboxRef = useRef(activeSandbox);
+  activeSandboxRef.current = activeSandbox;
+  const sandboxUsageRef = useRef(sandboxUsage);
+  sandboxUsageRef.current = sandboxUsage;
+
   const currentUserRef = useRef(currentUser);
   currentUserRef.current = currentUser;
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const isFetchingUsageRef = useRef(false);
+  const selectedModelRef = useRef(selectedModel);
+  selectedModelRef.current = selectedModel;
+  const availableModelsRef = useRef(availableModels);
+  availableModelsRef.current = availableModels;
+  const cliStatusRef = useRef(cliStatus);
+  cliStatusRef.current = cliStatus;
+  const geminiQuotaRef = useRef(geminiQuota);
+  geminiQuotaRef.current = geminiQuota;
+  const codexQuotaRef = useRef(codexQuota);
+  codexQuotaRef.current = codexQuota;
 
   const fetchSandboxUsage = useCallback(async () => {
     if (isFetchingUsageRef.current) return;
@@ -264,22 +396,39 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     if (!currentUser?.id) return;
+    // Event-driven initial discovery on mount/login
     fetchSandboxUsage();
 
-    // Poll usage and quota telemetry once every 60 seconds only when tab is visible
+    // Poll quota telemetry once every 60 seconds only when tab is visible AND conditions are met
+    // 1. Sandbox usage is 100% event-driven and NOT polled here.
+    // 2. Only poll quota if an active cloud sandbox microVM is running.
+    // 3. Only poll quota for CLIs that are actually linked by the user.
     const interval = setInterval(() => {
       if (document.visibilityState === 'visible') {
-        fetchSandboxUsage();
-        fetchGeminiQuota(currentSessionId || undefined);
-        fetchCodexQuota(currentSessionId || undefined);
+        const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
+        if (!hasSandbox) return;
+
+        if (cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked) {
+          fetchGeminiQuota(currentSessionId || undefined);
+        }
+        if (cliStatusRef.current?.codex?.linked) {
+          fetchCodexQuota(currentSessionId || undefined);
+        }
       }
     }, 60000);
 
     const onFocus = () => {
       if (document.visibilityState === 'visible') {
         fetchSandboxUsage();
-        fetchGeminiQuota(currentSessionId || undefined);
-        fetchCodexQuota(currentSessionId || undefined);
+        const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
+        if (hasSandbox) {
+          if (cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked) {
+            fetchGeminiQuota(currentSessionId || undefined);
+          }
+          if (cliStatusRef.current?.codex?.linked) {
+            fetchCodexQuota(currentSessionId || undefined);
+          }
+        }
       }
     };
     window.addEventListener('focus', onFocus);
@@ -310,23 +459,6 @@ export const App: React.FC = () => {
       }
     }
   }, [sandboxUsage, selectedSandboxId, currentSessionId]);
-
-  const activeSandbox = useMemo(() => {
-    if (!currentUser || !sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) return null;
-    if (currentSessionId) {
-      const cleanSession = currentSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
-      const attached = sandboxUsage.sandboxes.find((s) => s.attachedSessionIds?.includes(cleanSession));
-      if (attached) return attached;
-    }
-    if (selectedSandboxId) {
-      const selected = sandboxUsage.sandboxes.find((s) => s.sandboxId === selectedSandboxId);
-      if (selected) return selected;
-    }
-    if (sandboxUsage.sandboxes.length > 0) {
-      return sandboxUsage.sandboxes[0];
-    }
-    return null;
-  }, [currentUser, sandboxUsage, currentSessionId, selectedSandboxId]);
 
   const handleStartSandboxVM = async () => {
     if (!currentUser) {
@@ -401,55 +533,32 @@ export const App: React.FC = () => {
     return getModelDisplayInfo(selectedModel, availableModels).parentModel;
   }, [selectedModel, availableModels]);
 
+  const selectedModelOptionRef = useRef(selectedModelOption);
+  selectedModelOptionRef.current = selectedModelOption;
+
+  const handleSelectModel = useCallback((modelId: ModelType) => {
+    setSelectedModel(modelId);
+    try {
+      if (!modelId || modelId === 'none') {
+        localStorage.removeItem('model_preference');
+        localStorage.removeItem('selected_model_preference');
+      } else {
+        localStorage.setItem('selected_model_preference', modelId);
+        const display = getModelDisplayInfo(modelId, availableModelsRef.current);
+        const preferenceData = {
+          provider: display.parentModel.hostedBy || display.provider,
+          model: display.baseName,
+          effort: display.effortLabel || 'default',
+          modelId,
+        };
+        localStorage.setItem('model_preference', JSON.stringify(preferenceData));
+      }
+    } catch {}
+  }, [setSelectedModel]);
+
   const isModelLinked = useMemo(() => {
-    if (selectedModel === 'none') return true;
-    const isAgyLinked = Boolean(
-      cliStatus?.antigravity?.linked ||
-      cliStatus?.gemini?.linked
-    );
-
-    // If the model is hosted by Antigravity (Gemini, Claude, GPT-OSS via AGY CLI), it uses Antigravity account
-    if (selectedModelOption?.hostedBy === 'antigravity') {
-      return isAgyLinked;
-    }
-
-    if (selectedModel.startsWith('gemini-') || selectedModel.startsWith('antigravity-')) {
-      return isAgyLinked;
-    }
-    const linkedPlatforms = Array.isArray(currentUser?.linkedPlatforms)
-      ? currentUser.linkedPlatforms
-      : (currentUser?.linkedPlatforms && typeof currentUser.linkedPlatforms === 'object')
-      ? Object.values(currentUser.linkedPlatforms).filter(
-          (p): p is LinkedAIPlatformAccount => Boolean(p && typeof p === 'object' && 'platform' in p)
-        )
-      : [];
-
-    if (selectedModel.startsWith('claude-')) {
-      const isCliSubscription = Boolean(
-        cliStatus?.claude?.linked && cliStatus?.claude?.authMethod !== 'api_key'
-      );
-      const isAccountSubscription = Boolean(
-        linkedPlatforms.some(
-          (p) => p.platform === 'claude_subscription' && p.hasValidSession
-        )
-      );
-      return isCliSubscription || isAccountSubscription;
-    }
-    if (
-      selectedModel.startsWith('codex-') ||
-      selectedModel.startsWith('gpt-') ||
-      selectedModel.startsWith('o1') ||
-      selectedModel.startsWith('o3')
-    ) {
-      return Boolean(
-        cliStatus?.codex?.linked ||
-        linkedPlatforms.some(
-          (p) => (p.platform === 'codex_subscription' || p.platform === 'openai') && p.hasValidSession
-        )
-      );
-    }
-    return isAgyLinked;
-  }, [selectedModel, selectedModelOption, cliStatus, currentUser]);
+    return isModelOptionLinked(selectedModelOption, cliStatus, currentUser);
+  }, [selectedModelOption, cliStatus, currentUser]);
 
   const isAnyCliLinked = useMemo(() => {
     return Boolean(
@@ -461,49 +570,44 @@ export const App: React.FC = () => {
   }, [cliStatus]);
 
   const refreshModels = useCallback((force = true) => {
-    if (!currentUserRef.current?.id) {
+    const userId = currentUserRef.current?.id;
+    if (!userId) {
       setAvailableModels([]);
       return;
     }
-    fetchAvailableModels(force, currentSessionId || undefined, currentUserRef.current.id)
+    fetchAvailableModels(force, currentSessionId || undefined, userId)
       .then((models) => {
         if (models && models.length > 0) {
           setAvailableModels(models);
-          // If a model preference was saved and is available, keep it.
-          // If the model was selected and is no longer available, reset to 'none'.
-          if (selectedModel !== 'none') {
-            const isModelAvailable = models.some(
-              (m) => m.id === selectedModel || m.effortOptions?.some((opt) => opt.modelId === selectedModel)
+          // If a model preference was saved and is available and linked, keep it.
+          // Otherwise, auto-default to the best available linked model.
+          const currentSelected = selectedModelRef.current;
+          const currentOption = selectedModelOptionRef.current;
+          const currentStatus = cliStatusRef.current;
+          const user = currentUserRef.current;
+
+          const isModelAvailable = models.some(
+            (m) => m.id === currentSelected || m.effortOptions?.some((opt) => opt.modelId === currentSelected)
+          );
+          const isCurrentlyLinked =
+            isModelAvailable &&
+            currentSelected !== 'none' &&
+            isModelOptionLinked(currentOption, currentStatus, user);
+
+          if (!isCurrentlyLinked) {
+            const bestLinkedId = getBestLinkedModelId(
+              models,
+              currentStatus,
+              user,
+              geminiQuotaRef.current,
+              codexQuotaRef.current
             );
-            if (!isModelAvailable) {
-              // 1. Check if the base model still exists under the provider with different efforts
-              let savedModelName = '';
-              try {
-                const saved = localStorage.getItem('model_preference');
-                if (saved) {
-                  const parsed = JSON.parse(saved);
-                  savedModelName = parsed?.model || '';
-                }
-              } catch {}
-
-              const matchedBaseModel = models.find((m) => {
-                if (savedModelName && m.name.toLowerCase() === savedModelName.toLowerCase()) return true;
-                if (selectedModel.startsWith(m.id)) return true;
-                return false;
-              });
-
-              if (matchedBaseModel && matchedBaseModel.effortOptions && matchedBaseModel.effortOptions.length > 0) {
-                // Graceful migration to lowest/minimum available effort for the same model
-                const newModelId = getMinimumEffortModelId(matchedBaseModel);
-                handleSelectModel(newModelId);
-                showToast(`Reasoning effort updated to available option for ${matchedBaseModel.name}`);
-              } else {
-                // The model is completely removed from the provider's list
-                setSelectedModel('none');
-                localStorage.removeItem('model_preference');
-                localStorage.removeItem('selected_model_preference');
-                showToast('Previously selected model is no longer available. Please select an active model.');
-              }
+            if (bestLinkedId) {
+              handleSelectModel(bestLinkedId);
+            } else if (!isModelAvailable) {
+              setSelectedModel('none');
+              localStorage.removeItem('model_preference');
+              localStorage.removeItem('selected_model_preference');
             }
           }
         } else if (models && models.length === 0) {
@@ -511,7 +615,7 @@ export const App: React.FC = () => {
         }
       })
       .catch(() => {});
-  }, [currentSessionId, selectedModel]);
+  }, [currentSessionId, handleSelectModel, setSelectedModel]);
 
   useEffect(() => {
     if (!currentUser?.id) {
@@ -524,6 +628,37 @@ export const App: React.FC = () => {
       refreshModels(false);
     }
   }, [currentUser?.id, refreshModels]);
+
+  // Auto-default to an active, linked model if current selection is unlinked or 'none'
+  useEffect(() => {
+    if (!currentUser?.id || availableModels.length === 0) return;
+    const isCurrentLinked =
+      selectedModel !== 'none' &&
+      isModelOptionLinked(selectedModelOption, cliStatus, currentUser);
+
+    if (!isCurrentLinked) {
+      const bestLinkedId = getBestLinkedModelId(
+        availableModels,
+        cliStatus,
+        currentUser,
+        geminiQuotaRef.current,
+        codexQuotaRef.current
+      );
+      if (bestLinkedId && bestLinkedId !== selectedModel) {
+        handleSelectModel(bestLinkedId);
+      }
+    }
+  }, [
+    currentUser?.id,
+    availableModels.length,
+    selectedModel,
+    selectedModelOption?.id,
+    cliStatus?.antigravity?.linked,
+    cliStatus?.codex?.linked,
+    cliStatus?.claude?.linked,
+    cliStatus?.gemini?.linked,
+    handleSelectModel,
+  ]);
 
   const tokenUsage = useMemo(
     () =>
@@ -549,13 +684,26 @@ export const App: React.FC = () => {
   const authMeCompletedRef = useRef<boolean>(false);
 
   const fetchGeminiQuota = async (sessId?: string, force = false, emailOverride?: string) => {
+    // Guard 1: If Antigravity/Gemini CLI is not linked, never fetch quota!
+    const isLinked = cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked;
+    if (!isLinked) {
+      setGeminiQuota(null);
+      return null;
+    }
+    // Guard 2: If user has no active sandbox, never fetch quota (quotas execute strictly inside microVMs)
+    const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
+    if (!hasSandbox) {
+      setGeminiQuota(null);
+      return null;
+    }
+
     const email = emailOverride || currentUser?.email || currentUserRef.current?.email;
     if (!email) {
       setGeminiQuota(null);
       return;
     }
     const now = Date.now();
-    if (!force && now - lastGeminiQuotaFetchRef.current < 2000) {
+    if (!force && now - lastGeminiQuotaFetchRef.current < 4000) {
       return;
     }
     if (inFlightGeminiQuotaPromiseRef.current) {
@@ -572,7 +720,10 @@ export const App: React.FC = () => {
         if (res.ok) {
           const json = await res.json();
           if (json.data) {
-            setGeminiQuota(json.data);
+            setGeminiQuota((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(json.data)) return prev;
+              return json.data;
+            });
             return json.data;
           }
         }
@@ -587,13 +738,26 @@ export const App: React.FC = () => {
   };
 
   const fetchCodexQuota = async (sessId?: string, force = false, emailOverride?: string) => {
+    // Guard 1: If Codex CLI is not linked, never fetch quota!
+    const isLinked = cliStatusRef.current?.codex?.linked;
+    if (!isLinked) {
+      setCodexQuota(null);
+      return null;
+    }
+    // Guard 2: If user has no active sandbox, never fetch quota (quotas execute strictly inside microVMs)
+    const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
+    if (!hasSandbox) {
+      setCodexQuota(null);
+      return null;
+    }
+
     const email = emailOverride || currentUser?.email || currentUserRef.current?.email;
     if (!email) {
       setCodexQuota(null);
       return;
     }
     const now = Date.now();
-    if (!force && now - lastCodexQuotaFetchRef.current < 2000) {
+    if (!force && now - lastCodexQuotaFetchRef.current < 4000) {
       return;
     }
     if (inFlightCodexQuotaPromiseRef.current) {
@@ -610,7 +774,10 @@ export const App: React.FC = () => {
         if (res.ok) {
           const json = await res.json();
           if (json.data) {
-            setCodexQuota(json.data);
+            setCodexQuota((prev) => {
+              if (JSON.stringify(prev) === JSON.stringify(json.data)) return prev;
+              return json.data;
+            });
             return json.data;
           }
         }
@@ -651,6 +818,26 @@ export const App: React.FC = () => {
 
         if (freshModels && freshModels.length > 0 && currentUserRef.current?.id === userId) {
           setAvailableModels(freshModels);
+          const effectiveStatus = freshCliStatus || cliStatus;
+          const isCurrentlyLinked =
+            selectedModel !== 'none' &&
+            freshModels.some(
+              (m) =>
+                (m.id === selectedModel || m.effortOptions?.some((opt) => opt.modelId === selectedModel)) &&
+                isModelOptionLinked(m, effectiveStatus, currentUserRef.current)
+            );
+          if (!isCurrentlyLinked) {
+            const bestLinkedId = getBestLinkedModelId(
+              freshModels,
+              effectiveStatus,
+              currentUserRef.current,
+              null,
+              null
+            );
+            if (bestLinkedId) {
+              handleSelectModel(bestLinkedId);
+            }
+          }
         }
       } catch (err) {
         console.warn('Error waiting for providers and models ready', err);
@@ -660,7 +847,7 @@ export const App: React.FC = () => {
   );
 
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser?.id) {
       setGeminiQuota(null);
       setCodexQuota(null);
     } else {
@@ -668,7 +855,7 @@ export const App: React.FC = () => {
       fetchGeminiQuota(currentSessionId || undefined);
       fetchCodexQuota(currentSessionId || undefined);
     }
-  }, [currentUser, currentSessionId]);
+  }, [currentUser?.id, currentSessionId]);
 
   useEffect(() => {
     if (!currentUser?.id || !initialLoadCompletedRef.current) return;
@@ -680,15 +867,21 @@ export const App: React.FC = () => {
   }, [currentUser?.id, selectedModelOption?.id, selectedModelOption?.hostedBy, selectedModelOption?.provider]);
 
   const handleRefreshQuota = useCallback(() => {
-    if (!currentUser?.email) return;
+    if (!currentUserRef.current?.email) return;
     fetchGeminiQuota(currentSessionId || undefined, true);
     fetchCodexQuota(currentSessionId || undefined, true);
-  }, [currentSessionId, currentUser?.email]);
+  }, [currentSessionId]);
+
+  const prevActiveSandboxIdRef = useRef<string | null>(null);
 
   // Re-fetch dynamic models and quota whenever activeSandbox changes
   useEffect(() => {
     if (!currentUser?.id || !initialLoadCompletedRef.current) return;
-    if (activeSandbox?.sandboxId) {
+    const currentSbxId = activeSandbox?.sandboxId || null;
+    if (prevActiveSandboxIdRef.current === currentSbxId) return;
+    prevActiveSandboxIdRef.current = currentSbxId;
+
+    if (currentSbxId) {
       refreshModels(true);
       handleRefreshQuota();
     } else {
@@ -725,7 +918,7 @@ export const App: React.FC = () => {
 
     inFlightQuotaPromiseRef.current = (async () => {
       try {
-        const res = await apiFetch('/api/v1/agent/quota');
+        const res = await apiFetch('/api/v1/rate-limit/status');
         if (res.ok) {
           const json = await res.json();
           if (json.data) {
@@ -812,25 +1005,7 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSelectModel = (modelId: ModelType) => {
-    setSelectedModel(modelId);
-    try {
-      if (!modelId || modelId === 'none') {
-        localStorage.removeItem('model_preference');
-        localStorage.removeItem('selected_model_preference');
-      } else {
-        localStorage.setItem('selected_model_preference', modelId);
-        const display = getModelDisplayInfo(modelId, availableModels);
-        const preferenceData = {
-          provider: display.parentModel.hostedBy || display.provider,
-          model: display.baseName,
-          effort: display.effortLabel || 'default',
-          modelId,
-        };
-        localStorage.setItem('model_preference', JSON.stringify(preferenceData));
-      }
-    } catch {}
-  };
+
 
   // Keep provider-model-effort preference in sync with localStorage
   useEffect(() => {
@@ -924,10 +1099,35 @@ export const App: React.FC = () => {
     }
   }, [currentUser]);
 
+  // Handle proactive token expiration and reactive auth:session-expired events
+  useEffect(() => {
+    const handleSessionExpired = () => {
+      performUserCleanup();
+      showToast('Your session has expired. Please sign in again.');
+      setIsAuthModalOpen(true);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const token = localStorage.getItem('auth_token');
+        if (token && isTokenExpired(token)) {
+          handleSessionExpired();
+        }
+      }
+    };
+
+    window.addEventListener('auth:session-expired', handleSessionExpired);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('auth:session-expired', handleSessionExpired);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [performUserCleanup, showToast]);
+
   // Sync user profile on load using verified session token and auto-refresh weekly
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
-    if (!token) {
+    if (!token || isTokenExpired(token)) {
       performUserCleanup();
       setTimeout(() => {
         setIsPageLoading(false);
@@ -1087,7 +1287,6 @@ export const App: React.FC = () => {
             setHasMoreEarlierMessages(false);
             setRemainingMessageCount(0);
           }
-          if (matched.model && matched.model !== 'none') setSelectedModel(matched.model);
         }
       } catch {}
     } else {
@@ -1148,9 +1347,6 @@ export const App: React.FC = () => {
           if (target) {
             targetSessionId = target.id;
             if (!activeId) setCurrentSessionId(target.id);
-            if (target.model && target.model !== 'none') {
-              setSelectedModel(target.model);
-            }
             setLoadingSubMessage('Fetching messages for active session...');
             try {
               const data = await sessionSyncService.getSession(target.id, { limit: 25 });
@@ -1222,23 +1418,7 @@ export const App: React.FC = () => {
         setRemainingMessageCount(0);
       }
 
-      let sessionModel = session.model;
-      if (sessionModel && sessionModel !== 'none') {
-        const isAvailable = availableModels.some(
-          (m) => m.id === sessionModel || m.effortOptions?.some((opt) => opt.modelId === sessionModel)
-        );
-        if (!isAvailable) {
-          // If session's recorded model was removed from that provider, check if base model exists
-          const matchedBase = availableModels.find((m) => sessionModel!.startsWith(m.id));
-          if (matchedBase && matchedBase.effortOptions && matchedBase.effortOptions.length > 0) {
-            sessionModel = getMinimumEffortModelId(matchedBase);
-          } else {
-            sessionModel = selectedModel !== 'none' ? selectedModel : 'none';
-          }
-        }
-      }
-      setSelectedModel(sessionModel || 'none');
-
+      // Preserve user's selected model preference across session switches.
       // Fetch fresh 25-message chunk and pagination state from backend
       sessionSyncService.getSession(session.id, { limit: 25 }).then((data) => {
         if (data && data.id === session.id) {
@@ -1320,6 +1500,23 @@ export const App: React.FC = () => {
     setMessages([]);
     setHasMoreEarlierMessages(false);
     setRemainingMessageCount(0);
+    if (availableModels.length > 0) {
+      const isLinked =
+        selectedModel !== 'none' &&
+        isModelOptionLinked(selectedModelOption, cliStatus, currentUser);
+      if (!isLinked) {
+        const bestLinked = getBestLinkedModelId(
+          availableModels,
+          cliStatus,
+          currentUser,
+          geminiQuota,
+          codexQuota
+        );
+        if (bestLinked) {
+          handleSelectModel(bestLinked);
+        }
+      }
+    }
     showToast('New session initialized');
   };
 
@@ -1392,9 +1589,7 @@ export const App: React.FC = () => {
       currentUserRef.current = normalizedUser;
       setCurrentUser(normalizedUser);
       if (normalizedUser) {
-        firestoreService.syncUserProfile(normalizedUser).catch((fErr) => {
-          console.warn('Firestore user profile sync warning', fErr);
-        });
+        syncUserProfileViaBackend(normalizedUser);
       }
 
       // Synchronize workspace sessions & messages first
@@ -1407,7 +1602,6 @@ export const App: React.FC = () => {
         if (target) {
           targetSessionId = target.id;
           if (!activeId) setCurrentSessionId(target.id);
-          if (target.model && target.model !== 'none') setSelectedModel(target.model);
           setLoadingSubMessage('Fetching messages for active session...');
           try {
             const sData = await sessionSyncService.getSession(target.id, { limit: 25 });
@@ -1457,7 +1651,7 @@ export const App: React.FC = () => {
         setCurrentUser(user);
         setIsAuthModalOpen(false);
         if (user) {
-          firestoreService.syncUserProfile(user).catch(() => {});
+          syncUserProfileViaBackend(user);
         }
         showToast(
           `Linked ${
@@ -1495,7 +1689,7 @@ export const App: React.FC = () => {
         setCurrentUser(user);
         setIsAuthModalOpen(false);
         if (user) {
-          firestoreService.syncUserProfile(user).catch(() => {});
+          syncUserProfileViaBackend(user);
         }
         showToast(`Saved ${platform.toUpperCase()} API Key to secure sandbox`);
       } else {
@@ -1571,7 +1765,7 @@ export const App: React.FC = () => {
           ...updated[idx],
           updatedAt: new Date().toISOString(),
           messages: truncatedHistory,
-          messageCount: truncatedHistory.length,
+          messageCount: hasMoreEarlierMessages ? remainingMessageCount + truncatedHistory.length : truncatedHistory.length,
           model: selectedModel,
           overwriteMessages: !hasMoreEarlierMessages,
           truncateAfterMessageId: msgId,
@@ -1646,9 +1840,6 @@ export const App: React.FC = () => {
       };
       newMessages = [...messages, userMsg];
       setMessages(newMessages);
-      if (currentUser) {
-        firestoreService.saveChatMessage(currentUser.id, activeSessionId, userMsg);
-      }
     }
 
     const sessionTitle = promptText.length > 36 ? promptText.slice(0, 36) + '...' : promptText;
@@ -1666,7 +1857,10 @@ export const App: React.FC = () => {
           ...updated[idx],
           updatedAt: new Date().toISOString(),
           messages: newMessages,
-          messageCount: newMessages.length,
+          messageCount: Math.max(
+            updated[idx]?.messageCount ?? 0,
+            hasMoreEarlierMessages ? remainingMessageCount + newMessages.length : newMessages.length
+          ),
           model: selectedModel,
           overwriteMessages: isTruncated || !hasMoreEarlierMessages,
           truncateAfterMessageId: truncateAfterId,
@@ -1679,7 +1873,7 @@ export const App: React.FC = () => {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           messages: newMessages,
-          messageCount: newMessages.length,
+          messageCount: hasMoreEarlierMessages ? remainingMessageCount + newMessages.length : newMessages.length,
           model: selectedModel,
           overwriteMessages: isTruncated || !hasMoreEarlierMessages,
           truncateAfterMessageId: truncateAfterId,
@@ -1726,7 +1920,10 @@ export const App: React.FC = () => {
             ...updated[idx],
             updatedAt: new Date().toISOString(),
             messages: msgs,
-            messageCount: msgs.length,
+            messageCount: Math.max(
+              updated[idx]?.messageCount ?? 0,
+              hasMoreEarlierMessages ? remainingMessageCount + msgs.length : msgs.length
+            ),
             model: selectedModel,
             overwriteMessages: isTruncated || !hasMoreEarlierMessages,
             truncateAfterMessageId: truncateAfterId,
@@ -1739,7 +1936,7 @@ export const App: React.FC = () => {
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
             messages: msgs,
-            messageCount: msgs.length,
+            messageCount: hasMoreEarlierMessages ? remainingMessageCount + msgs.length : msgs.length,
             model: selectedModel,
             overwriteMessages: isTruncated || !hasMoreEarlierMessages,
             truncateAfterMessageId: truncateAfterId,
@@ -1760,6 +1957,7 @@ export const App: React.FC = () => {
       author: modelDisplayName,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       modelBadge: modelDisplayName,
+      sandboxName: activeSandbox?.name,
       latency: 'Streaming...',
       avatarUrl: '',
       content: '',
@@ -1825,6 +2023,7 @@ export const App: React.FC = () => {
           author: modelDisplayName,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           modelBadge: modelDisplayName,
+          sandboxName: activeSandbox?.name,
           latency: '429 Rate Limit',
           avatarUrl: '',
           content: `⏱️ **Provider Rate Limit / Concurrency Threshold Reached**\n\nThe request rate limit for **${modelDisplayName}** was reached.\n\nPlease wait **${retryAfter} seconds** before submitting your next prompt.`,
@@ -1927,10 +2126,9 @@ export const App: React.FC = () => {
                   author: serverMsg.authorName,
                   time: serverMsg.timestamp,
                   modelBadge: modelDisplayName,
+                  sandboxName: activeSandbox?.name,
                   latency: serverMsg.latencyMs
-                    ? serverMsg.latencyMs >= 1000
-                      ? `Latency: ${(serverMsg.latencyMs / 1000).toFixed(1)}s (${serverMsg.latencyMs.toLocaleString()}ms)`
-                      : `Latency: ${serverMsg.latencyMs}ms`
+                    ? `Latency: ${serverMsg.latencyMs.toLocaleString()}ms`
                     : '',
                   avatarUrl: '',
                   content: serverMsg.content,
@@ -1973,17 +2171,18 @@ export const App: React.FC = () => {
                 fetchGeminiQuota(activeSessionId, true);
                 fetchCodexQuota(activeSessionId, true);
                 fetchSandboxUsage();
-                if (currentUser) {
-                  firestoreService.saveChatMessage(currentUser.id, activeSessionId, finalAssistantMsg);
-                }
               } else if (event === 'error') {
                 const errMsg = data.message || 'Execution error';
+                if (data.code === 'CLI_NOT_LINKED' || errMsg.toLowerCase().includes('requires an active') || errMsg.toLowerCase().includes('subscription link')) {
+                  setIsAuthModalOpen(true);
+                }
                 const errorMsg: ChatMessage = {
                   id: assistantId,
                   role: 'assistant',
                   author: modelDisplayName,
                   time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                   modelBadge: modelDisplayName,
+                  sandboxName: activeSandbox?.name,
                   latency: 'Error',
                   avatarUrl: '',
                   content: `⚠️ **Execution Error**\n\n${errMsg}`,
@@ -2066,9 +2265,6 @@ export const App: React.FC = () => {
         syncSession(updated);
         return updated;
       });
-      if (currentUser) {
-        firestoreService.saveChatMessage(currentUser.id, activeSessionId, fallbackAssistantMsg);
-      }
     } finally {
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
@@ -2082,6 +2278,15 @@ export const App: React.FC = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
+    }
+
+    if (currentSessionId) {
+      apiFetch('/api/v1/agent/stop', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: currentSessionId }),
+      }).catch((err) => {
+        console.warn('Failed to dispatch stop signal to backend', err);
+      });
     }
 
     if (streamingMessageId) {
@@ -2218,9 +2423,18 @@ export const App: React.FC = () => {
           onToggleTheme={handleToggleTheme}
           currentSessionId={currentSessionId}
           validSessionIds={validSessionIds}
-          onSandboxChanged={(newSandboxId) => {
+          onSandboxChanged={(newSandboxId, updatedUsage) => {
             setSelectedSandboxId(newSandboxId || null);
-            fetchSandboxUsage();
+            if (updatedUsage) {
+              setSandboxUsage(updatedUsage);
+            } else {
+              fetchSandboxUsage();
+            }
+            refreshModels(true);
+            if (currentSessionId) {
+              fetchGeminiQuota(currentSessionId, true);
+              fetchCodexQuota(currentSessionId, true);
+            }
             showToast('Sandbox workspace synchronized');
           }}
         />
@@ -2261,19 +2475,20 @@ export const App: React.FC = () => {
                 {/* Sandbox Status & Action in Hero */}
                 {currentUser && (
                   activeSandbox ? (
-                  <div className="mt-6 flex items-center gap-2.5 px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium animate-in fade-in duration-200">
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                    </span>
-                    <span>{activeSandbox.name} Active</span>
-                    <span className="text-outline text-[11px]">• MicroVM ready</span>
+                  <div className="mt-6 flex items-center justify-between sm:justify-start gap-2.5 px-3 sm:px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium animate-in fade-in duration-200 max-w-full">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="relative flex h-2 w-2 shrink-0">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                      <span className="truncate">{activeSandbox.name}</span>
+                    </div>
                     <button
                       type="button"
                       onClick={() => setIsInspectorOpen(true)}
-                      className="ml-2 text-primary hover:underline text-[11px] font-semibold cursor-pointer"
+                      className="ml-auto sm:ml-2 text-primary hover:underline text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0 inline-flex items-center gap-1"
                     >
-                      Open Inspector →
+                      Open Inspector &rarr;
                     </button>
                   </div>
                 ) : currentUser && sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0 ? (
@@ -2541,7 +2756,7 @@ export const App: React.FC = () => {
                     <div key={msg.id} className="w-full space-y-space-md sm:space-y-space-lg">
                       {/* Assistant Meta Header */}
                       <div className="flex flex-wrap items-center justify-between gap-space-xs">
-                        <div className="flex items-center gap-space-sm">
+                        <div className="flex flex-wrap items-center gap-space-sm">
                           {msg.modelBadge ? (
                             <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-primary/10 text-primary font-medium border border-primary/20 text-xs sm:text-sm">
                               {msg.modelBadge.toLowerCase().includes('none') ? (
@@ -2562,9 +2777,26 @@ export const App: React.FC = () => {
                               {msg.author || 'Atelier Assistant'}
                             </span>
                           )}
+
+                          {/* Sandbox MicroVM Environment Badge right next to model */}
+                          {(() => {
+                            const displaySandboxName =
+                              msg.sandboxName ||
+                              (msg.executionResult?.sandboxId && msg.executionResult.sandboxId !== 'none'
+                                ? (sandboxUsage?.sandboxes?.find((s) => s.sandboxId === msg.executionResult?.sandboxId)?.name ||
+                                   `Sandbox (${msg.executionResult.sandboxId.substring(0, 6)})`)
+                                : activeSandbox?.name);
+                            if (!displaySandboxName) return null;
+                            return (
+                              <span className="inline-flex items-center gap-1 font-mono text-[11px] text-on-surface-variant bg-surface-container-highest/60 px-2 py-0.5 rounded border border-outline-variant/30">
+                                <span className="material-symbols-outlined text-[13px] text-primary">cloud</span>
+                                {displaySandboxName}
+                              </span>
+                            );
+                          })()}
                         </div>
                         <span className="font-code-sm text-code-sm text-outline text-xs">
-                          {msg.latency}
+                          {msg.latency?.replace(/(?:Latency:\s*)?\d+(?:\.\d+)?s\s*\(([\d,]+ms)\)/i, 'Latency: $1')}
                         </span>
                       </div>
 
@@ -2603,20 +2835,6 @@ export const App: React.FC = () => {
                               })}
                             </ul>
                           )}
-                        </div>
-                      ) : isLoading && streamingMessageId === msg.id ? (
-                        <div className="py-2.5 px-3 rounded-lg bg-surface-container-low/70 border border-primary/25 flex items-center justify-between gap-3 text-xs w-fit shadow-xs">
-                          <div className="flex items-center gap-2 text-primary">
-                            <span className="material-symbols-outlined text-[16px] animate-spin text-primary">
-                              progress_activity
-                            </span>
-                            <span className="font-sans font-medium text-on-surface">
-                              {msg.steps?.find((s) => !s.completed)?.text || 'Reasoning & formulating execution strategy...'}
-                            </span>
-                          </div>
-                          <span className="text-[10px] text-primary/80 font-mono uppercase tracking-wider bg-primary/10 px-1.5 py-0.5 rounded border border-primary/20">
-                            Thinking
-                          </span>
                         </div>
                       ) : null}
                     </div>

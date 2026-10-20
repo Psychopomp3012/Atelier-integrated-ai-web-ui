@@ -44,8 +44,14 @@ export const Accordion: React.FC<AccordionProps> = ({
   const displayTitle =
     title ||
     (activeExecuting
-      ? (sandboxName ? `Autonomous Cloud Sandbox Execution in Progress (${sandboxName})` : 'Cloud Agent Execution in Progress')
-      : (sandboxName ? `Autonomous Cloud Sandbox Execution Completed (${sandboxName})` : 'Cloud Agent Execution Completed'));
+      ? (sandboxName ? 'Autonomous Cloud Sandbox Execution in Progress' : 'Cloud Agent Execution in Progress')
+      : (sandboxName ? 'Autonomous Cloud Sandbox Execution Completed' : 'Cloud Agent Execution Completed'));
+
+  const compactTitle =
+    title ||
+    (activeExecuting
+      ? (sandboxName ? 'Sandbox Executing' : 'Agent Executing')
+      : (sandboxName ? 'Sandbox Completed' : 'Execution Completed'));
 
   const toggleStepDetails = (stepId: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -134,51 +140,40 @@ export const Accordion: React.FC<AccordionProps> = ({
     <div className="rounded-xl bg-surface-container-low overflow-hidden shadow-sm border border-outline-variant/30 transition-all">
       {/* Header Bar */}
       <button
+        type="button"
         onClick={() => setUserToggled(!isOpen)}
-        className="w-full px-space-md py-space-sm bg-surface-container flex items-center justify-between text-left transition-colors hover:bg-surface-container-high cursor-pointer select-none"
+        className="w-full px-space-md py-space-sm bg-surface-container flex items-center justify-between gap-2 text-left transition-colors hover:bg-surface-container-high cursor-pointer select-none overflow-hidden"
       >
-        <div className="flex flex-wrap items-center gap-space-sm">
+        <div className="flex items-center gap-1.5 sm:gap-space-sm min-w-0 flex-1 overflow-hidden">
           {activeExecuting ? (
-            <span className="material-symbols-outlined text-[18px] text-primary animate-spin">
+            <span className="shrink-0 material-symbols-outlined text-[18px] text-primary animate-spin">
               progress_activity
             </span>
           ) : (
-            <span className="material-symbols-outlined text-[18px] text-secondary">
+            <span className="shrink-0 material-symbols-outlined text-[18px] text-secondary">
               verified
             </span>
           )}
-          <span className="font-label-md text-label-md font-semibold text-on-surface">
-            {displayTitle}
+          <span className="font-label-md text-label-md font-semibold text-on-surface truncate min-w-0">
+            <span className="hidden sm:inline">{displayTitle}</span>
+            <span className="inline sm:hidden">{compactTitle}</span>
           </span>
-
-          {/* Sandbox MicroVM Environment Badge */}
-          {sandboxName ? (
-            <span className="hidden sm:inline-flex items-center gap-1 font-mono text-[11px] text-on-surface-variant bg-surface-container-highest/60 px-2 py-0.5 rounded border border-outline-variant/30">
-              <span className="material-symbols-outlined text-[13px] text-primary">cloud</span>
-              {sandboxName} (/workspace)
-            </span>
-          ) : (
-            <span className="hidden sm:inline-flex items-center gap-1 font-mono text-[11px] text-on-surface-variant bg-surface-container-highest/60 px-2 py-0.5 rounded border border-outline-variant/30">
-              <span className="material-symbols-outlined text-[13px] text-outline">cloud_off</span>
-              Cloud Agent
-            </span>
-          )}
 
           {/* Progress / Step Count Badge */}
           {activeExecuting ? (
-            <span className="font-code-sm text-code-sm text-primary bg-primary/10 px-space-xs py-0.5 rounded border border-primary/20 flex items-center gap-1 text-xs font-medium">
+            <span className="shrink-0 whitespace-nowrap font-code-sm text-code-sm text-primary bg-primary/10 px-1.5 sm:px-space-xs py-0.5 rounded border border-primary/20 flex items-center gap-1 text-[11px] sm:text-xs font-medium">
               <span className="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
-              {completedCount}/{steps.length} IN PROGRESS
+              <span>{completedCount}/{steps.length} <span className="hidden sm:inline">IN PROGRESS</span><span className="sm:hidden">ACTIVE</span></span>
             </span>
           ) : (
-            <span className="font-code-sm text-code-sm text-secondary bg-secondary/10 px-space-xs py-0.5 rounded border border-secondary/20 text-xs font-medium">
-              {completedCount}/{steps.length} STEPS READY
+            <span className="shrink-0 whitespace-nowrap font-code-sm text-code-sm text-secondary bg-secondary/10 px-1.5 sm:px-space-xs py-0.5 rounded border border-secondary/20 text-[11px] sm:text-xs font-medium">
+              {completedCount}/{steps.length} <span className="hidden sm:inline">STEPS READY</span><span className="sm:hidden">READY</span>
             </span>
           )}
         </div>
 
         <span
-          className={`material-symbols-outlined text-[18px] text-outline transition-transform duration-200 ${
+          className={`shrink-0 material-symbols-outlined text-[18px] text-outline transition-transform duration-200 ${
             isOpen ? 'rotate-180' : 'rotate-0'
           }`}
         >
@@ -280,7 +275,7 @@ export const Accordion: React.FC<AccordionProps> = ({
                             <span className="material-symbols-outlined text-[14px] text-secondary">
                               {step.command ? 'terminal' : 'psychology'}
                             </span>
-                            {step.command ? 'Terminal Output (/workspace)' : 'Reasoning & Execution Trace'}
+                            {step.command ? 'Terminal Output' : 'Reasoning & Execution Trace'}
                           </span>
                           <div className="flex items-center gap-2">
                             {step.exitCode !== undefined && (

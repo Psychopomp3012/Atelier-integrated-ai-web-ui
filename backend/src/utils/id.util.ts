@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export type IdPrefix = 'msg' | 'step' | 'sess' | 'sbx' | 'run' | 'usr';
+export type IdPrefix = 'msg' | 'step' | 'sess' | 'sbx' | 'run' | 'usr' | 'exec';
 
 export function generateId(prefix: IdPrefix): string {
   const uuidShort = randomUUID().slice(0, 8);

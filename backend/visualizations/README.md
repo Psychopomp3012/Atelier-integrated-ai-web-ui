@@ -100,20 +100,79 @@ Built with Mermaid's **`flowchart TD`** documenting the zero-race-condition head
 
 ---
 
+## 4. Master Codebase Class Diagram (`classDiagram`)
+
+A complete, high-fidelity class diagram spanning both **Frontend** and **Backend**, leaving **zero classes, methods, or functions untouched** (18 Classes, 262 Methods, 177 Functions):
+- **Core Backend Services & Providers**: Fastify route plugins, controllers, `AgentService`, `SandboxService`, `E2BSandboxProvider`, `AntigravityQuotaService`, `CodexQuotaService`, and `FirestoreBackendService`.
+- **Frontend Component Hierarchy**: React 19 root (`App`), Header, Sidebar, PromptBar, CloudInspector, AuthModal, ModelSelectorDropdown, MarkdownContent, CodeArtifact, and SlashCommandPalette.
+- **Client Services & Reactive State**: `CliAuthServiceClient`, `FirestoreServiceClient`, `ModelsServiceClient`, `SessionSyncServiceClient`, and Jotai state atoms.
+- **Cross-Stack Bridges**: SSE streaming transport and Firestore document schema synchronization.
+
+![Master Codebase Class Diagram](codebase-class-diagram.png)
+
+---
+
+## 5. Backend Architecture & Class Structure (`classDiagram`)
+
+Detailed inspection of the backend module layer:
+- **Controllers**: `AgentController`, `AuthController`, `CliAuthController`, `SandboxController`, `SessionController`, `HealthController`.
+- **Services**: `AgentService`, `AuthService`, `CliAuthService`, `SandboxService`, `SessionService`, `AntigravityQuotaService`, `CodexQuotaService`, `RateLimitService`, `FirestoreBackendService`.
+- **Providers**: `E2BSandboxProvider` (active cloud microVM provider) and `DockerSandboxProvider` (dead local provider).
+- **Core Utilities**: `ContextCompactor`, `TokenUtil_Backend`, `IdUtil`, `LoggerUtil`, `ResponseUtil`, `AppError`.
+
+![Backend Class Diagram](backend-class-diagram.png)
+
+---
+
+## 6. Frontend Component & Service Hierarchy (`classDiagram`)
+
+Detailed mapping of the client architecture:
+- **Component Layer**: All 18 React components with their event handlers, subcomponents, and prop signatures.
+- **Service Layer**: Dedicated client API wrappers for CLI device auth, Firebase authentication, Firestore persistence, and model discovery.
+- **Utility Modules**: API fetch helpers, slash command parsers, quota badge formatters, and token metric calculators.
+- **Reactive State**: Jotai primitive atoms managing user identity, active sandboxes, session pagination, and quota states.
+
+![Frontend Class Diagram](frontend-class-diagram.png)
+
+---
+
+## 7. Code Redundancy & Dead Code Analysis Diagram (`classDiagram`)
+
+Visual breakdown mapping discovered code redundancies, dead classes, and legacy endpoints:
+
+![Redundancy Analysis Diagram](redundancy-analysis-diagram.png)
+
+---
+
+## 8. Comprehensive Code Redundancy & Refactoring Report
+
+Our static AST analysis and symbol cross-referencing uncovered several high-priority redundancies and dead code paths across the codebase:
+
+| # | Component / Symbol | File Location | Issue Description | Impact & Recommended Action |
+|---|-------------------|---------------|-------------------|-----------------------------|
+| **1** | `DockerSandboxProvider` | [`backend/src/modules/sandbox/docker-sandbox.provider.ts`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/backend/src/modules/sandbox/docker-sandbox.provider.ts) | Contains **23 methods and ~700 lines of code** implementing local Docker containers. The platform is strictly mandated to be **cloud-only** using E2B MicroVMs (`.agents/AGENTS.md`). | **Dead Code**: Completely unused in cloud execution. `sandbox.service.ts` instantiates it as a dormant field. **Action**: Remove `DockerSandboxProvider` or isolate it to an optional development-only flag. |
+| **2** | Legacy Quota Endpoint `/api/v1/agent/quota` | [`backend/src/modules/agent/agent.controller.ts:43`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/backend/src/modules/agent/agent.controller.ts#L43) | `agentController.getQuota()` returns **IP rate limit metrics** (`rateLimitService.getQuota()`), but is named `agent/quota`. | **Misleading / Redundant**: The real AI agent/model quotas are handled live via `/api/v1/quota/gemini` and `/api/v1/quota/codex`. Calling this endpoint does not check AI quotas. **Action**: Deprecate or rename to `/api/v1/rate-limit/status`. |
+| **3** | `fetchQuota()` in Frontend | [`frontend/src/App.tsx:898`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/frontend/src/App.tsx#L898) | Calls the legacy `/api/v1/agent/quota` endpoint when a rate limit counter resets. | **Redundant**: The frontend already tracks live quotas via `fetchGeminiQuota` and `fetchCodexQuota`. This legacy function produces redundant network calls. **Action**: Merge rate-limit reset handling into reactive state without hitting `/api/v1/agent/quota`. |
+| **4** | Duplicate Quota Exhaustion Logic | [`frontend/src/components/ModelSelectorDropdown.tsx:70-100`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/frontend/src/components/ModelSelectorDropdown.tsx#L70-L100) vs [`frontend/src/utils/quota.util.ts`](file:///home/psychopomp3012/Projects/Integrated-Web-UI/frontend/src/utils/quota.util.ts) | `ModelSelectorDropdown` implements inline functions (`isGroupExhausted`, `isModelQuotaExhausted`, `getModelQuotaDescription`) that duplicate functions in `quota.util.ts`. | **Duplicate Code**: Violates DRY principles. Changes to quota formatting require updating both places. **Action**: Refactor `ModelSelectorDropdown` to import directly from `quota.util.ts`. |
+| **5** | Confusing `token.util.ts` Nomenclature | `backend/src/utils/token.util.ts` vs `frontend/src/utils/token.util.ts` | Backend `token.util.ts` handles **JWT authorization**, while frontend `token.util.ts` computes **LLM token metrics**. | **Nomenclature Conflict**: Confusing to engineers reviewing full-stack code. **Action**: Rename frontend utility to `llm-token-metrics.util.ts`. |
+| **6** | Dual Session Persistence Pathways | `frontend/src/services/sessionSync.service.ts` vs `frontend/src/services/firestore.service.ts` | Frontend has two parallel ways of saving chat data: via backend REST `/api/v1/sessions` and via direct client Firestore SDK writes. | **Architectural Divergence**: `.agents/AGENTS.md` states: *"Never perform data storing operations directly via frontends"*. **Action**: Standardize all chat persistence through the backend Fastify API gateway. |
+
+> 📖 **Comprehensive Audit Document**: For full technical details and actionable remediation plans for each issue above, see [**`visualizations/codebase-discrepancies.md`**](file:///home/psychopomp3012/Projects/Integrated-Web-UI/visualizations/codebase-discrepancies.md).
+
+---
+
 ## 🛠️ Regenerating Visualizations
 
-All diagrams can be regenerated at any time using the pre-configured `mmdc` CLI tool:
+The diagrams can be regenerated at any time using the pre-configured `mmdc` CLI tool and local puppeteer configuration:
 
 ```bash
-# Architecture Diagram (SVG & High-Res PNG)
-mmdc -p ~/.mermaid-puppeteer.json -i visualizations/architecture-diagram.mmd -o visualizations/architecture-diagram.svg -b "#0b0f19"
-mmdc -p ~/.mermaid-puppeteer.json -i visualizations/architecture-diagram.mmd -o visualizations/architecture-diagram.png -b "#0b0f19" -s 2
+# Master Codebase Class Diagram (SVG & High-Res PNG)
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/codebase-class-diagram.mmd -o visualizations/codebase-class-diagram.svg
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/codebase-class-diagram.mmd -o visualizations/codebase-class-diagram.png -s 2
 
-# User Flow Diagram (SVG & High-Res PNG)
-mmdc -p ~/.mermaid-puppeteer.json -i visualizations/user-flow-diagram.mmd -o visualizations/user-flow-diagram.svg -b "#0b0f19"
-mmdc -p ~/.mermaid-puppeteer.json -i visualizations/user-flow-diagram.mmd -o visualizations/user-flow-diagram.png -b "#0b0f19" -s 2
-
-# Codex Auth Flow Diagram (SVG & High-Res PNG)
-mmdc -p ~/.mermaid-puppeteer.json -i visualizations/codex-auth-flow.mmd -o visualizations/codex-auth-flow.svg -b "#0b0f19"
-mmdc -p ~/.mermaid-puppeteer.json -i visualizations/codex-auth-flow.mmd -o visualizations/codex-auth-flow.png -b "#0b0f19" -s 2
+# System Architecture, User Flow & Codex Auth Diagrams
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/architecture-diagram.mmd -o visualizations/architecture-diagram.svg
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/user-flow-diagram.mmd -o visualizations/user-flow-diagram.svg
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/codex-auth-flow.mmd -o visualizations/codex-auth-flow.svg
 ```
+

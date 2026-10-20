@@ -22,6 +22,7 @@ const getInitialInspectorOpen = (): boolean => {
 
 export const isDarkModeAtom: PrimitiveAtom<boolean> = atom<boolean>(getInitialDarkMode());
 export const isInspectorOpenAtom: PrimitiveAtom<boolean> = atom<boolean>(getInitialInspectorOpen());
+export const isTelemetryModalOpenAtom: PrimitiveAtom<boolean> = atom<boolean>(false);
 export const toastMessageAtom: PrimitiveAtom<string | null> = atom<string | null>(null);
 export const isPageLoadingAtom: PrimitiveAtom<boolean> = atom<boolean>(true);
 export const loadingMessageAtom: PrimitiveAtom<string> = atom<string>('Initializing Atelier Workspace');

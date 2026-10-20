@@ -119,4 +119,23 @@ export class RateLimitService {
   }
 }
 
-export const rateLimitService = new RateLimitService(60 * 1000, 15);
+// Calibrated Rate Limiting Tiers
+export const sandboxProvisionLimiter = new RateLimitService(60 * 1000, 5);
+
+// Tier 2: AI Execution & Prompts (20 req/min) - protects LLM execution loops & SSE pipelines
+export const agentPromptLimiter = new RateLimitService(60 * 1000, 20);
+
+// Tier 3: Sensitive Authentication & Platform Linking (20 req/min) - protects against brute forcing
+export const authSensitiveLimiter = new RateLimitService(60 * 1000, 20);
+
+// Tier 4: Mutations & State Updates (60 req/min) - autosave, sessions, detachments, commands
+export const mutationLimiter = new RateLimitService(60 * 1000, 60);
+
+// Tier 5: Read APIs & Status Polling (120 req/min) - session lists, files, usage, quota checks
+export const readApiLimiter = new RateLimitService(60 * 1000, 120);
+
+// Tier 6: Public Endpoints & Diagnostics (120 req/min) - config, metrics, debug logs
+export const publicLimiter = new RateLimitService(60 * 1000, 120);
+
+// Backward-compatible alias for existing imports
+export const rateLimitService = agentPromptLimiter;

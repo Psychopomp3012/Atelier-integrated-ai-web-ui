@@ -1,7 +1,8 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { registerCorsPlugin } from './plugins/cors.plugin.js';
 import { registerSensiblePlugin } from './plugins/sensible.plugin.js';
-import { healthRoutes } from './modules/health/health.routes.js';
+import { registerSwaggerPlugin } from './plugins/swagger.plugin.js';
+import { rateLimitRoutes } from './modules/rate-limit/rate-limit.routes.js';
 import { agentRoutes } from './modules/agent/agent.routes.js';
 import { sandboxRoutes } from './modules/sandbox/sandbox.routes.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
@@ -10,6 +11,7 @@ import { sessionRoutes } from './modules/session/session.routes.js';
 import { createErrorResponse } from './utils/response.util.js';
 import { isAppError } from './utils/error.util.js';
 import { logger } from './utils/logger.util.js';
+import { tokenUtil } from './utils/token.util.js';
 import { cliAuthService } from './modules/auth/cli-auth.service.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -21,6 +23,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Register foundational plugins
   await registerCorsPlugin(app);
   await registerSensiblePlugin(app);
+  await registerSwaggerPlugin(app);
 
   // Rate limiting to prevent API abuse
   const { default: rateLimit } = await import('@fastify/rate-limit');
@@ -32,9 +35,25 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // Centralized API logging into test_suite/app_debug.log (excluding preflight OPTIONS)
   app.addHook('onRequest', async (request) => {
+    // Resolve authenticated user early if Bearer token is provided
+    let reqUserId = request.userId;
+    if (!reqUserId && request.headers.authorization?.startsWith('Bearer ')) {
+      const token = request.headers.authorization.substring(7).trim();
+      const verified = tokenUtil.verifyJwt(token);
+      if (verified.valid && verified.payload?.sub) {
+        reqUserId = verified.payload.sub;
+        request.userId = reqUserId;
+        request.userEmail = verified.payload.email;
+        request.token = token;
+      }
+    }
+
     // Log mutative or long-running operations when they start so operations are tracked even if interrupted
     if (request.method !== 'GET' && request.method !== 'OPTIONS' && (request.url.startsWith('/api/') || request.url.startsWith('/oauth'))) {
-      logger.info(`[API Request] ${request.method} ${request.url}`);
+      logger.info(`[API Request] ${request.method} ${request.url}`, {
+        reqId: request.id,
+        userId: reqUserId,
+      });
     }
   });
 
@@ -45,7 +64,10 @@ export async function buildApp(): Promise<FastifyInstance> {
         return;
       }
       const durationMs = Math.round(reply.elapsedTime);
-      logger.info(`[API] ${request.method} ${request.url} -> ${reply.statusCode} (${durationMs}ms)`);
+      logger.info(`[API] ${request.method} ${request.url} -> ${reply.statusCode} (${durationMs}ms)`, {
+        reqId: request.id,
+        userId: request.userId,
+      });
     }
   });
 
@@ -54,6 +76,8 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (isAppError(error)) {
       if (error.statusCode >= 400) {
         logger.error(`[AppError ${error.code}] ${error.message}`, error, {
+          reqId: request.id,
+          userId: request.userId,
           url: request.url,
           method: request.method,
           statusCode: error.statusCode,
@@ -66,9 +90,13 @@ export async function buildApp(): Promise<FastifyInstance> {
     }
 
     const statusCode = typeof error.statusCode === 'number' ? error.statusCode : 500;
-    const code = error.code || (statusCode === 400 ? 'VALIDATION_ERROR' : statusCode === 401 ? 'UNAUTHORIZED' : statusCode === 404 ? 'NOT_FOUND' : 'INTERNAL_SERVER_ERROR');
+    const code = (error.code === 'FST_ERR_VALIDATION' || statusCode === 400)
+      ? 'VALIDATION_ERROR'
+      : (error.code || (statusCode === 401 ? 'UNAUTHORIZED' : statusCode === 404 ? 'NOT_FOUND' : 'INTERNAL_SERVER_ERROR'));
 
     logger.error(`[HTTP ${statusCode}] Unhandled application exception: ${error.message}`, error, {
+      reqId: request.id,
+      userId: request.userId,
       url: request.url,
       method: request.method,
       code,
@@ -76,12 +104,12 @@ export async function buildApp(): Promise<FastifyInstance> {
     });
 
     return reply.status(statusCode).send(
-      createErrorResponse(code, error.message || 'An unexpected error occurred')
+      createErrorResponse(code, error.message || 'An unexpected error occurred', error.validation || error.details)
     );
   });
 
   // Modular domain routes
-  await app.register(healthRoutes);
+  await app.register(rateLimitRoutes);
   await app.register(agentRoutes);
   await app.register(sandboxRoutes);
   await app.register(authRoutes);

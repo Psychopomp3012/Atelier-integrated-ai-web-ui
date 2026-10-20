@@ -64,34 +64,18 @@ export class CodexQuotaService {
   }
 
   public invalidateUserQuota(userKey: string): void {
-    this.cachedQuotaLimitsMap.delete(userKey);
-  }
-
-  /**
-   * Queries Codex CLI version dynamically via cloud sandbox microVM without touching local backend host.
-   */
-  private async queryCodexVersion(userId?: string, sessionId?: string): Promise<string> {
-    const activeSandboxId = this.resolveSandboxId(userId, sessionId);
-    if (activeSandboxId) {
-      try {
-        const cmdRes = await sandboxService.executeInSandbox({
-          command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" codex --version',
-          code: '',
-          language: 'bash',
-          sandboxId: activeSandboxId,
-          userId,
-          sessionId,
-          timeoutMs: 10000,
-        });
-        if (cmdRes && cmdRes.stdout) {
-          const match = cmdRes.stdout.match(/codex(?:-cli)?\s+([0-9.]+)/i);
-          if (match) return match[1];
-        }
-      } catch {}
+    for (const key of Array.from(this.cachedQuotaLimitsMap.keys())) {
+      if (key === userKey || key.startsWith(`${userKey}:`)) {
+        this.cachedQuotaLimitsMap.delete(key);
+      }
     }
-
-    return '0.163.0';
+    for (const key of Array.from(this.inFlightQuotaMap.keys())) {
+      if (key === userKey || key.startsWith(`${userKey}:`)) {
+        this.inFlightQuotaMap.delete(key);
+      }
+    }
   }
+
 
   /**
    * Loads user Codex telemetry strictly from memory cache or Firebase Firestore.
@@ -174,6 +158,11 @@ export class CodexQuotaService {
         if (cmdRes && cmdRes.stdout) {
           const parsed = JSON.parse(cmdRes.stdout.trim());
           if (parsed && (parsed.rateLimits || parsed.account)) {
+            logger.info('[Codex Quota] Resolved live OpenAI Codex quota data', {
+              sandboxId: activeSandboxId,
+              userId,
+              planType: parsed.account?.planType || parsed.rateLimits?.planType,
+            });
             return parsed;
           }
         }
@@ -194,7 +183,9 @@ export class CodexQuotaService {
     userEmail?: string,
     sessionId?: string
   ): Promise<CliQuotaLimits | null> {
-    const cacheKey = userKey || userEmail || 'default';
+    const activeSandboxId = this.resolveSandboxId(userKey, sessionId);
+    const baseKey = userKey || userEmail || 'default';
+    const cacheKey = `${baseKey}:${activeSandboxId || 'none'}`;
     const cached = this.cachedQuotaLimitsMap.get(cacheKey);
     const now = Date.now();
     if (cached && now - cached.timestamp < 10000) {
@@ -207,7 +198,6 @@ export class CodexQuotaService {
     }
 
     const limitsPromise = (async () => {
-      const version = await this.queryCodexVersion(userKey, sessionId);
       const liveData = await this.queryLiveCodexQuota(userKey, sessionId);
       const activeRateLimits = liveData?.rateLimits;
 
@@ -286,7 +276,7 @@ export class CodexQuotaService {
         }
 
         const limits: CliQuotaLimits = {
-          description: `OpenAI Codex CLI (v${version}) authenticated via ChatGPT Account`,
+          description: 'OpenAI Codex CLI authenticated via ChatGPT Account',
           groups,
           fetchedAt: new Date().toISOString(),
         };

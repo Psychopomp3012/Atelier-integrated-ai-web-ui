@@ -394,6 +394,7 @@ export interface ChatMessage {
   avatarUrl: string;
   content: string;
   modelBadge?: string;
+  sandboxName?: string;
   latency?: string;
   steps?: StepItem[];
   codeFiles?: {

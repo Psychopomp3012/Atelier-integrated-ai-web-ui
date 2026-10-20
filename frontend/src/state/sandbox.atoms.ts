@@ -10,6 +10,7 @@ export interface SandboxRecord {
   attachedSessionIds: string[];
   lastUpdateCheckAt?: number;
   isUpdating?: boolean;
+  isProvisioning?: boolean;
 }
 
 export interface SandboxUsageState {

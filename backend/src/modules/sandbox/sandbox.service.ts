@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type {
-  CloudSandboxMetrics,
   ISandboxProvider,
   SandboxExecutionRequest,
   SandboxExecutionResponse,
@@ -12,7 +11,6 @@ import type {
   SandboxUsageInfo,
   TerminalLogEntry,
 } from '../../types/sandbox.types.js';
-import { DockerSandboxProvider } from './docker-sandbox.provider.js';
 import { E2BSandboxProvider } from './e2b-sandbox.provider.js';
 import { envConfig } from '../../config/env.config.js';
 import { logger } from '../../utils/logger.util.js';
@@ -20,33 +18,15 @@ import { logger } from '../../utils/logger.util.js';
 export class SandboxService {
   private readonly provider: ISandboxProvider;
   private readonly e2bProvider: E2BSandboxProvider;
-  private readonly dockerProvider: DockerSandboxProvider;
 
   constructor() {
     this.e2bProvider = new E2BSandboxProvider();
-    this.dockerProvider = new DockerSandboxProvider();
-
-    const preferred = envConfig.SANDBOX_PROVIDER || 'e2b';
-    const hasE2BKey = Boolean(envConfig.E2B_API_KEY || process.env.E2B_API_KEY);
-
-    if (preferred === 'e2b' && hasE2BKey) {
-      logger.info('SandboxService: Activated E2B Cloud Sandbox Provider');
-      this.provider = this.e2bProvider;
-    } else if (hasE2BKey) {
-      logger.info('SandboxService: E2B_API_KEY detected, activating E2B Cloud Sandbox Provider');
-      this.provider = this.e2bProvider;
-    } else {
-      logger.info('SandboxService: Activated Docker Sandbox Provider (E2B key not detected)');
-      this.provider = this.dockerProvider;
-    }
+    this.provider = this.e2bProvider;
+    logger.info('SandboxService: Activated E2B Cloud Sandbox Provider');
   }
 
   public getProviderName(): string {
     return this.provider.name;
-  }
-
-  public getMetrics(): CloudSandboxMetrics {
-    return this.provider.getMetrics();
   }
 
   public getTerminalLogs(): TerminalLogEntry[] {
@@ -65,7 +45,7 @@ export class SandboxService {
         durationMs: 40,
         exitCode: 1,
         stdout: '',
-        stderr: `${this.provider.name} is not available. If using E2B, ensure E2B_API_KEY is configured. If using Docker, ensure Docker daemon is running.`,
+        stderr: `${this.provider.name} is not available. Please ensure E2B_API_KEY is configured in your environment.`,
       };
     }
 
@@ -204,23 +184,23 @@ export class SandboxService {
     return this.provider.getOrCreateSandbox(sessionId, userId, targetSandboxId, replaceOldest);
   }
 
-  public attachSessionToSandbox(sessionId: string, sandboxId: string): boolean {
+  public attachSessionToSandbox(sessionId: string, sandboxId: string, userId?: string): boolean {
     if (this.provider.attachSessionToSandbox) {
-      return this.provider.attachSessionToSandbox(sessionId, sandboxId);
+      return this.provider.attachSessionToSandbox(sessionId, sandboxId, userId);
     }
     return false;
   }
 
-  public detachSession(sessionId: string): boolean {
+  public detachSession(sessionId: string, userId?: string): boolean {
     if (this.provider.detachSession) {
-      return this.provider.detachSession(sessionId);
+      return this.provider.detachSession(sessionId, userId);
     }
     return false;
   }
 
-  public clearAllAttachedSessions(): void {
+  public clearAllAttachedSessions(userId?: string): void {
     if (this.provider.clearAllAttachedSessions) {
-      this.provider.clearAllAttachedSessions();
+      this.provider.clearAllAttachedSessions(userId);
     }
   }
 
@@ -234,6 +214,13 @@ export class SandboxService {
     return this.provider.destroySandbox(sandboxIdOrSessionId);
   }
 
+  public async killAgentProcesses(sandboxIdOrSessionId: string): Promise<boolean> {
+    if (this.provider.killAgentProcesses) {
+      return this.provider.killAgentProcesses(sandboxIdOrSessionId);
+    }
+    return false;
+  }
+
   public async syncWithCloud(userId?: string): Promise<void> {
     if (this.provider.syncWithCloud) {
       await this.provider.syncWithCloud(userId);
@@ -243,6 +230,12 @@ export class SandboxService {
   public async syncCredentialsToUserSandboxes(userId?: string): Promise<void> {
     if (this.e2bProvider.syncCredentialsToUserSandboxes) {
       await this.e2bProvider.syncCredentialsToUserSandboxes(userId).catch(() => {});
+    }
+  }
+
+  public async purgeUserCredentialsFromSandboxes(userId?: string, cli?: 'antigravity' | 'gemini' | 'claude' | 'codex'): Promise<void> {
+    if (this.e2bProvider.purgeUserCredentialsFromSandboxes) {
+      await this.e2bProvider.purgeUserCredentialsFromSandboxes(userId, cli).catch(() => {});
     }
   }
 

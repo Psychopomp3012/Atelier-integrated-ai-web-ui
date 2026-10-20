@@ -11,6 +11,11 @@ import { logger } from '../../utils/logger.util.js';
 export class AgentController {
   private getClientKey(req: FastifyRequest): string {
     const authHeader = req.headers.authorization;
+    return req.userId ? `user:${req.userId}` : this.getFallbackClientKey(req);
+  }
+
+  private getFallbackClientKey(req: FastifyRequest): string {
+    const authHeader = req.headers.authorization;
     if (authHeader?.startsWith('Bearer ')) {
       return `user:${authHeader.slice(7)}`;
     }
@@ -21,10 +26,9 @@ export class AgentController {
 
   public async getModels(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const query = req.query as { userId?: string; sessionId?: string };
-    const authHeader = req.headers.authorization;
-    let userId = query?.userId;
-    if (!userId && authHeader?.startsWith('Bearer ')) {
-      const token = authHeader.slice(7);
+    let userId = req.userId;
+    if (!userId && req.headers.authorization?.startsWith('Bearer ')) {
+      const token = req.headers.authorization.slice(7);
       const verified = tokenUtil.verifyJwt(token);
       if (verified.valid && verified.payload) {
         userId = (verified.payload as any).userId || verified.payload.sub;
@@ -40,112 +44,12 @@ export class AgentController {
     return reply.status(200).send(createSuccessResponse(models));
   }
 
-  public async getQuota(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const clientKey = this.getClientKey(req);
-    const quota = rateLimitService.getQuota(clientKey);
-
-    reply.header('X-RateLimit-Limit', quota.limit);
-    reply.header('X-RateLimit-Remaining', quota.remaining);
-    reply.header('X-RateLimit-Reset', quota.resetTimestamp);
-
-    return reply.status(200).send(
-      createSuccessResponse(
-        {
-          limit: quota.limit,
-          remaining: quota.remaining,
-          resetInSeconds: quota.resetInSeconds,
-        },
-        undefined,
-        {
-          limit: quota.limit,
-          remaining: quota.remaining,
-          resetInSeconds: quota.resetInSeconds,
-        }
-      )
-    );
-  }
-
-  public async executePrompt(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const clientKey = this.getClientKey(req);
-    const rateStatus = rateLimitService.consume(clientKey);
-
-    reply.header('X-RateLimit-Limit', rateStatus.limit);
-    reply.header('X-RateLimit-Remaining', rateStatus.remaining);
-    reply.header('X-RateLimit-Reset', rateStatus.resetTimestamp);
-
-    if (!rateStatus.allowed) {
-      reply.header('Retry-After', rateStatus.resetInSeconds);
-      return reply.status(429).send(
-        createErrorResponse(
-          'RATE_LIMIT_EXCEEDED',
-          `Rate limit exceeded. You have reached your quota of ${rateStatus.limit} requests per minute. Please wait ${rateStatus.resetInSeconds} seconds before sending another prompt.`,
-          {
-            limit: rateStatus.limit,
-            remaining: 0,
-            resetInSeconds: rateStatus.resetInSeconds,
-            retryAfter: rateStatus.resetInSeconds,
-          },
-          {
-            limit: rateStatus.limit,
-            remaining: 0,
-            resetInSeconds: rateStatus.resetInSeconds,
-          }
-        )
-      );
-    }
-
-    const parseResult = PromptExecutionInputSchema.safeParse(req.body);
-
-    if (!parseResult.success) {
-      throw new AppError('Validation failed', 400, 'VALIDATION_ERROR', parseResult.error.format());
-    }
-
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
-
-    try {
-      const result = await agentService.executePrompt(parseResult.data, token);
-
-      return reply.status(200).send(
-        createSuccessResponse(result, undefined, {
-          limit: rateStatus.limit,
-          remaining: rateStatus.remaining,
-          resetInSeconds: rateStatus.resetInSeconds,
-        })
-      );
-    } catch (err: any) {
-      logger.error('Prompt execution failed', err, {
-        sessionId: parseResult.data.sessionId,
-        selectedModel: parseResult.data.selectedModel,
-        promptPreview: parseResult.data.prompt.slice(0, 50),
-      });
-      throw err;
-    }
-  }
-
   public async executePromptStream(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const clientKey = this.getClientKey(req);
-    const rateStatus = rateLimitService.consume(clientKey);
+    const rateStatus = rateLimitService.getQuota(clientKey);
 
     reply.raw.setHeader('Access-Control-Allow-Origin', '*');
     reply.raw.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-    if (!rateStatus.allowed) {
-      reply.raw.writeHead(429, {
-        'Content-Type': 'application/json',
-        'Retry-After': String(rateStatus.resetInSeconds),
-      });
-      reply.raw.end(
-        JSON.stringify(
-          createErrorResponse(
-            'RATE_LIMIT_EXCEEDED',
-            `Rate limit exceeded. Please wait ${rateStatus.resetInSeconds} seconds.`,
-            { retryAfter: rateStatus.resetInSeconds }
-          )
-        )
-      );
-      return;
-    }
 
     const parseResult = PromptExecutionInputSchema.safeParse(req.body);
     if (!parseResult.success) {
@@ -156,6 +60,11 @@ export class AgentController {
         )
       );
       return;
+    }
+
+    // Bind authenticated userId to prompt execution input
+    if (req.userId) {
+      parseResult.data.userId = req.userId;
     }
 
     const authHeader = req.headers.authorization;
@@ -172,6 +81,25 @@ export class AgentController {
       if (reply.raw.destroyed || reply.raw.writableEnded) return;
       reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
+
+    const targetSessionId = parseResult.data.sessionId || '';
+    req.raw.on('close', () => {
+      const active = targetSessionId ? agentService.getActiveExecution(targetSessionId) : undefined;
+      if (active) {
+        if (active.isExplicitlyStopped) {
+          logger.info('[AGENT_STOP] Stream closed after explicit user stop request', {
+            sessionId: targetSessionId,
+            executionId: active.executionId,
+          });
+        } else {
+          active.isClientDisconnected = true;
+          logger.info('[STREAM_DISCONNECT] Client HTTP stream closed prematurely (tab closed or reloaded). MicroVM execution will continue in background and response will be persisted to Firestore.', {
+            sessionId: targetSessionId,
+            executionId: active.executionId,
+          });
+        }
+      }
+    });
 
     try {
       await agentService.executePromptStream(parseResult.data, token, (event) => {
@@ -202,13 +130,26 @@ export class AgentController {
         stack: err?.stack,
       });
       if (!reply.raw.destroyed && !reply.raw.writableEnded) {
-        sendEvent('error', { message: err?.message || 'Streaming failed' });
+        sendEvent('error', {
+          message: err?.message || 'Streaming failed',
+          code: err?.code || 'EXECUTION_ERROR',
+        });
       }
     } finally {
       if (!reply.raw.writableEnded && !reply.raw.destroyed) {
         reply.raw.end();
       }
     }
+  }
+
+  public async stopExecution(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const body = req.body as { sessionId?: string };
+    if (!body?.sessionId) {
+      reply.status(400).send(createErrorResponse('VALIDATION_ERROR', 'sessionId is required to stop agent execution'));
+      return;
+    }
+    const result = await agentService.stopAgentStream(body.sessionId);
+    reply.status(200).send(createSuccessResponse(result));
   }
 }
 

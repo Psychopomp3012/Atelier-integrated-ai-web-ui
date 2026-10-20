@@ -8,30 +8,28 @@ import { AppError } from '../../utils/error.util.js';
 import { envConfig } from '../../config/env.config.js';
 import { tokenUtil } from '../../utils/token.util.js';
 import { logger } from '../../utils/logger.util.js';
+import { antigravityQuotaService } from '../quota/antigravity-quota.service.js';
+import { codexQuotaService } from '../quota/codex-quota.service.js';
+import { agentService } from '../agent/agent.service.js';
 
 export class SandboxController {
-  public async getMetrics(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const metrics = sandboxService.getMetrics();
-    return reply.status(200).send(createSuccessResponse(metrics));
-  }
-
   public async getTerminalLogs(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const logs = sandboxService.getTerminalLogs();
     return reply.status(200).send(createSuccessResponse(logs));
   }
 
-  private extractUserId(req: FastifyRequest, explicitUserId?: string): string | null {
-    let userId = explicitUserId?.trim();
-    if (!userId || userId === 'default_user') {
-      const authHeader = req.headers.authorization;
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        const verified = tokenUtil.verifyJwt(authHeader.substring(7));
-        if (verified.valid && verified.payload?.sub) {
-          userId = verified.payload.sub;
-        }
+  private extractUserId(req: FastifyRequest, _explicitUserId?: string): string | null {
+    if (req.userId && req.userId !== 'default_user') {
+      return req.userId;
+    }
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const verified = tokenUtil.verifyJwt(authHeader.substring(7));
+      if (verified.valid && verified.payload?.sub && verified.payload.sub !== 'default_user') {
+        return verified.payload.sub;
       }
     }
-    return userId && userId !== 'default_user' ? userId : null;
+    return null;
   }
 
   public async getFiles(req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -152,10 +150,17 @@ export class SandboxController {
     if (!userId) {
       throw new AppError('Authentication required: Please sign in to connect to cloud sandboxes.', 401, 'UNAUTHORIZED');
     }
-    const success = sandboxService.attachSessionToSandbox(body.sessionId, body.sandboxId);
+    const success = sandboxService.attachSessionToSandbox(body.sessionId, body.sandboxId, userId);
     if (!success) {
-      throw new AppError(`Sandbox ${body.sandboxId} not found to attach session`, 404, 'NOT_FOUND');
+      throw new AppError(`Sandbox ${body.sandboxId} not found or unauthorized to attach session`, 404, 'NOT_FOUND');
     }
+    logger.info('[Sandbox] Session attached to sandbox', { sessionId: body.sessionId, sandboxId: body.sandboxId, userId });
+
+    // Invalidate model discovery and quota limits so fresh values from newly attached sandbox are retrieved
+    agentService.invalidateSandboxModels(body.sandboxId);
+    antigravityQuotaService.invalidateUserQuota(userId);
+    codexQuotaService.invalidateUserQuota(userId);
+
     const usage = sandboxService.getSandboxUsage(userId);
     return reply.status(200).send(createSuccessResponse({ success: true, sandboxId: body.sandboxId, usage }));
   }
@@ -173,6 +178,12 @@ export class SandboxController {
       const sandboxId = await sandboxService.getOrCreateSandbox(sessionId, userId, 'new', body.replaceOldest);
       const usage = sandboxService.getSandboxUsage(userId);
       logger.info('[Sandbox] Successfully provisioned cloud microVM', { sandboxId, sessionId, userId, used: usage.used, max: usage.max });
+
+      // Invalidate model discovery and quota limits
+      agentService.invalidateSandboxModels(sandboxId);
+      antigravityQuotaService.invalidateUserQuota(userId);
+      codexQuotaService.invalidateUserQuota(userId);
+
       return reply.status(201).send(createSuccessResponse({ sandboxId, usage }));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -222,9 +233,9 @@ export class SandboxController {
     }
 
     if (clearAll) {
-      sandboxService.clearAllAttachedSessions();
+      sandboxService.clearAllAttachedSessions(userId);
       if (sessionId && sessionId !== 'all') {
-        sandboxService.detachSession(sessionId);
+        sandboxService.detachSession(sessionId, userId);
       }
       const usage = sandboxService.getSandboxUsage(userId);
       return reply.status(200).send(
@@ -237,7 +248,7 @@ export class SandboxController {
     }
 
     if (sessionId) {
-      const detached = sandboxService.detachSession(sessionId);
+      const detached = sandboxService.detachSession(sessionId, userId);
       const usage = sandboxService.getSandboxUsage(userId);
       return reply.status(200).send(
         createSuccessResponse({

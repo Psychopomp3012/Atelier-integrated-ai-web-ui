@@ -4,7 +4,7 @@ import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import type { ModelType, ModelProvider, UserProfile, ModelOption, GeminiQuotaStats, CodexQuotaStats, QuotaGroup, LinkedAIPlatformAccount } from '../types';
 import { AVAILABLE_MODELS, getModelDisplayInfo, getMinimumEffortModelId } from '../types';
 import type { CliStatus } from '../services/cliAuth.service';
-import { checkModelQuotaExhausted } from '../utils/quota.util';
+import { checkModelQuotaExhausted, isQuotaGroupExhausted } from '../utils/quota.util';
 import {
   currentUserAtom,
   cliStatusAtom,
@@ -294,12 +294,9 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   const hasAnySandbox = Boolean(sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0);
   const isSandboxAttached = Boolean(activeSandbox?.sandboxId);
 
-  // Helper to check if a specific quota group has any bucket with remaining_fraction <= 0
+  // Check if a specific quota group has any bucket with remaining_fraction <= 0 using shared quota.util
   const isGroupExhausted = (matchFn: (group: QuotaGroup) => boolean): boolean => {
-    const group = geminiQuota?.quotaLimits?.groups?.find(matchFn);
-    return Boolean(
-      group?.buckets?.some((b) => typeof b.remaining_fraction === 'number' && b.remaining_fraction <= 0)
-    );
+    return isQuotaGroupExhausted(geminiQuota?.quotaLimits?.groups, matchFn);
   };
 
   // Gemini Models group (matches bucket id prefix 'gemini' or group name containing 'gemini')

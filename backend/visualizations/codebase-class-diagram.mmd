@@ -1,0 +1,640 @@
+classDiagram
+  direction TB
+
+  %% =========================================================================
+  %% BACKEND MODULE: AGENT CORE
+  %% =========================================================================
+  namespace Backend_AgentModule {
+    class AgentController {
+      -agentService: AgentService
+      -rateLimitService: RateLimitService
+      +getModels(req, reply) Promise~void~
+      +executeStream(req, reply) Promise~void~
+      +stopExecution(req, reply) Promise~void~
+    }
+
+    class AgentService {
+      -sandboxService: SandboxService
+      -antigravityQuotaService: AntigravityQuotaService
+      -codexQuotaService: CodexQuotaService
+      -firestoreService: FirestoreBackendService
+      -activeExecutions: Map~string, ExecutionContext~
+      +getAvailableModels(userId, sessionId) Promise~ModelOption[]~
+      +executeAgentStream(req, onEvent) Promise~void~
+      +stopAgentStream(executionId) boolean
+      +recordTurn(input) Promise~TurnStats~
+      -buildPromptContext(session, userPrompt) string
+      -parseStreamEvent(rawChunk) AgentStreamEvent
+    }
+
+    class AgentRoutes {
+      <<routes_definition>>
+      +registerAgentRoutes(fastify, options) Promise~void~
+    }
+
+    class ContextCompactorUtil {
+      <<utility>>
+      +compactConversationHistory(history, options) HistoryMessage[]
+      +estimateTokens(text) number
+      +formatTurn(turn) string
+      -truncateMessage(msg, maxLen) string
+    }
+  }
+
+  %% =========================================================================
+  %% BACKEND MODULE: CLOUD SANDBOX & EXECUTION
+  %% =========================================================================
+  namespace Backend_SandboxModule {
+    class SandboxController {
+      -sandboxService: SandboxService
+      +getUsage(req, reply) Promise~void~
+      +createSandbox(req, reply) Promise~void~
+      +deleteSandbox(req, reply) Promise~void~
+      +attachSession(req, reply) Promise~void~
+      +detachSession(req, reply) Promise~void~
+      +getFiles(req, reply) Promise~void~
+      +readFile(req, reply) Promise~void~
+      +writeFile(req, reply) Promise~void~
+      +runTerminal(req, reply) Promise~void~
+    }
+
+    class SandboxService {
+      -e2bProvider: E2BSandboxProvider
+      -provider: ISandboxProvider
+      +executeInSandbox(req) Promise~SandboxExecutionResponse~
+      +executeCliInSandbox(req) Promise~SandboxCliExecutionResponse~
+      +getOrCreateSandbox(sessionId, userId) Promise~string~
+      +attachSessionToSandbox(sessionId, sandboxId) boolean
+      +detachSessionFromSandbox(sessionId) boolean
+      +getSandboxUsage(userId) SandboxUsageInfo
+      +destroySandbox(sandboxId) Promise~void~
+      +getDirectoryTree(sandboxId, dirPath) Promise~SandboxFileNode[]~
+      +readFile(sandboxId, filePath) Promise~string~
+      +writeFile(sandboxId, filePath, content) Promise~void~
+    }
+
+    class E2BSandboxProvider {
+      +name: string = "e2b-cloud"
+      -sessionToSandboxId: Map~string, string~
+      -sandboxRecords: Map~string, SandboxRecord~
+      -activeSandboxes: Map~string, Sandbox~
+      -terminalLogs: TerminalLogEntry[]
+      -lastPingMs: number = 35
+      -lastCpuUsagePercent: number = 0
+      -lastMemoryUsageMb: number = 0
+      +initialize() Promise~void~
+      +getSandboxUsage(userId) SandboxUsageInfo
+      +listSandboxes(userId) SandboxRecord[]
+      +getSandbox(sandboxId) Sandbox
+      +createSandbox(name, userId, sessionId) Promise~string~
+      +destroySandbox(sandboxId) Promise~void~
+      +attachSession(sandboxId, sessionId) Promise~void~
+      +detachSession(sandboxId, sessionId) Promise~void~
+      +findSandboxBySessionId(sessionId) string
+      +findSandboxById(sandboxId) SandboxRecord
+      +executeCommand(sandboxId, command, cwd, env) Promise~ExecutionResult~
+      +executeCliInSandbox(request) Promise~SandboxCliExecutionResponse~
+      +syncCredentialsToSandbox(sandbox, userId) Promise~void~
+      +getDirectoryTree(sandboxId, dirPath) Promise~SandboxFileNode[]~
+      +readFile(sandboxId, filePath) Promise~string~
+      +writeFile(sandboxId, filePath, content) Promise~void~
+      +triggerMaintenance(sandboxId) Promise~void~
+      +syncStateToFirestore(userId) Promise~void~
+      +loadStateFromFirestore(userId) Promise~void~
+      -addTerminalLog(level, message) void
+      -setupWorkspace(sandbox) Promise~void~
+    }
+
+    class SandboxRoutes {
+      <<routes_definition>>
+      +registerSandboxRoutes(fastify, options) Promise~void~
+    }
+  }
+
+  %% =========================================================================
+  %% BACKEND MODULE: QUOTA & RATE LIMIT
+  %% =========================================================================
+  namespace Backend_QuotaAndRateLimit {
+    class AntigravityQuotaService {
+      -sandboxService: SandboxService
+      -firestoreService: FirestoreBackendService
+      -userTurnRecords: Map~string, UserTurnRecord[]~
+      -cachedLiveQuota: Map~string, QuotaLimits~
+      -quotaLock: Map~string, Promise~
+      +getAntigravityQuota(userEmail, sessionId, userId) Promise~QuotaStats~
+      +queryLiveGoogleQuota(userId, sessionId) Promise~QuotaLimits~
+      +recordTurn(input) Promise~TurnStats~
+      +invalidateUserQuota(userKey) void
+      -calculateUsageTiers(records) QuotaTierUsage
+      -parseLiveCliOutput(rawCliOutput) QuotaLimits
+    }
+
+    class CodexQuotaService {
+      -sandboxService: SandboxService
+      -firestoreService: FirestoreBackendService
+      -userTurnRecords: Map~string, UserTurnRecord[]~
+      -cachedLiveQuota: Map~string, QuotaLimits~
+      -quotaLock: Map~string, Promise~
+      +getCodexQuota(userEmail, sessionId, userId) Promise~QuotaStats~
+      +queryLiveCodexQuota(userId, sessionId) Promise~QuotaLimits~
+      +recordTurn(input) Promise~TurnStats~
+      +invalidateUserQuota(userKey) void
+      -calculateUsageTiers(records) QuotaTierUsage
+      -parseLiveCliOutput(rawCliOutput) QuotaLimits
+    }
+
+    class RateLimitService {
+      -records: Map~string, RateLimitRecord~
+      -windowMs: number = 60000
+      -maxRequests: number = 60
+      -cleanupIntervalTimer: NodeJS.Timeout
+      +getQuota(key) RateLimitResult
+      +consume(key) RateLimitResult
+      +cleanupStaleRecords() void
+      +reset(key) void
+    }
+
+    class RateLimitRoutes {
+      <<routes_definition>>
+      +registerRateLimitRoutes(fastify, options) Promise~void~
+    }
+
+    class QuotaRoutes {
+      <<routes_definition>>
+      +registerQuotaRoutes(fastify, options) Promise~void~
+    }
+  }
+
+  %% =========================================================================
+  %% BACKEND MODULE: AUTH & SECURITY
+  %% =========================================================================
+  namespace Backend_AuthModule {
+    class AuthController {
+      -authService: AuthService
+      +getSession(req, reply) Promise~void~
+      +verifyToken(req, reply) Promise~void~
+      +logout(req, reply) Promise~void~
+      +syncProfile(req, reply) Promise~void~
+    }
+
+    class AuthService {
+      -firestoreService: FirestoreBackendService
+      +createSession(user) Promise~string~
+      +getSession(token) Promise~UserSession~
+      +verifyUserToken(token) Promise~UserProfile~
+      +deleteSession(token) Promise~void~
+      +getStableUserId(email) string
+    }
+
+    class CliAuthController {
+      -cliAuthService: CliAuthService
+      +getCliStatus(req, reply) Promise~void~
+      +getAntigravityAuthUrl(req, reply) Promise~void~
+      +handleAntigravityCallback(req, reply) Promise~void~
+      +startCodexDeviceAuth(req, reply) Promise~void~
+      +pollCodexDeviceAuth(req, reply) Promise~void~
+      +unlinkCli(req, reply) Promise~void~
+    }
+
+    class CliAuthService {
+      -firestoreService: FirestoreBackendService
+      -sandboxService: SandboxService
+      -activeDeviceCodes: Map~string, CodexDeviceCodeSession~
+      +getCliStatus(userId, userEmail) Promise~CliStatus~
+      +getAntigravityAuthUrl(userId) Promise~string~
+      +startCodexDeviceAuth(userId, userEmail) Promise~CodexDeviceAuthInitResponse~
+      +pollCodexDeviceAuth(userId, userEmail, deviceCode) Promise~CodexDeviceAuthPollResponse~
+      +syncCredentialsToSandboxes(userId) Promise~void~
+      +unlinkCli(userId, provider) Promise~boolean~
+      -storeCredentials(userId, provider, tokens) Promise~void~
+    }
+
+    class TokenUtil_Backend {
+      <<utility>>
+      -jwtSecret: string
+      -defaultExpiresIn: string = "7d"
+      +generateToken(payload, expiresIn) string
+      +verifyToken(token) TokenPayload
+      +decodeToken(token) TokenPayload
+    }
+
+    class AuthRoutes {
+      <<routes_definition>>
+      +registerAuthRoutes(fastify, options) Promise~void~
+    }
+  }
+
+  %% =========================================================================
+  %% BACKEND MODULE: SESSION & PERSISTENCE
+  %% =========================================================================
+  namespace Backend_PersistenceModule {
+    class SessionController {
+      -sessionService: SessionService
+      +getSessions(req, reply) Promise~void~
+      +getSession(req, reply) Promise~void~
+      +saveSession(req, reply) Promise~void~
+      +deleteSession(req, reply) Promise~void~
+    }
+
+    class SessionService {
+      -firestoreService: FirestoreBackendService
+      +getUserSessions(userId, options) Promise~ChatSession[]~
+      +getSessionById(userId, sessionId) Promise~ChatSession~
+      +saveUserSession(userId, session) Promise~ChatSession~
+      +deleteUserSession(userId, sessionId) Promise~boolean~
+    }
+
+    class FirestoreBackendService {
+      -db: Firestore
+      -isInitialized: boolean
+      -sessionsCollection: CollectionReference
+      -usersCollection: CollectionReference
+      -telemetryCollection: CollectionReference
+      +initialize() void
+      +saveSession(userId, session) Promise~ChatSession~
+      +getUserSessions(userId) Promise~ChatSession[]~
+      +getSessionById(userId, sessionId) Promise~ChatSession~
+      +deleteSession(userId, sessionId) Promise~boolean~
+      +syncUserProfile(user) Promise~void~
+      +getUserProfile(userId) Promise~UserProfile~
+      +saveSandboxRecord(userId, record) Promise~void~
+      +getSandboxRecords(userId) Promise~SandboxRecord[]~
+      +getUserTelemetry(userId, provider) Promise~any~
+      +saveUserTelemetry(userId, data, provider) Promise~void~
+      +getUserCredentials(userId, provider) Promise~any~
+      +saveUserCredentials(userId, provider, creds) Promise~void~
+    }
+
+    class SessionRoutes {
+      <<routes_definition>>
+      +registerSessionRoutes(fastify, options) Promise~void~
+    }
+  }
+
+  %% =========================================================================
+  %% BACKEND MODULE: INFRASTRUCTURE & UTILITIES
+  %% =========================================================================
+  namespace Backend_InfraAndUtils {
+    class FastifyServer {
+      -app: FastifyInstance
+      -port: number
+      -host: string
+      +buildApp() FastifyInstance
+      +startServer() Promise~void~
+      +stopServer() Promise~void~
+    }
+
+    class AppError {
+      +statusCode: number
+      +code: string
+      +details: unknown
+      +isOperational: boolean
+    }
+
+    class ResponseUtil {
+      <<utility>>
+      +createSuccessResponse(data, message) ApiResponse
+      +createErrorResponse(error, statusCode) ApiErrorResponse
+      +createPaginatedResponse(items, total, page, limit) ApiPaginatedResponse
+    }
+
+    class IdUtil {
+      <<utility>>
+      +generateId(prefix) string
+      +generateSessionId() string
+      +generateSandboxId() string
+      +generateMessageId() string
+    }
+
+    class LoggerUtil {
+      <<utility>>
+      +logger: FastifyBaseLogger
+      +createChildLogger(moduleName) Logger
+      +logDiagnostic(level, message, meta) void
+    }
+
+    class EnvConfig {
+      <<configuration>>
+      +PORT: number
+      +HOST: string
+      +JWT_SECRET: string
+      +E2B_API_KEY: string
+      +FIREBASE_SERVICE_ACCOUNT: string
+      +NODE_ENV: string
+    }
+  }
+
+  %% =========================================================================
+  %% FRONTEND: REACT UI COMPONENTS
+  %% =========================================================================
+  namespace Frontend_UIComponents {
+    class AppComponent {
+      <<react_root_component>>
+      -messagesEndRef: RefObject
+      -promptBarRef: RefObject
+      -activeAbortControllerRef: RefObject
+      -selectedModelRef: RefObject
+      -cliStatusRef: RefObject
+      -geminiQuotaRef: RefObject
+      -codexQuotaRef: RefObject
+      +handleSendMessage(content, files, model) Promise~void~
+      +handleStopGeneration() void
+      +handleSelectSession(sessionId) void
+      +handleCreateNewSession() void
+      +handleDeleteSession(sessionId) Promise~void~
+      +handleSwitchSandbox(sandboxId) Promise~void~
+      +handleCreateSandbox() Promise~void~
+      +handleDeleteSandbox(sandboxId) Promise~void~
+      +refreshModels(force) Promise~void~
+      +fetchGeminiQuota(sessionId, force) Promise~void~
+      +fetchCodexQuota(sessionId, force) Promise~void~
+      +fetchSandboxUsage() Promise~void~
+      +fetchCliStatus(force) Promise~void~
+      +syncUserProfileViaBackend(user) Promise~void~
+    }
+
+    class HeaderComponent {
+      <<react_component>>
+      +onSwitchSandbox(sandboxId) void
+      +onCreateSandbox() void
+      +onDeleteSandbox(sandboxId) void
+      +onRefreshQuota() void
+      +onOpenAuthModal() void
+      +onToggleInspector() void
+      +onToggleSidebar() void
+    }
+
+    class SidebarComponent {
+      <<react_component>>
+      +onSelectSession(id) void
+      +onDeleteSession(id) void
+      +onNewSession() void
+      +onRefreshSessions() void
+      +onToggleTheme() void
+    }
+
+    class PromptBarComponent {
+      <<react_component>>
+      -textareaRef: RefObject
+      -fileInputRef: RefObject
+      -isRecording: boolean
+      +handleSubmit() void
+      +handleKeyDown(event) void
+      +handlePaste(event) void
+      +handleWindowDrop(event) void
+      +handleSelectCommand(cmd) void
+      +toggleListening() void
+      +clearUploadedFiles() void
+    }
+
+    class ModelSelectorDropdownComponent {
+      <<react_component>>
+      -isOpen: boolean
+      -effortDropdownOpen: boolean
+      +handleSelectModel(modelId) void
+      +handleSelectEffort(level) void
+      +isModelQuotaExhausted(model) boolean
+      +isGroupExhausted(matchFn) boolean
+      +getModelQuotaDescription(model) string
+    }
+
+    class CloudInspectorComponent {
+      <<react_component>>
+      -activeTab: string
+      -currentPath: string
+      -fileContent: string
+      +fetchDirectoryTree(path) Promise~void~
+      +fetchFileContent(path) Promise~void~
+      +handleRunTerminalCommand(cmd) Promise~void~
+      +handleDownloadFile(path) void
+    }
+
+    class AuthModalComponent {
+      <<react_component>>
+      -isGoogleLoading: boolean
+      -isAgyLoading: boolean
+      -isCodexLoading: boolean
+      +handleGoogleLogin() Promise~void~
+      +handleLinkAntigravity() Promise~void~
+      +handleLinkCodex() Promise~void~
+      +handleLinkClaude() Promise~void~
+      +handleUnlink(provider) Promise~void~
+    }
+
+    class DeleteSandboxModalComponent {
+      <<react_component>>
+      +onConfirmDelete() void
+      +onCancel() void
+    }
+
+    class SlashCommandPaletteComponent {
+      <<react_component>>
+      -selectedIndex: number
+      +onSelect(cmd) void
+      +onClose() void
+    }
+
+    class MarkdownContentComponent {
+      <<react_component>>
+      +content: string
+      +render() JSX.Element
+    }
+
+    class CodeArtifactComponent {
+      <<react_component>>
+      +code: string
+      +language: string
+      +title: string
+      +handleCopy() void
+      +handleDownload() void
+    }
+
+    class UserMenuComponent {
+      <<react_component>>
+      +onOpenSettings() void
+      +onLogout() void
+    }
+  }
+
+  %% =========================================================================
+  %% FRONTEND: CLIENT API SERVICES
+  %% =========================================================================
+  namespace Frontend_ClientServices {
+    class CliAuthServiceClient {
+      -cachedStatus: CliStatus
+      -lastFetchTime: number
+      +fetchCliStatus(force) Promise~CliStatus~
+      +openAntigravityCliLoginPopup() Promise~void~
+      +openCodexCliLoginPopup() Promise~void~
+      +openClaudeCliLoginPopup(mode) Promise~void~
+      +unlinkAntigravityCli() Promise~boolean~
+      +unlinkCodexCli() Promise~boolean~
+      +unlinkClaudeCli() Promise~boolean~
+    }
+
+    class FirebaseAuthServiceClient {
+      -auth: Auth
+      -provider: GoogleAuthProvider
+      +signInWithGoogle() Promise~UserProfile~
+      +signOutFirebase() Promise~void~
+      +getCurrentUser() UserProfile
+    }
+
+    class ModelsServiceClient {
+      -cachedModels: ModelOption[]
+      -lastFetchTime: number
+      +fetchAvailableModels(force, sessionId, userId) Promise~ModelOption[]~
+      +invalidateModelsCache() void
+      -filterDuplicateModels(models) ModelOption[]
+    }
+
+    class SessionSyncServiceClient {
+      +saveSession(session, userId) Promise~void~
+      +deleteSession(sessionId, userId) Promise~void~
+      +getSession(sessionId, options) Promise~ChatSession~
+      +loadAndReconcileSessions(userId, onProgress) Promise~ChatSession[]~
+      +loadEarlierMessages(sessionId, beforeId, limit) Promise~PaginatedMessagesResponse~
+    }
+  }
+
+  %% =========================================================================
+  %% FRONTEND: REACTIVE JOTAI STATE & UTILITIES
+  %% =========================================================================
+  namespace Frontend_StateAndUtils {
+    class JotaiStateAtoms {
+      <<reactive_state>>
+      +currentUserAtom: Atom~UserProfile~
+      +sessionsAtom: Atom~ChatSession[]~
+      +currentSessionIdAtom: Atom~string~
+      +messagesAtom: Atom~ChatMessage[]~
+      +selectedModelAtom: Atom~string~
+      +reasoningEffortAtom: Atom~string~
+      +geminiQuotaAtom: Atom~GeminiQuotaStats~
+      +codexQuotaAtom: Atom~CodexQuotaStats~
+      +cliStatusAtom: Atom~CliStatus~
+      +sandboxUsageAtom: Atom~SandboxUsageInfo~
+      +isGeneratingAtom: Atom~boolean~
+      +isInspectorOpenAtom: Atom~boolean~
+      +themeModeAtom: Atom~ThemeMode~
+    }
+
+    class ApiUtil_Frontend {
+      <<utility>>
+      -authToken: string
+      +apiFetch(endpoint, options) Promise~Response~
+      +setAuthToken(token) void
+      +getAuthToken() string
+      +clearAuthToken() void
+    }
+
+    class QuotaUtil_Frontend {
+      <<utility>>
+      +checkModelQuotaExhausted(model, geminiQuota, codexQuota, cliStatus) boolean
+      +isQuotaGroupExhausted(groups, matchFn) boolean
+      +getQuotaResetTime(quota) string
+    }
+
+    class SlashCommandUtil {
+      <<utility>>
+      +availableCommands: SlashCommand[]
+      +resolveProviderCategory(provider, modelId) string
+      +getCommandsForProvider(category) SlashCommand[]
+      +filterSlashCommands(commands, query) SlashCommand[]
+    }
+
+    class TokenMetricsUtil {
+      <<utility>>
+      +computeSessionTokens(messages, selectedModel, geminiQuota, codexQuota, activeProvider) TokenUsageState
+    }
+  }
+
+  %% =========================================================================
+  %% EXPLICIT RELATIONSHIPS & BRIDGES ACROSS FULL CODEBASE
+  %% =========================================================================
+
+  %% Frontend Component Hierarchy
+  AppComponent *-- HeaderComponent : contains
+  AppComponent *-- SidebarComponent : contains
+  AppComponent *-- PromptBarComponent : contains
+  AppComponent *-- CloudInspectorComponent : contains
+  AppComponent *-- AuthModalComponent : contains
+  AppComponent *-- DeleteSandboxModalComponent : contains
+  HeaderComponent *-- ModelSelectorDropdownComponent : contains
+  HeaderComponent *-- UserMenuComponent : contains
+  PromptBarComponent *-- SlashCommandPaletteComponent : toggles
+  AppComponent *-- MarkdownContentComponent : renders
+  MarkdownContentComponent *-- CodeArtifactComponent : embeds
+
+  %% Frontend Components -> Client Services
+  AppComponent --> ModelsServiceClient : fetches dynamic models
+  AppComponent --> CliAuthServiceClient : synchronizes CLI auth state
+  AppComponent --> SessionSyncServiceClient : persists sessions via backend Fastify API
+  AppComponent --> ApiUtil_Frontend : streams SSE agent runs
+  AppComponent ..> JotaiStateAtoms : reactive binding
+  PromptBarComponent ..> SlashCommandUtil : resolves / commands
+  ModelSelectorDropdownComponent ..> QuotaUtil_Frontend : delegates isQuotaGroupExhausted
+  AuthModalComponent --> FirebaseAuthServiceClient : executes Google OAuth
+  AuthModalComponent --> CliAuthServiceClient : opens CLI device auth popups
+  SidebarComponent ..> TokenMetricsUtil : formats token usage badges
+
+  %% Client -> Server Bridge
+  ApiUtil_Frontend ..> FastifyServer : HTTP Requests and SSE Streaming
+  SessionSyncServiceClient ..> SessionController : REST /api/v1/sessions
+  CliAuthServiceClient ..> CliAuthController : REST /api/v1/auth/cli
+  ModelsServiceClient ..> AgentController : REST /api/v1/agent/models
+
+  %% Server Gateway -> Controllers & Routes
+  FastifyServer --> AgentRoutes : registers
+  FastifyServer --> SandboxRoutes : registers
+  FastifyServer --> AuthRoutes : registers
+  FastifyServer --> QuotaRoutes : registers
+  FastifyServer --> SessionRoutes : registers
+  FastifyServer --> RateLimitRoutes : registers
+  FastifyServer ..> EnvConfig : loads configuration
+
+  AgentRoutes --> AgentController : dispatches
+  SandboxRoutes --> SandboxController : dispatches
+  AuthRoutes --> AuthController : dispatches
+  AuthRoutes --> CliAuthController : dispatches
+  QuotaRoutes --> AntigravityQuotaService : queries live agy quota
+  QuotaRoutes --> CodexQuotaService : queries live codex quota
+  SessionRoutes --> SessionController : dispatches
+
+  %% Controllers -> Services
+  AgentController --> AgentService : invokes
+  AgentController --> RateLimitService : checks IP rate limits
+  SandboxController --> SandboxService : invokes
+  AuthController --> AuthService : invokes
+  CliAuthController --> CliAuthService : invokes
+  SessionController --> SessionService : invokes
+
+  %% Core Agent Execution Pipeline
+  AgentService --> SandboxService : dispatches prompt execution into microVMs
+  AgentService --> ContextCompactorUtil : compacts past conversation history
+  AgentService --> AntigravityQuotaService : records turn metrics
+  AgentService --> CodexQuotaService : records turn metrics
+  AgentService --> FirestoreBackendService : reads/persists turns
+
+  %% Sandbox Module Internal Composition
+  SandboxService o-- E2BSandboxProvider : active cloud microVM provider
+  E2BSandboxProvider --> FirestoreBackendService : syncs VM state
+  E2BSandboxProvider ..> IdUtil : generates sandbox IDs
+  E2BSandboxProvider ..> LoggerUtil : streams diagnostics
+
+  %% Quota & Auth Services Interactions
+  AntigravityQuotaService --> SandboxService : queries live agy CLI
+  CodexQuotaService --> SandboxService : queries live codex CLI
+  AntigravityQuotaService --> FirestoreBackendService : saves quota telemetry
+  CodexQuotaService --> FirestoreBackendService : saves quota telemetry
+  CliAuthService --> FirestoreBackendService : saves tokens securely
+  CliAuthService --> SandboxService : hot-swaps CLI credentials into microVMs
+  AuthService --> TokenUtil_Backend : issues 7-day signed JWT
+  AuthService --> FirestoreBackendService : syncs user profile
+  SessionService --> FirestoreBackendService : persists sessions and chat turns
+
+  %% Utilities
+  AgentController ..> ResponseUtil : formats JSON response
+  SandboxController ..> ResponseUtil : formats JSON response
+  AuthController ..> ResponseUtil : formats JSON response
+  AgentService ..> AppError : throws structured operational errors
+  SandboxService ..> AppError : throws structured operational errors

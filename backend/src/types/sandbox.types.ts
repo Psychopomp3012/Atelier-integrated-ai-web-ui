@@ -66,6 +66,7 @@ export interface SandboxUsageInfo {
   attachedSessionIds: string[];
   lastUpdateCheckAt?: number;
   isUpdating?: boolean;
+  isProvisioning?: boolean;
 }
 
 export interface SandboxCliExecutionRequest {
@@ -102,9 +103,9 @@ export interface ISandboxProvider {
   readonly name: string;
   isAvailable(): Promise<boolean>;
   getOrCreateSandbox(sessionId: string, userId?: string, targetSandboxId?: string, replaceOldest?: boolean): Promise<string>;
-  attachSessionToSandbox?(sessionId: string, sandboxId: string): boolean;
-  detachSession?(sessionId: string): boolean;
-  clearAllAttachedSessions?(): void;
+  attachSessionToSandbox?(sessionId: string, sandboxId: string, userId?: string): boolean;
+  detachSession?(sessionId: string, userId?: string): boolean;
+  clearAllAttachedSessions?(userId?: string): void;
   syncActiveSessions?(activeSessionIds: string[], userId?: string): void;
   executeCommand(sandboxId: string, command: string, timeoutMs?: number): Promise<SandboxExecutionResponse>;
   executeCliInSandbox?(req: SandboxCliExecutionRequest): Promise<SandboxCliExecutionResponse>;
@@ -112,7 +113,6 @@ export interface ISandboxProvider {
   readFile(sandboxId: string, filePath: string): Promise<string>;
   listFiles(sandboxId: string): Promise<SandboxFileNode[]>;
   destroySandbox(sandboxId: string): Promise<void>;
-  getMetrics(): CloudSandboxMetrics;
   getTerminalLogs(): TerminalLogEntry[];
   getSandboxWorkspaceDir?(sessionId: string): string;
   hasActiveSandbox?(sessionId: string, userId?: string): boolean;
@@ -123,4 +123,5 @@ export interface ISandboxProvider {
     max: number;
     sandboxes: SandboxUsageInfo[];
   };
+  killAgentProcesses?(sandboxIdOrSessionId: string): Promise<boolean>;
 }

@@ -1,8 +1,8 @@
 import React from 'react';
-import { useAtomValue } from 'jotai';
+import { useAtomValue, useSetAtom } from 'jotai';
 import type { ChatSession } from '../types';
 import { AtelierLogo } from './AtelierLogo';
-import { sessionsAtom, currentSessionIdAtom } from '../state';
+import { sessionsAtom, currentSessionIdAtom, isTelemetryModalOpenAtom } from '../state';
 
 interface SidebarProps {
   sessions?: ChatSession[];
@@ -29,6 +29,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const atomSessions = useAtomValue(sessionsAtom);
   const atomCurrentSessionId = useAtomValue(currentSessionIdAtom);
+  const setIsTelemetryOpen = useSetAtom(isTelemetryModalOpenAtom);
 
   const sessions = propSessions !== undefined ? propSessions : atomSessions;
   const currentSessionId = propCurrentSessionId !== undefined ? propCurrentSessionId : atomCurrentSessionId;
@@ -203,14 +204,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </div>
 
+        {/* CLI Telemetry & Quotas Quick Access Card */}
+        <div className="p-3 border-t border-outline-variant/20 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setIsTelemetryOpen(true);
+              onClose?.();
+            }}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-surface-container/60 hover:bg-surface-container border border-outline-variant/30 hover:border-primary/40 transition-all duration-200 group cursor-pointer text-left shadow-xs"
+            title="Inspect CLI Quota, Real Limits & Telemetry"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-6 h-6 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center text-primary shrink-0 group-hover:scale-105 transition-transform">
+                <span className="material-symbols-outlined text-[15px]">speed</span>
+              </div>
+              <div className="min-w-0 flex flex-col">
+                <span className="text-[11px] font-semibold text-on-surface truncate group-hover:text-primary transition-colors">
+                  CLI Telemetry & Quotas
+                </span>
+                <span className="text-[9px] text-outline font-mono truncate">
+                  Live limits & session analytics
+                </span>
+              </div>
+            </div>
+            <span className="material-symbols-outlined text-[16px] text-outline group-hover:text-primary group-hover:translate-x-0.5 transition-all shrink-0">
+              chevron_right
+            </span>
+          </button>
+        </div>
+
         {/* App Version Box */}
-        <div className="p-3 border-t border-outline-variant/20 bg-surface-container-lowest/70 backdrop-blur-xs shrink-0">
+        <div className="px-3 pb-3 pt-0 bg-surface-container-lowest/70 backdrop-blur-xs shrink-0">
           <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-surface-container/50 hover:bg-surface-container border border-outline-variant/30 hover:border-primary/40 transition-all duration-300 group cursor-default shadow-xs">
             <span className="text-[12px] font-medium text-on-surface tracking-tight group-hover:text-primary transition-colors">
               Atelier Studio
             </span>
             <div className="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/25 text-primary text-[10px] font-mono font-semibold tracking-wider shadow-[0_0_8px_rgba(99,102,241,0.15)] group-hover:shadow-[0_0_12px_rgba(99,102,241,0.3)] transition-all">
-              v0.0.7
+              v0.1.0
             </div>
           </div>
         </div>

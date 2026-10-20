@@ -16,43 +16,38 @@ export class CliAuthController {
   }
 
   private async getUserIdFromReq(req: FastifyRequest): Promise<string | undefined> {
-    const query = req.query as { userId?: string; userEmail?: string; email?: string; token?: string } | undefined;
-    if (query?.userId) return query.userId;
+    if (req.userId) return req.userId;
 
     const authHeader = req.headers.authorization;
+    const query = req.query as { token?: string } | undefined;
     const token = (authHeader && authHeader.startsWith('Bearer ')) ? authHeader.substring(7) : query?.token;
     if (token) {
-      const session = await authService.getSession(token);
-      if (session) return session.user.id;
       const verified = tokenUtil.verifyJwt(token);
       if (verified.valid && verified.payload?.sub) {
         return verified.payload.sub;
       }
-    }
-
-    const email = query?.userEmail || query?.email;
-    if (email) {
-      return cliAuthService.getUserIdByEmail(email) || undefined;
+      const session = await authService.getSession(token);
+      if (session) return session.user.id;
     }
 
     return undefined;
   }
 
   private async getUserEmailFromReq(req: FastifyRequest): Promise<string | undefined> {
-    const query = req.query as { userEmail?: string; email?: string; token?: string } | undefined;
-    if (query?.userEmail) return query.userEmail;
-    if (query?.email) return query.email;
+    if (req.userEmail) return req.userEmail;
 
     const authHeader = req.headers.authorization;
+    const query = req.query as { token?: string } | undefined;
     const token = (authHeader && authHeader.startsWith('Bearer ')) ? authHeader.substring(7) : query?.token;
     if (token) {
-      const session = await authService.getSession(token);
-      if (session?.user?.email) return session.user.email;
       const verified = tokenUtil.verifyJwt(token);
       if (verified.valid && (verified.payload as any)?.email) {
         return (verified.payload as any).email;
       }
+      const session = await authService.getSession(token);
+      if (session?.user?.email) return session.user.email;
     }
+
     return undefined;
   }
 
@@ -128,7 +123,7 @@ export class CliAuthController {
       cliAuthService.unlinkUserCli(userId || '', 'antigravity', userEmail);
       cliAuthService.unlinkUserCli(userId || '', 'gemini', userEmail);
       if (userId) {
-        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+        sandboxService.purgeUserCredentialsFromSandboxes(userId, 'antigravity').catch(() => {});
       }
     }
     cliAuthService.unlinkGemini();
@@ -376,7 +371,7 @@ export class CliAuthController {
     if (userId || userEmail) {
       cliAuthService.unlinkUserCli(userId || '', 'claude', userEmail);
       if (userId) {
-        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+        sandboxService.purgeUserCredentialsFromSandboxes(userId, 'claude').catch(() => {});
       }
     }
     await cliAuthService.unlinkClaude();
@@ -703,7 +698,7 @@ export class CliAuthController {
     if (userId || userEmail) {
       cliAuthService.unlinkUserCli(userId || '', 'codex', userEmail);
       if (userId) {
-        sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+        sandboxService.purgeUserCredentialsFromSandboxes(userId, 'codex').catch(() => {});
       }
     }
     await cliAuthService.unlinkCodex(userId);

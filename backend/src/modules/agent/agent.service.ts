@@ -21,6 +21,17 @@ import type { CliUsageTelemetry } from '../quota/quota.types.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { compactConversationHistory } from '../../utils/context-compactor.util.js';
 import { AppError } from '../../utils/error.util.js';
+import { firestoreBackendService } from '../../services/firestore.service.js';
+
+export interface ActiveAgentExecution {
+  executionId: string;
+  sessionId: string;
+  userId?: string;
+  sandboxId?: string;
+  isExplicitlyStopped: boolean;
+  isClientDisconnected: boolean;
+  startTime: number;
+}
 
 export interface DynamicModelOption {
   id: string;
@@ -99,9 +110,47 @@ export class AgentService {
   private readonly inFlightModelDiscovery: Map<string, Promise<DynamicModelOption[]>> = new Map();
   private antigravityModelIds: Set<string> = new Set();
   private codexModelIds: Set<string> = new Set();
+  private readonly activeExecutions: Map<string, ActiveAgentExecution> = new Map();
 
   constructor() {
     // Dynamic live initialization: CLIs execute live in cloud sandboxes
+  }
+
+  public getActiveExecution(sessionId: string): ActiveAgentExecution | undefined {
+    return this.activeExecutions.get(sessionId);
+  }
+
+  public async stopAgentStream(sessionId: string): Promise<{ success: boolean; stopped: boolean; message: string }> {
+    const inFlight = this.activeExecutions.get(sessionId);
+    if (!inFlight) {
+      logger.info('[AGENT_STOP] No active in-flight execution found for session', { sessionId });
+      return { success: true, stopped: false, message: 'No active agent execution running for this session' };
+    }
+
+    inFlight.isExplicitlyStopped = true;
+    logger.warn('[AGENT_STOP] User requested explicit stop for session', {
+      sessionId,
+      executionId: inFlight.executionId,
+      sandboxId: inFlight.sandboxId,
+      userId: inFlight.userId,
+    });
+
+    const targetSandboxId = inFlight.sandboxId || sessionId;
+    const killed = await sandboxService.killAgentProcesses(targetSandboxId);
+
+    logger.info('[AGENT_STOP] Process termination result inside microVM', {
+      sessionId,
+      sandboxId: targetSandboxId,
+      killed,
+    });
+
+    return {
+      success: true,
+      stopped: true,
+      message: killed
+        ? 'Agent execution halted and microVM processes terminated successfully'
+        : 'Agent execution marked as stopped',
+    };
   }
 
   /**
@@ -479,6 +528,16 @@ export class AgentService {
     return discoveryPromise;
   }
 
+  public invalidateSandboxModels(sandboxId?: string): void {
+    if (sandboxId) {
+      this.sandboxModelsCache.delete(sandboxId);
+      logger.info('[Model Discovery] Invalidated sandbox models cache', { sandboxId });
+    } else {
+      this.sandboxModelsCache.clear();
+      logger.info('[Model Discovery] Cleared all sandbox models cache');
+    }
+  }
+
   private extractCodeBlocks(text: string): CodeArtifactFile[] {
     const codeBlockRegex = /```([a-zA-Z0-9_\-+]*)\s*\n([\s\S]*?)```/g;
     const files: CodeArtifactFile[] = [];
@@ -599,6 +658,24 @@ export class AgentService {
           }
         }
 
+        // Pre-validate that the user has linked the requested CLI subscription before microVM dispatch
+        const isTargetCliLinked =
+          targetCli === 'codex'
+            ? cliAuthService.isCodexLinked(userId)
+            : targetCli === 'claude'
+            ? cliAuthService.isClaudeLinked()
+            : cliAuthService.isAntigravityLinked(userId);
+
+        if (!isTargetCliLinked) {
+          const cliName =
+            targetCli === 'codex' ? 'OpenAI Codex' : targetCli === 'claude' ? 'Claude Code' : 'Antigravity';
+          throw new AppError(
+            `The requested model "${modelUsed}" requires an active ${cliName} subscription link. Please open Subscriptions and link your account.`,
+            400,
+            'CLI_NOT_LINKED'
+          );
+        }
+
         const sandboxResult = await sandboxService
           .executeCliInSandbox({
             sessionId,
@@ -623,6 +700,9 @@ export class AgentService {
           };
         }
       } catch (err: any) {
+        if (err instanceof AppError && err.code === 'CLI_NOT_LINKED') {
+          throw err;
+        }
         lastFailureReason = err?.message || String(err);
         logger.warn('Sandbox-native CLI execution failed', { error: String(err) });
       }
@@ -1054,91 +1134,164 @@ export class AgentService {
   ): Promise<PromptExecutionResponse> {
     const sessionId = input.sessionId || generateId('sess');
     const startTime = Date.now();
+    const executionId = generateId('exec');
     const modelUsed: ModelEngine = input.selectedModel;
     const modelMeta = (await this.getAvailableModels()).find((m) => m.id === modelUsed);
     const modelTitle = modelMeta?.displayName || modelUsed;
+    const effectiveSandboxId = input.sandboxId || sandboxService.getActiveSandboxId(sessionId, input.userId) || undefined;
 
-    onEvent({ type: 'start', sessionId, model: modelUsed });
-
-    const initStepId = 'step_init';
-    const initStep: AgentStep = {
-      id: initStepId,
-      description: `Connecting to cloud sandbox microVM & initializing agent...`,
-      durationMs: 0,
-      status: 'in_progress',
+    const inFlight: ActiveAgentExecution = {
+      executionId,
+      sessionId,
+      userId: input.userId,
+      sandboxId: effectiveSandboxId,
+      isExplicitlyStopped: false,
+      isClientDisconnected: false,
+      startTime,
     };
+    this.activeExecutions.set(sessionId, inFlight);
 
-    onEvent({ type: 'step', step: initStep });
+    try {
+      onEvent({ type: 'start', sessionId, model: modelUsed });
 
-    let hasLiveSteps = false;
-    let initStepFinished = false;
+      const initStepId = 'step_init';
+      const initStep: AgentStep = {
+        id: initStepId,
+        description: `Connecting to cloud sandbox microVM & initializing agent...`,
+        durationMs: 0,
+        status: 'in_progress',
+      };
 
-    const markInitStepCompleted = (customDesc?: string) => {
-      if (initStepFinished) return;
-      initStepFinished = true;
-      const dispatchDuration = Math.max(16, Date.now() - startTime);
-      onEvent({
-        type: 'step',
-        step: {
-          ...initStep,
-          description: customDesc || `Connected to cloud sandbox microVM & initialized agent`,
+      onEvent({ type: 'step', step: initStep });
+
+      let hasLiveSteps = false;
+      let initStepFinished = false;
+
+      const markInitStepCompleted = (customDesc?: string) => {
+        if (initStepFinished) return;
+        initStepFinished = true;
+        const dispatchDuration = Math.max(16, Date.now() - startTime);
+        onEvent({
+          type: 'step',
+          step: {
+            ...initStep,
+            description: customDesc || `Connected to cloud sandbox microVM & initialized agent`,
+            durationMs: dispatchDuration,
+            status: 'completed',
+          },
+        });
+      };
+
+      const onToken = (tokenChunk: string) => {
+        if (inFlight.isExplicitlyStopped) return;
+        if (!hasLiveSteps) {
+          markInitStepCompleted();
+        }
+        onEvent({ type: 'token', token: tokenChunk });
+      };
+
+      const onStreamStep = (step: AgentStep) => {
+        if (inFlight.isExplicitlyStopped) return;
+        hasLiveSteps = true;
+        if (step.id === initStepId) {
+          initStepFinished = true;
+        } else if (!initStepFinished) {
+          markInitStepCompleted();
+        }
+        onEvent({ type: 'step', step });
+      };
+
+      const response = await this.executePrompt(input, token, onToken, onStreamStep);
+      markInitStepCompleted();
+
+      if (inFlight.isExplicitlyStopped) {
+        response.message.content = response.message.content
+          ? `${response.message.content}\n\n*[Generation stopped by user]*`
+          : '*[Generation stopped by user]*';
+      }
+
+      const totalDuration = response.message.latencyMs || Date.now() - startTime;
+      const dispatchDuration = Math.min(Math.round(totalDuration * 0.4), 2200);
+      const streamDuration = Math.max(20, totalDuration - dispatchDuration);
+      const artifactCount = response.message.codeFiles?.length || 0;
+
+      // If real live steps were generated by the CLI / sandbox, emit and keep ONLY the real live steps
+      if (response.message.steps && response.message.steps.length > 0) {
+        for (const st of response.message.steps) {
+          onEvent({ type: 'step', step: st });
+        }
+      } else {
+        // Pure fallback when no live steps were streamed
+        const finalStep1: AgentStep = {
+          id: initStepId,
+          description: `Dispatched prompt to ${modelTitle} live cloud endpoint`,
           durationMs: dispatchDuration,
           status: 'completed',
-        },
-      });
-    };
-
-    const onToken = (tokenChunk: string) => {
-      if (!hasLiveSteps) {
-        markInitStepCompleted();
+        };
+        const finalStep2: AgentStep = {
+          id: 'step_stream',
+          description: `Streamed response tokens and parsed ${artifactCount} code artifact(s)`,
+          durationMs: streamDuration,
+          status: 'completed',
+        };
+        response.message.steps = [finalStep1, finalStep2];
+        onEvent({ type: 'step', step: finalStep1 });
+        onEvent({ type: 'step', step: finalStep2 });
       }
-      onEvent({ type: 'token', token: tokenChunk });
-    };
 
-    const onStreamStep = (step: AgentStep) => {
-      hasLiveSteps = true;
-      if (step.id === initStepId) {
-        initStepFinished = true;
-      } else if (!initStepFinished) {
-        markInitStepCompleted();
+      onEvent({ type: 'done', response });
+
+      // Resilient background completion: If client disconnected while execution was running,
+      // persist the completed response directly to Firestore so the user doesn't lose their answer!
+      if (inFlight.isClientDisconnected && !inFlight.isExplicitlyStopped) {
+        const authSession = token ? await authService.getSession(token) : null;
+        const targetUserId = authSession?.user?.id || input.userId;
+        if (targetUserId) {
+          try {
+            const historyMessages: any[] = (input.messages || []).map((m: any) => ({
+              id: m.id || generateId('msg'),
+              role: m.role,
+              content: m.content,
+              timestamp: m.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              modelUsed: m.modelUsed,
+            }));
+            if (!historyMessages.some((m: any) => m.content === input.prompt)) {
+              historyMessages.push({
+                id: generateId('msg'),
+                role: 'user',
+                content: input.prompt,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              });
+            }
+            historyMessages.push(response.message);
+
+            await firestoreBackendService.saveSession(targetUserId, {
+              id: sessionId,
+              title: input.prompt.slice(0, 32),
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              messages: historyMessages,
+              model: modelUsed,
+            });
+            logger.info('[BACKGROUND_PERSISTENCE] Successfully saved background agent response to Firestore for session', {
+              sessionId,
+              userId: targetUserId,
+              messageId: response.message.id,
+              latencyMs: response.message.latencyMs,
+            });
+          } catch (persistErr) {
+            logger.error('[BACKGROUND_PERSISTENCE] Failed to persist background agent response to Firestore', persistErr, {
+              sessionId,
+              userId: targetUserId,
+            });
+          }
+        }
       }
-      onEvent({ type: 'step', step });
-    };
 
-    const response = await this.executePrompt(input, token, onToken, onStreamStep);
-    markInitStepCompleted();
-
-    const totalDuration = response.message.latencyMs || Date.now() - startTime;
-    const dispatchDuration = Math.min(Math.round(totalDuration * 0.4), 2200);
-    const streamDuration = Math.max(20, totalDuration - dispatchDuration);
-    const artifactCount = response.message.codeFiles?.length || 0;
-
-    // If real live steps were generated by the CLI / sandbox, emit and keep ONLY the real live steps
-    if (response.message.steps && response.message.steps.length > 0) {
-      for (const st of response.message.steps) {
-        onEvent({ type: 'step', step: st });
-      }
-    } else {
-      // Pure fallback when no live steps were streamed
-      const finalStep1: AgentStep = {
-        id: initStepId,
-        description: `Dispatched prompt to ${modelTitle} live cloud endpoint`,
-        durationMs: dispatchDuration,
-        status: 'completed',
-      };
-      const finalStep2: AgentStep = {
-        id: 'step_stream',
-        description: `Streamed response tokens and parsed ${artifactCount} code artifact(s)`,
-        durationMs: streamDuration,
-        status: 'completed',
-      };
-      response.message.steps = [finalStep1, finalStep2];
-      onEvent({ type: 'step', step: finalStep1 });
-      onEvent({ type: 'step', step: finalStep2 });
+      return response;
+    } finally {
+      this.activeExecutions.delete(sessionId);
     }
-
-    onEvent({ type: 'done', response });
-    return response;
   }
 }
 

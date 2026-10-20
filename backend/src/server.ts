@@ -7,6 +7,9 @@ process.on('unhandledRejection', (reason) => {
 });
 
 process.on('uncaughtException', (error) => {
+  if (error && typeof error === 'object' && ('code' in error && (error.code === 'EIO' || error.code === 'EPIPE'))) {
+    return;
+  }
   logger.error('Uncaught Exception detected', error);
 });
 

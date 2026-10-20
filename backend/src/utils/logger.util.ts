@@ -76,6 +76,89 @@ function sanitizeContext(obj: unknown, depth = 0): unknown {
 
 const MAX_LOG_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
 
+interface LogContextTags {
+  userId?: string;
+  sessionId?: string;
+  reqId?: string;
+}
+
+function extractLogTags(extra: unknown): LogContextTags {
+  if (!extra || typeof extra !== 'object') return {};
+  const obj = extra as Record<string, unknown>;
+  const ctx = (obj.context && typeof obj.context === 'object') ? (obj.context as Record<string, unknown>) : obj;
+
+  const rawUserId = ctx.userId ?? obj.userId;
+  const rawSessionId = ctx.sessionId ?? obj.sessionId;
+  const rawReqId = ctx.reqId ?? ctx.requestId ?? ctx.correlationId ?? obj.reqId ?? obj.requestId ?? obj.correlationId;
+
+  const tags: LogContextTags = {};
+
+  if (
+    typeof rawUserId === 'string' &&
+    rawUserId.trim() &&
+    rawUserId !== 'anonymous' &&
+    rawUserId !== 'default' &&
+    rawUserId !== 'default_user' &&
+    rawUserId !== 'undefined'
+  ) {
+    tags.userId = rawUserId.trim();
+  }
+  if (
+    typeof rawSessionId === 'string' &&
+    rawSessionId.trim() &&
+    rawSessionId !== 'undefined' &&
+    rawSessionId !== 'default'
+  ) {
+    tags.sessionId = rawSessionId.trim();
+  }
+  if (
+    typeof rawReqId === 'string' &&
+    rawReqId.trim() &&
+    rawReqId !== 'undefined'
+  ) {
+    tags.reqId = rawReqId.trim();
+  }
+
+  return tags;
+}
+
+function formatLogPrefix(level: LogLevel, timestamp: string, tags: LogContextTags): string {
+  const userTag = tags.userId ? ` [User: ${tags.userId}]` : '';
+  const sessTag = tags.sessionId ? ` [Sess: ${tags.sessionId}]` : '';
+  const reqTag = tags.reqId ? ` [Req: ${tags.reqId}]` : '';
+  return `[${timestamp}] [${level.toUpperCase()}]${userTag}${sessTag}${reqTag}`;
+}
+
+function stripExtractedTags(extra: unknown): Record<string, unknown> | undefined {
+  if (!extra || typeof extra !== 'object') return undefined;
+  const obj = { ...(extra as Record<string, unknown>) };
+
+  if (obj.context && typeof obj.context === 'object') {
+    const ctx = { ...(obj.context as Record<string, unknown>) };
+    delete ctx.userId;
+    delete ctx.sessionId;
+    delete ctx.reqId;
+    delete ctx.requestId;
+    delete ctx.correlationId;
+    if (Object.keys(ctx).length === 0) {
+      delete obj.context;
+    } else {
+      obj.context = ctx;
+    }
+  }
+
+  delete obj.userId;
+  delete obj.sessionId;
+  delete obj.reqId;
+  delete obj.requestId;
+  delete obj.correlationId;
+
+  if (Object.keys(obj).length === 0) {
+    return undefined;
+  }
+  return obj;
+}
+
 function writeToFile(level: LogLevel, message: string, extra?: unknown) {
   if (!fileLoggingEnabled) return;
   // Never write high-frequency debug polling noise to file
@@ -98,8 +181,13 @@ function writeToFile(level: LogLevel, message: string, extra?: unknown) {
       } catch {}
     }
     const timestamp = new Date().toISOString();
-    const extraStr = extra !== undefined ? ` | ${typeof extra === 'object' ? JSON.stringify(sanitizeContext(extra)) : String(extra)}` : '';
-    const line = `[${timestamp}] [${level.toUpperCase()}] ${message}${extraStr}\n`;
+    const tags = extractLogTags(extra);
+    const prefix = formatLogPrefix(level, timestamp, tags);
+    const remaining = stripExtractedTags(extra);
+    const extraStr = remaining !== undefined
+      ? ` | ${typeof remaining === 'object' ? JSON.stringify(sanitizeContext(remaining)) : String(remaining)}`
+      : '';
+    const line = `${prefix} ${message}${extraStr}\n`;
     fs.appendFileSync(logFilePath, line, 'utf8');
   } catch {
     // Fail silently to avoid crashing primary app flows if disk I/O fails
@@ -108,25 +196,46 @@ function writeToFile(level: LogLevel, message: string, extra?: unknown) {
 
 export const logger: LoggerUtil = {
   info(message: string, context?: Record<string, unknown>): void {
-    const sanitized = context ? sanitizeContext(context) : undefined;
-    console.log(`[INFO] [${new Date().toISOString()}] ${message}`, sanitized ? JSON.stringify(sanitized) : '');
+    const tags = extractLogTags(context);
+    const prefix = formatLogPrefix('info', new Date().toISOString(), tags);
+    const remaining = stripExtractedTags(context);
+    const sanitized = remaining ? sanitizeContext(remaining) : undefined;
+    try {
+      console.log(`${prefix} ${message}`, sanitized ? JSON.stringify(sanitized) : '');
+    } catch {}
     writeToFile('info', message, context);
   },
   warn(message: string, context?: Record<string, unknown>): void {
-    const sanitized = context ? sanitizeContext(context) : undefined;
-    console.warn(`[WARN] [${new Date().toISOString()}] ${message}`, sanitized ? JSON.stringify(sanitized) : '');
+    const tags = extractLogTags(context);
+    const prefix = formatLogPrefix('warn', new Date().toISOString(), tags);
+    const remaining = stripExtractedTags(context);
+    const sanitized = remaining ? sanitizeContext(remaining) : undefined;
+    try {
+      console.warn(`${prefix} ${message}`, sanitized ? JSON.stringify(sanitized) : '');
+    } catch {}
     writeToFile('warn', message, context);
   },
   error(message: string, error?: unknown, context?: Record<string, unknown>): void {
     const errSummary = error instanceof Error ? { name: error.name, message: error.message, stack: error.stack?.split('\n').slice(0, 3).join(' ') } : error;
-    const sanitized = context ? sanitizeContext(context) : undefined;
-    console.error(`[ERROR] [${new Date().toISOString()}] ${message}`, errSummary ?? '', sanitized ? JSON.stringify(sanitized) : '');
-    writeToFile('error', message, { error: errSummary, context });
+    const combined = { error: errSummary, context };
+    const tags = extractLogTags(combined);
+    const prefix = formatLogPrefix('error', new Date().toISOString(), tags);
+    const remaining = stripExtractedTags(context);
+    const sanitized = remaining ? sanitizeContext(remaining) : undefined;
+    try {
+      console.error(`${prefix} ${message}`, errSummary ?? '', sanitized ? JSON.stringify(sanitized) : '');
+    } catch {}
+    writeToFile('error', message, combined);
   },
   debug(message: string, context?: Record<string, unknown>): void {
+    const tags = extractLogTags(context);
+    const prefix = formatLogPrefix('debug', new Date().toISOString(), tags);
     if (process.env.NODE_ENV !== 'production') {
-      const sanitized = context ? sanitizeContext(context) : undefined;
-      console.debug(`[DEBUG] [${new Date().toISOString()}] ${message}`, sanitized ? JSON.stringify(sanitized) : '');
+      const remaining = stripExtractedTags(context);
+      const sanitized = remaining ? sanitizeContext(remaining) : undefined;
+      try {
+        console.debug(`${prefix} ${message}`, sanitized ? JSON.stringify(sanitized) : '');
+      } catch {}
     }
     writeToFile('debug', message, context);
   },
