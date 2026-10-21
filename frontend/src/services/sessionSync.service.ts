@@ -3,13 +3,79 @@ import type { ChatSession, PaginatedMessagesResponse } from '../types';
 
 export const sessionSyncService = {
   /**
+   * Normalizes incoming raw messages from Firestore / LocalStorage to guarantee
+   * full backward compatibility with UI fields (modelBadge, latency, step completion).
+   */
+  normalizeMessage(m: any): any {
+    if (!m) return m;
+    const authorName = m.author || m.authorName || (m.role === 'user' ? 'User' : 'Atelier Assistant');
+    const isAssistant = m.role === 'assistant';
+    const rawSteps = Array.isArray(m.steps) ? m.steps : [];
+    const normalizedSteps = rawSteps.map((s: any) => {
+      const isCompleted = s.completed !== undefined ? Boolean(s.completed) : s.status === 'completed';
+      return {
+        id: s.id || `step_${Math.random().toString(36).substring(2, 9)}`,
+        text: s.text || s.description || '',
+        description: s.description || s.text || '',
+        duration: s.duration || (typeof s.durationMs === 'number' ? `${s.durationMs}ms` : '0ms'),
+        durationMs: typeof s.durationMs === 'number' ? s.durationMs : 0,
+        completed: isCompleted,
+        status: s.status || (isCompleted ? 'completed' : 'in_progress'),
+        tool: s.tool,
+        command: s.command,
+        output: s.output,
+        exitCode: s.exitCode,
+      };
+    });
+
+    const modelBadge =
+      m.modelBadge ||
+      (isAssistant && m.authorName && m.authorName !== 'Atelier Assistant'
+        ? m.authorName
+        : undefined) ||
+      (isAssistant && m.modelUsed && m.modelUsed !== 'Atelier Assistant'
+        ? m.modelUsed
+        : undefined);
+
+    const latencyFormatted =
+      m.latency ||
+      (typeof m.latencyMs === 'number' && m.latencyMs > 0
+        ? `Latency: ${m.latencyMs.toLocaleString()}ms`
+        : undefined);
+
+    return {
+      ...m,
+      author: authorName,
+      authorName: m.authorName || authorName,
+      time: m.time || m.timestamp || '',
+      timestamp: m.timestamp || m.time || '',
+      modelBadge: modelBadge || m.modelBadge,
+      modelUsed: m.modelUsed || modelBadge,
+      latency: latencyFormatted || m.latency,
+      steps: normalizedSteps,
+    };
+  },
+
+  normalizeSession(session: ChatSession): ChatSession {
+    if (!session) return session;
+    return {
+      ...session,
+      messages: Array.isArray(session.messages)
+        ? session.messages.map((m) => this.normalizeMessage(m))
+        : [],
+    };
+  },
+
+  /**
    * Helper to keep local storage lightweight by trimming cached message arrays
    * to the most recent 25 messages per session, preventing browser QuotaExceededError.
    */
   sanitizeForLocalStorage(sessions: ChatSession[]): ChatSession[] {
     return sessions.map((sess) => ({
       ...sess,
-      messages: Array.isArray(sess.messages) ? sess.messages.slice(-25) : [],
+      messages: Array.isArray(sess.messages)
+        ? sess.messages.slice(-25).map((m) => this.normalizeMessage(m))
+        : [],
     }));
   },
 
@@ -96,7 +162,7 @@ export const sessionSyncService = {
           if (filtered.length !== list.length) {
             localStorage.setItem(storageKey, JSON.stringify(this.sanitizeForLocalStorage(filtered)));
           }
-          return filtered;
+          return filtered.map((s) => this.normalizeSession(s));
         }
       }
     } catch {}
@@ -235,7 +301,7 @@ export const sessionSyncService = {
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.data) {
-          return data.data as ChatSession;
+          return this.normalizeSession(data.data as ChatSession);
         }
       }
     } catch (err) {
@@ -262,7 +328,12 @@ export const sessionSyncService = {
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.data) {
-          return data.data as PaginatedMessagesResponse;
+          return {
+            ...data.data,
+            messages: Array.isArray(data.data.messages)
+              ? data.data.messages.map((m: any) => this.normalizeMessage(m))
+              : [],
+          } as PaginatedMessagesResponse;
         }
       }
     } catch (err) {

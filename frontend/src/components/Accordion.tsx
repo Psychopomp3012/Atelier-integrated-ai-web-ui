@@ -8,13 +8,16 @@ interface AccordionProps {
   sandboxName?: string | null;
 }
 
+export const isStepCompleted = (s: StepItem): boolean =>
+  s.completed !== undefined ? Boolean(s.completed) : s.status === 'completed';
+
 export const Accordion: React.FC<AccordionProps> = ({
   title,
   steps,
   isExecuting,
   sandboxName,
 }) => {
-  const hasIncompleteSteps = steps.some((s) => !s.completed);
+  const hasIncompleteSteps = steps.some((s) => !isStepCompleted(s));
   const activeExecuting = isExecuting !== undefined ? isExecuting : hasIncompleteSteps;
 
   // Track if user explicitly clicked main accordion toggle: null means track activeExecuting automatically
@@ -30,7 +33,7 @@ export const Accordion: React.FC<AccordionProps> = ({
     setExpandedStepIds((prev) => {
       const next = new Set(prev);
       for (const step of steps) {
-        if (!step.completed || (step.output && step.output.length > 0)) {
+        if (!isStepCompleted(step) || (step.output && step.output.length > 0)) {
           next.add(step.id);
         }
       }
@@ -39,7 +42,7 @@ export const Accordion: React.FC<AccordionProps> = ({
   }, [activeExecuting, steps.length]);
 
   const isOpen = userToggled !== null ? userToggled : activeExecuting;
-  const completedCount = steps.filter((s) => s.completed).length;
+  const completedCount = steps.filter(isStepCompleted).length;
 
   const displayTitle =
     title ||
@@ -76,33 +79,34 @@ export const Accordion: React.FC<AccordionProps> = ({
   };
 
   const getStepIcon = (step: StepItem) => {
-    const t = (step.text || '').toLowerCase();
+    const isCompleted = isStepCompleted(step);
+    const t = (step.text || step.description || '').toLowerCase();
     const tool = (step.tool || '').toLowerCase();
 
     if (tool === 'run_command' || t.includes('running command') || t.includes('terminal')) {
       return (
-        <span className={`material-symbols-outlined text-[16px] ${step.completed ? 'text-secondary' : 'text-primary animate-pulse'}`}>
+        <span className={`material-symbols-outlined text-[16px] ${isCompleted ? 'text-secondary' : 'text-primary animate-pulse'}`}>
           terminal
         </span>
       );
     }
     if (tool === 'read_file' || t.includes('reading file') || t.includes('viewing file')) {
       return (
-        <span className={`material-symbols-outlined text-[16px] ${step.completed ? 'text-secondary' : 'text-primary'}`}>
+        <span className={`material-symbols-outlined text-[16px] ${isCompleted ? 'text-secondary' : 'text-primary'}`}>
           description
         </span>
       );
     }
     if (tool === 'write_file' || t.includes('writing artifact') || t.includes('editing code')) {
       return (
-        <span className={`material-symbols-outlined text-[16px] ${step.completed ? 'text-secondary' : 'text-primary'}`}>
+        <span className={`material-symbols-outlined text-[16px] ${isCompleted ? 'text-secondary' : 'text-primary'}`}>
           edit_document
         </span>
       );
     }
     if (tool === 'list_dir' || t.includes('scanning directory') || t.includes('directory')) {
       return (
-        <span className={`material-symbols-outlined text-[16px] ${step.completed ? 'text-secondary' : 'text-primary'}`}>
+        <span className={`material-symbols-outlined text-[16px] ${isCompleted ? 'text-secondary' : 'text-primary'}`}>
           folder_open
         </span>
       );
@@ -117,12 +121,12 @@ export const Accordion: React.FC<AccordionProps> = ({
       t.includes('reasoned')
     ) {
       return (
-        <span className={`material-symbols-outlined text-[16px] ${step.completed ? 'text-secondary' : 'text-primary animate-pulse'}`}>
+        <span className={`material-symbols-outlined text-[16px] ${isCompleted ? 'text-secondary' : 'text-primary animate-pulse'}`}>
           settings
         </span>
       );
     }
-    if (step.completed) {
+    if (isCompleted) {
       return (
         <span className="material-symbols-outlined text-[16px] text-secondary">
           check_circle
@@ -187,12 +191,17 @@ export const Accordion: React.FC<AccordionProps> = ({
           {steps.map((step) => {
             const hasDetails = Boolean(step.command || step.output);
             const isStepExpanded = expandedStepIds.has(step.id);
+            const isCompleted = isStepCompleted(step);
+            const stepText = step.text || step.description || '';
+            const stepDuration = isCompleted
+              ? step.duration || (step.durationMs ? `${step.durationMs}ms` : '0ms')
+              : 'running...';
 
             return (
               <div
                 key={step.id}
                 className={`font-code-sm text-code-sm rounded-lg border transition-all overflow-hidden ${
-                  step.completed
+                  isCompleted
                     ? 'bg-surface-container-low/40 border-outline-variant/20 hover:border-outline-variant/40'
                     : 'bg-primary/5 border-primary/30 shadow-xs'
                 }`}
@@ -206,8 +215,8 @@ export const Accordion: React.FC<AccordionProps> = ({
                 >
                   <div className="flex items-center gap-space-sm min-w-0 pr-2">
                     {getStepIcon(step)}
-                    <span className={`truncate ${step.completed ? 'text-on-surface' : 'text-on-surface font-semibold'}`}>
-                      {step.text}
+                    <span className={`truncate ${isCompleted ? 'text-on-surface' : 'text-on-surface font-semibold'}`}>
+                      {stepText}
                     </span>
 
                     {/* Tool Badge if present */}
@@ -219,8 +228,8 @@ export const Accordion: React.FC<AccordionProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
-                    <span className={`font-mono text-[11px] ${step.completed ? 'text-outline' : 'text-primary font-semibold'}`}>
-                      {step.completed ? step.duration : 'running...'}
+                    <span className={`font-mono text-[11px] ${isCompleted ? 'text-outline' : 'text-primary font-semibold'}`}>
+                      {stepDuration}
                     </span>
 
                     {/* Expand/Collapse Chevron for details */}

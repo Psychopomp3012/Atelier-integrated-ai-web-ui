@@ -7,8 +7,11 @@ export type MessageRole = 'user' | 'assistant' | 'system';
 export interface AgentStep {
   id: string;
   description: string;
+  text?: string;
   durationMs: number;
+  duration?: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  completed?: boolean;
   tool?: string;
   command?: string;
   output?: string;
@@ -26,10 +29,14 @@ export interface AgentMessage {
   role: MessageRole;
   content: string;
   timestamp: string;
+  time?: string;
   authorName: string;
+  author?: string;
   authorTag?: string;
   avatarUrl?: string;
   modelUsed?: ModelEngine;
+  modelBadge?: string;
+  latency?: string;
   latencyMs?: number;
   steps?: AgentStep[];
   codeFiles?: CodeArtifactFile[];

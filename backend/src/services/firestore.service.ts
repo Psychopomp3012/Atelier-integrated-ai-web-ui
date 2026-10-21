@@ -13,6 +13,7 @@ import { logger } from '../utils/logger.util.js';
 import { timingLogger } from '../utils/timing.util.js';
 import type {
   ChatMessage,
+  StepItem,
   ChatSession,
   PaginationMeta,
   SessionPaginationQuery,
@@ -185,7 +186,58 @@ export class FirestoreBackendService {
       }
     }
 
-    return result;
+    return result.map((m) => this.normalizeMessage(m));
+  }
+
+  public normalizeMessage(m: any): ChatMessage {
+    if (!m) return m;
+    const authorName = m.author || m.authorName || (m.role === 'user' ? 'User' : 'Atelier Assistant');
+    const isAssistant = m.role === 'assistant';
+    const modelUsed = m.modelBadge || m.modelUsed || m.authorTag || '';
+    const latencyFormatted =
+      m.latency ||
+      (typeof m.latencyMs === 'number' && m.latencyMs > 0
+        ? `Latency: ${m.latencyMs.toLocaleString()}ms`
+        : undefined);
+
+    const rawSteps = Array.isArray(m.steps) ? m.steps : [];
+    const normalizedSteps: StepItem[] = rawSteps.map((s: any) => {
+      const isCompleted = s.completed !== undefined ? Boolean(s.completed) : s.status === 'completed';
+      return {
+        id: s.id || `step_${Math.random().toString(36).substring(2, 9)}`,
+        text: s.text || s.description || '',
+        description: s.description || s.text || '',
+        duration: s.duration || (typeof s.durationMs === 'number' ? `${s.durationMs}ms` : '0ms'),
+        durationMs: typeof s.durationMs === 'number' ? s.durationMs : 0,
+        completed: isCompleted,
+        status: s.status || (isCompleted ? 'completed' : 'in_progress'),
+        tool: s.tool,
+        command: s.command,
+        output: s.output,
+        exitCode: s.exitCode,
+      };
+    });
+
+    const modelBadge =
+      m.modelBadge ||
+      (isAssistant && m.authorName && m.authorName !== 'Atelier Assistant'
+        ? m.authorName
+        : undefined) ||
+      (isAssistant && modelUsed && modelUsed !== 'Atelier Assistant'
+        ? modelUsed
+        : undefined);
+
+    return {
+      ...m,
+      author: authorName,
+      authorName: m.authorName || authorName,
+      time: m.time || m.timestamp || '',
+      timestamp: m.timestamp || m.time || '',
+      modelBadge: modelBadge || m.modelBadge,
+      modelUsed: m.modelUsed || modelUsed,
+      latency: latencyFormatted || m.latency,
+      steps: normalizedSteps,
+    };
   }
 
   public paginateMessages(
@@ -371,7 +423,9 @@ export class FirestoreBackendService {
           const sessions: ChatSession[] = [];
           snapshot.forEach((doc: QueryDocumentSnapshot) => {
             const data = doc.data();
-            const allMsgs = Array.isArray(data.messages) ? data.messages : [];
+            const allMsgs = (Array.isArray(data.messages) ? data.messages : []).map((m: any) =>
+              this.normalizeMessage(m)
+            );
             sessions.push({
               id: data.id || doc.id,
               title: data.title || 'Untitled Session',
@@ -433,7 +487,9 @@ export class FirestoreBackendService {
             createdAt: data.createdAt || new Date().toISOString(),
             updatedAt: data.updatedAt?.toDate?.()?.toISOString() || data.updatedAt || new Date().toISOString(),
             model: data.model || 'claude-3-7-sonnet',
-            messages: Array.isArray(data.messages) ? data.messages : [],
+            messages: (Array.isArray(data.messages) ? data.messages : []).map((m: any) =>
+              this.normalizeMessage(m)
+            ),
           };
         }
       } catch (err) {

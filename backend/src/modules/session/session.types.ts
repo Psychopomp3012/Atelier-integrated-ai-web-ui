@@ -3,7 +3,9 @@ export type ChatRole = 'user' | 'assistant' | 'system';
 export interface StepItem {
   id: string;
   text: string;
+  description?: string;
   duration: string;
+  durationMs?: number;
   completed: boolean;
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
   tool?: string;
@@ -16,12 +18,16 @@ export interface ChatMessage {
   id: string;
   role: ChatRole;
   author: string;
+  authorName?: string;
   authorBadge?: string;
   time: string;
+  timestamp?: string;
   avatarUrl: string;
   content: string;
   modelBadge?: string;
+  modelUsed?: string;
   latency?: string;
+  latencyMs?: number;
   steps?: StepItem[];
   codeFiles?: Array<{
     filename: string;

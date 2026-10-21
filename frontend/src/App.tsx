@@ -2605,26 +2605,39 @@ export const App: React.FC = () => {
                       {/* Assistant Meta Header */}
                       <div className="flex flex-wrap items-center justify-between gap-space-xs">
                         <div className="flex flex-wrap items-center gap-space-sm">
-                          {msg.modelBadge ? (
-                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-primary/10 text-primary font-medium border border-primary/20 text-xs sm:text-sm">
-                              {msg.modelBadge.toLowerCase().includes('none') ? (
-                                <span className="material-symbols-outlined text-[14px] text-outline">tune</span>
-                              ) : msg.modelBadge.toLowerCase().includes('claude') ? (
-                                <img src="/provider-icons/claude.svg" alt="" className="w-3.5 h-3.5 object-contain" />
-                              ) : msg.modelBadge.toLowerCase().includes('gpt') || msg.modelBadge.toLowerCase().includes('codex') || msg.modelBadge.toLowerCase().startsWith('o') ? (
-                                <img src="/model-icons/openai.svg" alt="" className="w-3.5 h-3.5 object-contain" />
-                              ) : msg.modelBadge.toLowerCase().includes('gemini') ? (
-                                <img src="/model-icons/google-gemini.svg" alt="" className="w-3.5 h-3.5 object-contain" />
-                              ) : (
-                                <img src="/provider-icons/antigravity.svg" alt="" className="w-3.5 h-3.5 object-contain" />
-                              )}
-                              {msg.modelBadge}
-                            </span>
-                          ) : (
-                            <span className="font-headline-sm text-headline-sm text-on-surface font-semibold text-sm sm:text-base">
-                              {msg.author || 'Atelier Assistant'}
-                            </span>
-                          )}
+                          {(() => {
+                            const effectiveModelBadge =
+                              msg.modelBadge ||
+                              (msg.role === 'assistant' && msg.author && msg.author !== 'Atelier Assistant' ? msg.author : undefined) ||
+                              (msg.role === 'assistant' && msg.authorName && msg.authorName !== 'Atelier Assistant' ? msg.authorName : undefined) ||
+                              (msg.role === 'assistant' && msg.modelUsed && msg.modelUsed !== 'Atelier Assistant' ? msg.modelUsed : undefined);
+
+                            if (effectiveModelBadge) {
+                              const badgeLower = effectiveModelBadge.toLowerCase();
+                              return (
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-primary/10 text-primary font-medium border border-primary/20 text-xs sm:text-sm">
+                                  {badgeLower.includes('none') ? (
+                                    <span className="material-symbols-outlined text-[14px] text-outline">tune</span>
+                                  ) : badgeLower.includes('claude') ? (
+                                    <img src="/provider-icons/claude.svg" alt="" className="w-3.5 h-3.5 object-contain" />
+                                  ) : badgeLower.includes('gpt') || badgeLower.includes('codex') || badgeLower.startsWith('o') ? (
+                                    <img src="/model-icons/openai.svg" alt="" className="w-3.5 h-3.5 object-contain" />
+                                  ) : badgeLower.includes('gemini') ? (
+                                    <img src="/model-icons/google-gemini.svg" alt="" className="w-3.5 h-3.5 object-contain" />
+                                  ) : (
+                                    <img src="/provider-icons/antigravity.svg" alt="" className="w-3.5 h-3.5 object-contain" />
+                                  )}
+                                  {effectiveModelBadge}
+                                </span>
+                              );
+                            }
+
+                            return (
+                              <span className="font-headline-sm text-headline-sm text-on-surface font-semibold text-sm sm:text-base">
+                                {msg.author || msg.authorName || 'Atelier Assistant'}
+                              </span>
+                            );
+                          })()}
 
                           {/* Sandbox MicroVM Environment Badge right next to model */}
                           {(() => {
@@ -2644,7 +2657,12 @@ export const App: React.FC = () => {
                           })()}
                         </div>
                         <span className="font-code-sm text-code-sm text-outline text-xs">
-                          {msg.latency?.replace(/(?:Latency:\s*)?\d+(?:\.\d+)?s\s*\(([\d,]+ms)\)/i, 'Latency: $1')}
+                          {(
+                            msg.latency ||
+                            (typeof msg.latencyMs === 'number' && msg.latencyMs > 0
+                              ? `Latency: ${msg.latencyMs.toLocaleString()}ms`
+                              : '')
+                          )?.replace(/(?:Latency:\s*)?\d+(?:\.\d+)?s\s*\(([\d,]+ms)\)/i, 'Latency: $1')}
                         </span>
                       </div>
 

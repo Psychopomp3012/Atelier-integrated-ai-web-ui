@@ -5,7 +5,7 @@ Problem Statement:
 Instructions(for me):
 1. Avoid Coding???
 2. Figure out, if i can't code what is in my hand? => Prompts Engineering?
-3. 
+3. Sequenc/class diagrams
 
 Architecture:
 Frontend(React + TS + Tailwind(v3))
@@ -44,8 +44,8 @@ Future Objectives:
 - No visual testing possible as a cloud server has no GUI?
 - add a limit to text typed in frontend and correesponding in backend (does not seem that important)
 - attaching a very big file
-- polling for quota => refactored to single unified /api/v1/quota endpoint (DONE)
-
+- polling for quota 
+- unlink just before refresh token expires
 
 Mistral free models:
 1. codestral-2508

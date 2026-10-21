@@ -381,7 +381,9 @@ export interface WorkflowItem {
 export interface StepItem {
   id: string;
   text: string;
+  description?: string;
   duration: string;
+  durationMs?: number;
   completed: boolean;
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
   tool?: string;
@@ -394,13 +396,17 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   author: string;
+  authorName?: string;
   authorBadge?: string;
   time: string;
+  timestamp?: string;
   avatarUrl: string;
   content: string;
   modelBadge?: string;
+  modelUsed?: string;
   sandboxName?: string;
   latency?: string;
+  latencyMs?: number;
   steps?: StepItem[];
   codeFiles?: {
     filename: string;

@@ -1015,15 +1015,26 @@ export class AgentService {
             ];
 
       const effectiveSandboxId = activeSbId || realSandboxId;
+      const formattedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const formattedLatency = liveResult.durationMs ? `Latency: ${liveResult.durationMs.toLocaleString()}ms` : '';
       const assistantMessage: AgentMessage = {
         id: generateId('msg'),
         role: 'assistant',
+        author: modelTitle,
         authorName: modelTitle,
         authorTag: modelTitle,
         modelUsed,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        modelBadge: modelTitle,
+        time: formattedTime,
+        timestamp: formattedTime,
+        latency: formattedLatency,
         latencyMs: liveResult.durationMs,
-        steps: accumulatedSteps,
+        steps: accumulatedSteps.map((s) => ({
+          ...s,
+          text: s.description || (s as any).text,
+          duration: s.duration || `${s.durationMs || 0}ms`,
+          completed: s.completed !== undefined ? Boolean(s.completed) : s.status === 'completed',
+        })),
         codeFiles,
         executionResult: {
           sandboxId: effectiveSandboxId,
@@ -1327,13 +1338,19 @@ export class AgentService {
         const finalStep1: AgentStep = {
           id: initStepId,
           description: `Dispatched prompt to ${modelTitle} live cloud endpoint`,
+          text: `Dispatched prompt to ${modelTitle} live cloud endpoint`,
           durationMs: dispatchDuration,
+          duration: `${dispatchDuration}ms`,
+          completed: true,
           status: 'completed',
         };
         const finalStep2: AgentStep = {
           id: 'step_stream',
           description: `Streamed response tokens and parsed ${artifactCount} code artifact(s)`,
+          text: `Streamed response tokens and parsed ${artifactCount} code artifact(s)`,
           durationMs: streamDuration,
+          duration: `${streamDuration}ms`,
+          completed: true,
           status: 'completed',
         };
         response.message.steps = [finalStep1, finalStep2];
@@ -1344,12 +1361,25 @@ export class AgentService {
       // Persist complete turn to Firestore
       if (targetUserId) {
         try {
+          const sessionAssistantMsg: any = {
+            ...response.message,
+            author: response.message.author || response.message.authorName || modelTitle,
+            modelBadge: response.message.modelBadge || modelTitle,
+            time: response.message.time || response.message.timestamp,
+            latency: response.message.latency || (response.message.latencyMs ? `Latency: ${response.message.latencyMs.toLocaleString()}ms` : ''),
+            steps: (response.message.steps || []).map((s: any) => ({
+              ...s,
+              text: s.text || s.description || '',
+              duration: s.duration || `${s.durationMs || 0}ms`,
+              completed: s.completed !== undefined ? Boolean(s.completed) : s.status === 'completed',
+            })),
+          };
           await firestoreBackendService.saveSession(targetUserId, {
             id: sessionId,
             title: input.prompt.slice(0, 32),
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-            messages: [userMessage, response.message],
+            messages: [userMessage, sessionAssistantMsg],
             model: modelUsed,
           });
           logger.info('[PERSISTENCE] Successfully saved complete turn to Firestore for session', {
