@@ -97,8 +97,6 @@ function extractLogTags(extra: unknown): LogContextTags {
     typeof rawUserId === 'string' &&
     rawUserId.trim() &&
     rawUserId !== 'anonymous' &&
-    rawUserId !== 'default' &&
-    rawUserId !== 'default_user' &&
     rawUserId !== 'undefined'
   ) {
     tags.userId = rawUserId.trim();

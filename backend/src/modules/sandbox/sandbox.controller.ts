@@ -19,13 +19,13 @@ export class SandboxController {
   }
 
   private extractUserId(req: FastifyRequest, _explicitUserId?: string): string | null {
-    if (req.userId && req.userId !== 'default_user') {
+    if (req.userId) {
       return req.userId;
     }
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const verified = tokenUtil.verifyJwt(authHeader.substring(7));
-      if (verified.valid && verified.payload?.sub && verified.payload.sub !== 'default_user') {
+      if (verified.valid && verified.payload?.sub) {
         return verified.payload.sub;
       }
     }
@@ -119,54 +119,23 @@ export class SandboxController {
   }
 
   public async getUsage(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { userId?: string; activeSessionIds?: string };
+    const query = req.query as { userId?: string };
     const userId = this.extractUserId(req, query?.userId);
 
     // Strict Multi-Tenant Isolation: Sandboxes belong ONLY to the user who created them.
-    // If not authenticated or default_user, return empty quota with 0 sandboxes.
+    // If not authenticated, return empty quota with 0 sandboxes.
     if (!userId) {
       const max = envConfig.MAX_SANDBOXES_PER_USER ?? 3;
       return reply.status(200).send(createSuccessResponse({ used: 0, max, sandboxes: [] }));
     }
 
     await sandboxService.syncWithCloud(userId).catch(() => {});
-    if (typeof query?.activeSessionIds === 'string') {
-      const ids = query.activeSessionIds
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      sandboxService.syncActiveSessions(ids, userId);
-    }
     const usage = sandboxService.getSandboxUsage(userId);
     return reply.status(200).send(createSuccessResponse(usage));
   }
 
-  public async attachSession(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const body = req.body as { sessionId?: string; sandboxId?: string; userId?: string };
-    if (!body?.sessionId || !body?.sandboxId) {
-      throw new AppError('Both sessionId and sandboxId are required', 400, 'VALIDATION_ERROR');
-    }
-    const userId = this.extractUserId(req, body.userId);
-    if (!userId) {
-      throw new AppError('Authentication required: Please sign in to connect to cloud sandboxes.', 401, 'UNAUTHORIZED');
-    }
-    const success = sandboxService.attachSessionToSandbox(body.sessionId, body.sandboxId, userId);
-    if (!success) {
-      throw new AppError(`Sandbox ${body.sandboxId} not found or unauthorized to attach session`, 404, 'NOT_FOUND');
-    }
-    logger.info('[Sandbox] Session attached to sandbox', { sessionId: body.sessionId, sandboxId: body.sandboxId, userId });
-
-    // Invalidate model discovery and quota limits so fresh values from newly attached sandbox are retrieved
-    agentService.invalidateSandboxModels(body.sandboxId);
-    antigravityQuotaService.invalidateUserQuota(userId);
-    codexQuotaService.invalidateUserQuota(userId);
-
-    const usage = sandboxService.getSandboxUsage(userId);
-    return reply.status(200).send(createSuccessResponse({ success: true, sandboxId: body.sandboxId, usage }));
-  }
-
   public async createSandbox(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const body = (req.body as { sessionId?: string; userId?: string; replaceOldest?: boolean }) || {};
+    const body = (req.body as { sessionId?: string; userId?: string }) || {};
     const userId = this.extractUserId(req, body.userId);
     if (!userId) {
       logger.warn('[Sandbox] Unauthorized sandbox creation attempt: user not authenticated');
@@ -175,7 +144,7 @@ export class SandboxController {
     const sessionId = body.sessionId || 'default';
     logger.info('[Sandbox] Received request to provision new cloud microVM', { sessionId, userId });
     try {
-      const sandboxId = await sandboxService.getOrCreateSandbox(sessionId, userId, 'new', body.replaceOldest);
+      const sandboxId = await sandboxService.getOrCreateSandbox(sessionId, userId, 'new');
       const usage = sandboxService.getSandboxUsage(userId);
       logger.info('[Sandbox] Successfully provisioned cloud microVM', { sandboxId, sessionId, userId, used: usage.used, max: usage.max });
 
@@ -192,74 +161,31 @@ export class SandboxController {
     }
   }
 
-  public async detachSession(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { sessionId?: string; userId?: string };
-    const body = (req.body as { sessionId?: string; userId?: string }) || {};
-    const sessionId = query?.sessionId || body.sessionId;
-    const userId = this.extractUserId(req, query?.userId || body.userId) || undefined;
-    if (!sessionId) {
-      throw new AppError('sessionId is required to detach session', 400, 'VALIDATION_ERROR');
-    }
-    logger.info('[Sandbox] Detaching session from sandbox', { sessionId, userId });
-    const detached = sandboxService.detachSession(sessionId);
-    const usage = sandboxService.getSandboxUsage(userId);
-    return reply.status(200).send(createSuccessResponse({ success: detached, sessionId, usage }));
-  }
-
   public async deleteSandbox(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { sessionId?: string; sandboxId?: string; clearAllSessions?: string; userId?: string };
-    const body = (req.body as { sessionId?: string; sandboxId?: string; clearAllSessions?: boolean; userId?: string }) || {};
+    const query = req.query as { sandboxId?: string; userId?: string };
+    const body = (req.body as { sandboxId?: string; userId?: string }) || {};
     const sandboxId = query?.sandboxId || body.sandboxId;
-    const sessionId = query?.sessionId || body.sessionId;
     const userId = this.extractUserId(req, query?.userId || body.userId);
 
     if (!userId) {
       throw new AppError('Authentication required: Sign in to delete or manage sandboxes.', 401, 'UNAUTHORIZED');
     }
 
-    const clearAll = query?.clearAllSessions === 'true' || body.clearAllSessions === true || sessionId === 'all';
-
-    if (sandboxId) {
-      logger.info('[Sandbox] Terminating cloud sandbox', { sandboxId, userId });
-      await sandboxService.destroySandbox(sandboxId);
-      const usage = sandboxService.getSandboxUsage(userId);
-      logger.info('[Sandbox] Cloud sandbox terminated and quota slot released', { sandboxId, userId, used: usage.used, max: usage.max });
-      return reply.status(200).send(
-        createSuccessResponse({
-          message: `Sandbox ${sandboxId} deleted successfully. Quota slot released.`,
-          usage,
-        })
-      );
+    if (!sandboxId) {
+      throw new AppError('sandboxId is required to terminate a sandbox', 400, 'VALIDATION_ERROR');
     }
 
-    if (clearAll) {
-      sandboxService.clearAllAttachedSessions(userId);
-      if (sessionId && sessionId !== 'all') {
-        sandboxService.detachSession(sessionId, userId);
-      }
-      const usage = sandboxService.getSandboxUsage(userId);
-      return reply.status(200).send(
-        createSuccessResponse({
-          message: 'All sessions detached from sandboxes.',
-          detached: true,
-          usage,
-        })
-      );
-    }
-
-    if (sessionId) {
-      const detached = sandboxService.detachSession(sessionId, userId);
-      const usage = sandboxService.getSandboxUsage(userId);
-      return reply.status(200).send(
-        createSuccessResponse({
-          message: `Session ${sessionId} detached from sandbox. Workspace preserved.`,
-          detached,
-          usage,
-        })
-      );
-    }
-
-    throw new AppError('Either sandboxId or sessionId is required', 400, 'VALIDATION_ERROR');
+    logger.info('[Sandbox] Terminating cloud sandbox', { sandboxId, userId });
+    agentService.invalidateSandboxModels(sandboxId);
+    await sandboxService.destroySandbox(sandboxId);
+    const usage = sandboxService.getSandboxUsage(userId);
+    logger.info('[Sandbox] Cloud sandbox terminated and quota slot released', { sandboxId, userId, used: usage.used, max: usage.max });
+    return reply.status(200).send(
+      createSuccessResponse({
+        message: `Sandbox ${sandboxId} deleted successfully. Quota slot released.`,
+        usage,
+      })
+    );
   }
 }
 

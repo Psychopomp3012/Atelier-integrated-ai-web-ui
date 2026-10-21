@@ -108,44 +108,6 @@ export async function loginWithCliAccount(): Promise<CliLoginResult> {
   return data.data;
 }
 
-let inFlightRefreshTokenPromise: Promise<CliLoginResult | null> | null = null;
-let lastRefreshedResult: CliLoginResult | null = null;
-let lastRefreshTokenTime = 0;
-const REFRESH_TOKEN_TTL = 10000; // 10 seconds deduplication window
-
-export async function refreshAuthToken(force = false): Promise<CliLoginResult | null> {
-  const now = Date.now();
-  if (!force && lastRefreshedResult && now - lastRefreshTokenTime < REFRESH_TOKEN_TTL) {
-    return lastRefreshedResult;
-  }
-  if (!force && inFlightRefreshTokenPromise) {
-    return inFlightRefreshTokenPromise;
-  }
-
-  inFlightRefreshTokenPromise = (async () => {
-    try {
-      const res = await apiFetch('/api/v1/auth/refresh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (data.success && data.data) {
-        lastRefreshedResult = data.data;
-        lastRefreshTokenTime = Date.now();
-        return data.data;
-      }
-      return null;
-    } catch {
-      return null;
-    } finally {
-      inFlightRefreshTokenPromise = null;
-    }
-  })();
-
-  return inFlightRefreshTokenPromise;
-}
 
 export async function unlinkAntigravityCli(): Promise<boolean> {
   try {

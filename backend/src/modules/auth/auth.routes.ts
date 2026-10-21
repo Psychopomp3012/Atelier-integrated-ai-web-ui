@@ -50,17 +50,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     preHandler: [authSensitiveLimitHook],
   }, authController.loginCli.bind(authController));
 
-  app.post('/api/v1/auth/refresh', {
-    schema: {
-      tags: ['Auth'],
-      summary: 'Refresh JWT session token',
-      description: '⏱️ **Rate Limit**: `20 req / min` (Tier 3: Auth Sensitive)\n🔒 **Auth**: Required (`Bearer <JWT>`)\n\nIssues a refreshed 7-day JWT token with synchronized profile state.',
-      security: [{ bearerAuth: [] }],
-    },
-    preValidation: [requireAuth],
-    preHandler: [authSensitiveLimitHook],
-  }, authController.refreshToken.bind(authController));
-
   // AI CLI Account Linking Status
   app.get('/api/v1/auth/cli/status', {
     schema: {
@@ -85,8 +74,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     schema: {
       tags: ['Auth'],
       summary: 'Generate Antigravity OAuth login URL',
-      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 6: Public Endpoints)\n🔓 **Auth**: Public',
+      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 6: Public Endpoints)\n🔓 **Auth**: Public (Optional `Bearer <JWT>` binds to user session)',
     },
+    preValidation: [optionalAuth],
     preHandler: [publicLimitHook],
   }, cliAuthController.getAntigravityAuthUrl.bind(cliAuthController));
 
@@ -94,8 +84,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     schema: {
       tags: ['Auth'],
       summary: 'Launch Antigravity headless auth flow',
-      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 6: Public Endpoints)\n🔓 **Auth**: Public',
+      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 6: Public Endpoints)\n🔓 **Auth**: Public (Optional `Bearer <JWT>` binds to user session)',
     },
+    preValidation: [optionalAuth],
     preHandler: [publicLimitHook],
   }, cliAuthController.loginAntigravity.bind(cliAuthController));
 
@@ -127,55 +118,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     },
     preValidation: [requireAuth],
     preHandler: [mutationLimitHook],
-  }, cliAuthController.unlinkGemini.bind(cliAuthController));
-
-  app.get('/api/v1/auth/cli/gemini/url', {
-    schema: {
-      tags: ['Auth'],
-      summary: 'Generate Gemini OAuth login URL (alias)',
-      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 6: Public Endpoints)\n🔓 **Auth**: Public',
-    },
-    preHandler: [publicLimitHook],
-  }, cliAuthController.getAntigravityAuthUrl.bind(cliAuthController));
-
-  app.get('/api/v1/auth/cli/gemini/login', {
-    schema: {
-      tags: ['Auth'],
-      summary: 'Launch Gemini login flow (alias)',
-      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 6: Public Endpoints)\n🔓 **Auth**: Public',
-    },
-    preHandler: [publicLimitHook],
-  }, cliAuthController.loginAntigravity.bind(cliAuthController));
-
-  app.post('/api/v1/auth/cli/gemini/code', {
-    schema: {
-      tags: ['Auth'],
-      summary: 'Submit Gemini authorization code (alias)',
-      description: '⏱️ **Rate Limit**: `20 req / min` (Tier 3: Auth Sensitive)\n🔒 **Auth**: Required (`Bearer <JWT>`)',
-      security: [{ bearerAuth: [] }],
-      body: {
-        type: 'object',
-        properties: {
-          code: { type: 'string', minLength: 1 },
-        },
-        required: ['code'],
-        additionalProperties: false,
-      },
-    },
-    preValidation: [requireAuth],
-    preHandler: [authSensitiveLimitHook],
-  }, cliAuthController.submitAntigravityCode.bind(cliAuthController));
-
-  app.post('/api/v1/auth/cli/gemini/unlink', {
-    schema: {
-      tags: ['Auth'],
-      summary: 'Unlink Gemini credentials (alias)',
-      description: '⏱️ **Rate Limit**: `60 req / min` (Tier 4: State Mutations)\n🔒 **Auth**: Required (`Bearer <JWT>`)',
-      security: [{ bearerAuth: [] }],
-    },
-    preValidation: [requireAuth],
-    preHandler: [mutationLimitHook],
-  }, cliAuthController.unlinkGemini.bind(cliAuthController));
+  }, cliAuthController.unlinkAntigravity.bind(cliAuthController));
 
   // Claude CLI Authentication
   app.get('/api/v1/auth/cli/claude/url', {

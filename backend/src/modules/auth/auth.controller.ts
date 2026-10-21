@@ -12,6 +12,7 @@ import { AppError } from '../../utils/error.util.js';
 import { envConfig } from '../../config/env.config.js';
 import { tokenUtil } from '../../utils/token.util.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
+import { sandboxService } from '../sandbox/sandbox.service.js';
 import { logger } from '../../utils/logger.util.js';
 
 export class AuthController {
@@ -33,22 +34,17 @@ export class AuthController {
     logger.info('[Auth] Initiating Google login', { email: parseResult.data.email });
     const session = await authService.loginWithGoogle(parseResult.data);
     logger.info('[Auth] Google login resolved session', { userId: session.user.id, email: session.user.email });
+    if (session.user?.id) {
+      sandboxService.syncCredentialsToUserSandboxes(session.user.id).catch(() => {});
+    }
     return reply.status(200).send(createSuccessResponse(session));
   }
 
   public async loginCli(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const session = await authService.loginWithCliAccount();
-    return reply.status(200).send(createSuccessResponse(session));
-  }
-
-  public async refreshToken(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
-    if (!token) {
-      throw new AppError('Authorization token required for refresh', 401, 'UNAUTHORIZED');
+    if (session.user?.id) {
+      sandboxService.syncCredentialsToUserSandboxes(session.user.id).catch(() => {});
     }
-
-    const session = await authService.refreshToken(token);
     return reply.status(200).send(createSuccessResponse(session));
   }
 

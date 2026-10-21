@@ -5,6 +5,8 @@ import { rateLimitService } from '../rate-limit/rate-limit.service.js';
 import { createSuccessResponse, createErrorResponse } from '../../utils/response.util.js';
 import { tokenUtil } from '../../utils/token.util.js';
 import { authService } from '../auth/auth.service.js';
+import { sandboxService } from '../sandbox/sandbox.service.js';
+import { firestoreBackendService } from '../../services/firestore.service.js';
 import { AppError } from '../../utils/error.util.js';
 import { logger } from '../../utils/logger.util.js';
 
@@ -25,22 +27,22 @@ export class AgentController {
   }
 
   public async getModels(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { userId?: string; sessionId?: string };
-    let userId = req.userId;
-    if (!userId && req.headers.authorization?.startsWith('Bearer ')) {
-      const token = req.headers.authorization.slice(7);
-      const verified = tokenUtil.verifyJwt(token);
-      if (verified.valid && verified.payload) {
-        userId = (verified.payload as any).userId || verified.payload.sub;
-      }
-      if (!userId) {
-        const session = await authService.getSession(token);
-        if (session?.user?.id) {
-          userId = session.user.id;
-        }
+    const query = req.query as { userId?: string; sessionId?: string; force?: string };
+    const userId = req.userId;
+    if (!userId) {
+      throw new AppError('Authentication required: Missing or invalid Authorization Bearer token', 401, 'UNAUTHORIZED');
+    }
+
+    // Phase 4: Session ownership & IDOR defense check
+    if (query.sessionId) {
+      const isOwned = await firestoreBackendService.verifySessionOwnership(userId, query.sessionId);
+      if (!isOwned) {
+        throw new AppError('Access denied: You do not own this session', 403, 'FORBIDDEN');
       }
     }
-    const models = await agentService.getAvailableModels(userId, query?.sessionId);
+
+    const force = query?.force === 'true' || query?.force === '1';
+    const models = await agentService.getAvailableModels(userId, query?.sessionId, force);
     return reply.status(200).send(createSuccessResponse(models));
   }
 
@@ -67,6 +69,49 @@ export class AgentController {
       parseResult.data.userId = req.userId;
     }
 
+    // Phase 4: Endpoint Security & Resource Legitimacy Guard
+    const targetUserId = req.userId;
+    const targetSessionId = parseResult.data.sessionId;
+    const targetSandboxId = parseResult.data.sandboxId;
+
+    if (targetUserId && targetSessionId) {
+      const isOwned = await firestoreBackendService.verifySessionOwnership(targetUserId, targetSessionId);
+      if (!isOwned) {
+        reply.raw.writeHead(403, { 'Content-Type': 'application/json' });
+        reply.raw.end(
+          JSON.stringify(
+            createErrorResponse('UNAUTHORIZED_SESSION', 'Access denied: You do not own this session')
+          )
+        );
+        return;
+      }
+    }
+
+    const effectiveSandboxId = targetSandboxId || (targetSessionId ? sandboxService.getActiveSandboxId(targetSessionId, targetUserId) : null) || undefined;
+    if (!effectiveSandboxId) {
+      reply.raw.writeHead(400, { 'Content-Type': 'application/json' });
+      reply.raw.end(
+        JSON.stringify(
+          createErrorResponse('NO_ACTIVE_SANDBOX', 'No cloud sandbox is attached to this session. Please select an active sandbox from the top bar before executing prompts.')
+        )
+      );
+      return;
+    }
+
+    if (targetUserId) {
+      try {
+        await sandboxService.verifyAndReactivateSandbox(effectiveSandboxId, targetUserId, targetSessionId);
+      } catch (sbErr: any) {
+        reply.raw.writeHead(403, { 'Content-Type': 'application/json' });
+        reply.raw.end(
+          JSON.stringify(
+            createErrorResponse('UNAUTHORIZED_RESOURCE', sbErr?.message || 'Access denied: You do not own this sandbox')
+          )
+        );
+        return;
+      }
+    }
+
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
 
@@ -82,13 +127,13 @@ export class AgentController {
       reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
-    const targetSessionId = parseResult.data.sessionId || '';
+    const streamSessionId = targetSessionId || '';
     req.raw.on('close', () => {
-      const active = targetSessionId ? agentService.getActiveExecution(targetSessionId) : undefined;
+      const active = streamSessionId ? agentService.getActiveExecution(streamSessionId) : undefined;
       if (active) {
         if (active.isExplicitlyStopped) {
           logger.info('[AGENT_STOP] Stream closed after explicit user stop request', {
-            sessionId: targetSessionId,
+            sessionId: streamSessionId,
             executionId: active.executionId,
           });
         } else {
@@ -113,6 +158,9 @@ export class AgentController {
         } else if (event.type === 'done') {
           sendEvent('done', {
             ...event.response,
+            codexQuota: event.codexQuota,
+            geminiQuota: event.geminiQuota,
+            sandboxUsage: event.sandboxUsage,
             rateLimit: {
               limit: rateStatus.limit,
               remaining: rateStatus.remaining,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { useAtom } from 'jotai';
+import { useAtom, useSetAtom } from 'jotai';
 import {
   currentUserAtom,
   isAuthModalOpenAtom,
@@ -14,9 +14,11 @@ import {
   messagesAtom,
   isGeneratingAtom,
   selectedSandboxIdAtom,
+  getSelectedSandboxStorageKey,
   sandboxUsageAtom,
   isDarkModeAtom,
   isInspectorOpenAtom,
+  inspectorTargetFilePathAtom,
   toastMessageAtom,
   isPageLoadingAtom,
   loadingMessageAtom,
@@ -33,7 +35,7 @@ import { MarkdownContent } from './components/MarkdownContent';
 import { LoadingScreen } from './components/LoadingScreen';
 import { signOutFirebase } from './services/firebaseAuth.service';
 import { sessionSyncService } from './services/sessionSync.service';
-import { fetchCliStatus, refreshAuthToken, closeGeminiCliLoginPopup, type CliStatus } from './services/cliAuth.service';
+import { fetchCliStatus, closeGeminiCliLoginPopup, type CliStatus } from './services/cliAuth.service';
 import { apiFetch, isTokenExpired } from './utils/api.util';
 import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSession, StepItem, ModelOption, GeminiQuotaStats, CodexQuotaStats } from './types';
 import { NONE_MODEL, getModelDisplayInfo, getMinimumEffortModelId } from './types';
@@ -246,6 +248,30 @@ export const App: React.FC = () => {
   // Mobile drawer & inspector states
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useAtom(isInspectorOpenAtom);
+  const setTargetFilePath = useSetAtom(inspectorTargetFilePathAtom);
+
+  // Handle SPA workspace file route clean-up and auto-open in Cloud Inspector
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const pathname = window.location.pathname;
+    const isWorkspaceRoute =
+      pathname.startsWith('/home/user/workspace/') ||
+      pathname.startsWith('/workspace/');
+
+    if (isWorkspaceRoute) {
+      let filePath = pathname
+        .replace(/^\/home\/user\/workspace\/?/, '')
+        .replace(/^\/workspace\/?/, '');
+      filePath = decodeURIComponent(filePath);
+
+      window.history.replaceState(null, '', '/');
+
+      if (filePath) {
+        setIsInspectorOpen(true);
+        setTargetFilePath(filePath);
+      }
+    }
+  }, [setIsInspectorOpen, setTargetFilePath]);
 
   // Full-page initialization and post-sign-in loading screen
   const [isPageLoading, setIsPageLoading] = useAtom(isPageLoadingAtom);
@@ -258,7 +284,7 @@ export const App: React.FC = () => {
   const [isLoadingEarlierMessages, setIsLoadingEarlierMessages] = useState<boolean>(false);
 
   // Rate Limiting & Quota State managed via Jotai
-  const [rateLimit, setRateLimit] = useAtom(rateLimitAtom);
+  const [, setRateLimit] = useAtom(rateLimitAtom);
   const [geminiQuota, setGeminiQuota] = useAtom(geminiQuotaAtom);
   const [codexQuota, setCodexQuota] = useAtom(codexQuotaAtom);
   const [cliStatus, setCliStatus] = useAtom(cliStatusAtom);
@@ -274,8 +300,7 @@ export const App: React.FC = () => {
           localStorage.setItem(`harness_cli_status_${currentUserRef.current.id}`, JSON.stringify(status));
         }
       } catch {}
-      fetchGeminiQuota(currentSessionId || undefined, force, currentUserRef.current?.email);
-      fetchCodexQuota(currentSessionId || undefined, force, currentUserRef.current?.email);
+      fetchQuota(currentSessionId || undefined, force, currentUserRef.current?.email);
       return status;
     }).catch(() => null);
   }, [currentSessionId]);
@@ -300,42 +325,52 @@ export const App: React.FC = () => {
       }
     } catch {}
 
-    refreshCliStatus(true);
+    if (!cliStatusFetchedRef.current) {
+      refreshCliStatus();
+    }
   }, [currentUser?.id, refreshCliStatus]);
 
   // Cloud Sandbox State & Explicit VM Provisioning managed via Jotai
   const [sandboxUsage, setSandboxUsage] = useAtom(sandboxUsageAtom);
   const [isStartingSandbox, setIsStartingSandbox] = useState(false);
-  const [isAttachingSandbox, setIsAttachingSandbox] = useState<string | null>(null);
   const [selectedSandboxId, setSelectedSandboxId] = useAtom(selectedSandboxIdAtom);
 
+  // Synchronize active sandbox selection to tenant-scoped localStorage
   useEffect(() => {
+    const userId = currentUser?.id;
+    const key = getSelectedSandboxStorageKey(userId);
     try {
       if (selectedSandboxId) {
-        localStorage.setItem('harness_selected_sandbox_id', selectedSandboxId);
+        localStorage.setItem(key, selectedSandboxId);
       } else {
-        localStorage.removeItem('harness_selected_sandbox_id');
+        localStorage.removeItem(key);
       }
     } catch {}
-  }, [selectedSandboxId]);
+  }, [selectedSandboxId, currentUser?.id]);
 
-  const validSessionIds = useMemo(() => sessions.map((s) => s.id), [sessions.map((s) => s.id).join(',')]);
+  // Synchronize sandbox selection when currentUser switches or logs out
+  useEffect(() => {
+    const userId = currentUser?.id;
+    if (!userId) {
+      setSelectedSandboxId(null);
+      return;
+    }
+    const key = getSelectedSandboxStorageKey(userId);
+    const saved = localStorage.getItem(key);
+    setSelectedSandboxId(saved || null);
+  }, [currentUser?.id, setSelectedSandboxId]);
+
   const activeSandbox = useMemo(() => {
     if (!currentUser || !sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) return null;
     if (selectedSandboxId) {
       const selected = sandboxUsage.sandboxes.find((s) => s.sandboxId === selectedSandboxId);
       if (selected) return selected;
     }
-    if (currentSessionId) {
-      const cleanSession = currentSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
-      const attached = sandboxUsage.sandboxes.find((s) => s.attachedSessionIds?.includes(cleanSession));
-      if (attached) return attached;
-    }
     if (sandboxUsage.sandboxes.length > 0) {
       return sandboxUsage.sandboxes[0];
     }
     return null;
-  }, [currentUser, sandboxUsage, currentSessionId, selectedSandboxId]);
+  }, [currentUser, sandboxUsage, selectedSandboxId]);
 
   const activeSandboxRef = useRef(activeSandbox);
   activeSandboxRef.current = activeSandbox;
@@ -368,11 +403,9 @@ export const App: React.FC = () => {
         return;
       }
       isFetchingUsageRef.current = true;
-      const activeIds = sessionsRef.current.map((s) => s.id).join(',');
       const params = new URLSearchParams();
       params.set('userId', u.id);
-      params.set('activeSessionIds', activeIds);
-      const url = `/api/v1/sandbox/usage?${params.toString()}`;
+      const url = `/api/v1/sandboxes?${params.toString()}`;
       const res = await apiFetch(url);
       const data = await res.json();
       if (data.success && data.data) {
@@ -408,33 +441,15 @@ export const App: React.FC = () => {
         const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
         if (!hasSandbox) return;
 
-        if (cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked) {
-          fetchGeminiQuota(currentSessionId || undefined);
-        }
-        if (cliStatusRef.current?.codex?.linked) {
-          fetchCodexQuota(currentSessionId || undefined);
+        const isLinked = cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked || cliStatusRef.current?.codex?.linked;
+        if (isLinked) {
+          fetchQuota(currentSessionId || undefined);
         }
       }
     }, 60000);
 
-    const onFocus = () => {
-      if (document.visibilityState === 'visible') {
-        fetchSandboxUsage();
-        const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
-        if (hasSandbox) {
-          if (cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked) {
-            fetchGeminiQuota(currentSessionId || undefined);
-          }
-          if (cliStatusRef.current?.codex?.linked) {
-            fetchCodexQuota(currentSessionId || undefined);
-          }
-        }
-      }
-    };
-    window.addEventListener('focus', onFocus);
     return () => {
       clearInterval(interval);
-      window.removeEventListener('focus', onFocus);
     };
   }, [currentUser?.id, currentSessionId, fetchSandboxUsage]);
 
@@ -446,19 +461,9 @@ export const App: React.FC = () => {
         setSelectedSandboxId(null);
       }
     } else if (sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0 && !selectedSandboxId) {
-      if (currentSessionId) {
-        const cleanSession = currentSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
-        const attached = sandboxUsage.sandboxes.find((s) => s.attachedSessionIds?.includes(cleanSession));
-        if (attached) {
-          setSelectedSandboxId(attached.sandboxId);
-        } else {
-          setSelectedSandboxId(sandboxUsage.sandboxes[0].sandboxId);
-        }
-      } else {
-        setSelectedSandboxId(sandboxUsage.sandboxes[0].sandboxId);
-      }
+      setSelectedSandboxId(sandboxUsage.sandboxes[0].sandboxId);
     }
-  }, [sandboxUsage, selectedSandboxId, currentSessionId]);
+  }, [sandboxUsage, selectedSandboxId]);
 
   const handleStartSandboxVM = async () => {
     if (!currentUser) {
@@ -475,14 +480,16 @@ export const App: React.FC = () => {
       const res = await apiFetch('/api/v1/sandbox/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: cleanSession, userId: currentUser?.id }),
+        body: JSON.stringify({ sessionId: cleanSession }),
       });
       const data = await res.json();
       if (data.success) {
         if (data.data?.sandboxId) {
           setSelectedSandboxId(data.data.sandboxId);
         }
-        await fetchSandboxUsage();
+        if (data.data?.usage) {
+          setSandboxUsage(data.data.usage);
+        }
         showToast('Cloud Sandbox VM started and ready');
       } else {
         showToast(data.error?.message || 'Failed to start sandbox VM');
@@ -494,34 +501,10 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleAttachExistingSandbox = async (targetSandboxId: string) => {
-    setIsAttachingSandbox(targetSandboxId);
+  const handleAttachExistingSandbox = (targetSandboxId: string) => {
     setSelectedSandboxId(targetSandboxId);
-    try {
-      if (currentSessionId) {
-        const cleanSession = currentSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
-        const res = await apiFetch('/api/v1/sandbox/attach', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId: cleanSession, sandboxId: targetSandboxId }),
-        });
-        const data = await res.json();
-        if (data.success) {
-          await fetchSandboxUsage();
-          const sbName = sandboxUsage?.sandboxes?.find((s) => s.sandboxId === targetSandboxId)?.name || 'Sandbox';
-          showToast(`Connected to ${sbName}`);
-        } else {
-          showToast(data.error?.message || 'Failed to attach to sandbox');
-        }
-      } else {
-        const sbName = sandboxUsage?.sandboxes?.find((s) => s.sandboxId === targetSandboxId)?.name || 'Sandbox';
-        showToast(`Selected ${sbName}`);
-      }
-    } catch {
-      showToast('Failed to select sandbox');
-    } finally {
-      setIsAttachingSandbox(null);
-    }
+    const sbName = sandboxUsage?.sandboxes?.find((s) => s.sandboxId === targetSandboxId)?.name || 'Sandbox';
+    showToast(`Connected to ${sbName}`);
   };
 
   const selectedModelOption: ModelOption = useMemo(() => {
@@ -674,121 +657,77 @@ export const App: React.FC = () => {
     [messages, selectedModel, geminiQuota, codexQuota, selectedModelOption]
   );
 
-  const lastGeminiQuotaFetchRef = useRef<number>(0);
-  const lastCodexQuotaFetchRef = useRef<number>(0);
-  const lastQuotaFetchTimeRef = useRef<number>(0);
-  const inFlightQuotaPromiseRef = useRef<Promise<void> | null>(null);
-  const inFlightGeminiQuotaPromiseRef = useRef<Promise<any> | null>(null);
-  const inFlightCodexQuotaPromiseRef = useRef<Promise<any> | null>(null);
+  const lastQuotaFetchRef = useRef<number>(0);
+  const inFlightQuotaPromiseRef = useRef<Promise<any> | null>(null);
   const authMeInFlightRef = useRef<Promise<any> | null>(null);
   const authMeCompletedRef = useRef<boolean>(false);
 
-  const fetchGeminiQuota = async (sessId?: string, force = false, emailOverride?: string) => {
-    // Guard 1: If Antigravity/Gemini CLI is not linked, never fetch quota!
-    const isLinked = cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked;
-    if (!isLinked) {
-      setGeminiQuota(null);
+  const fetchQuota = async (sessId?: string, force = false, emailOverride?: string) => {
+    // Guard 1: If neither Antigravity nor Codex CLI is linked, never fetch quota!
+    const isAntigravityLinked = cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked;
+    const isCodexLinked = cliStatusRef.current?.codex?.linked;
+
+    if (!isAntigravityLinked) setGeminiQuota(null);
+    if (!isCodexLinked) setCodexQuota(null);
+
+    if (!isAntigravityLinked && !isCodexLinked) {
       return null;
     }
+
     // Guard 2: If user has no active sandbox, never fetch quota (quotas execute strictly inside microVMs)
     const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
     if (!hasSandbox) {
       setGeminiQuota(null);
-      return null;
-    }
-
-    const email = emailOverride || currentUser?.email || currentUserRef.current?.email;
-    if (!email) {
-      setGeminiQuota(null);
-      return;
-    }
-    const now = Date.now();
-    if (!force && now - lastGeminiQuotaFetchRef.current < 4000) {
-      return;
-    }
-    if (inFlightGeminiQuotaPromiseRef.current) {
-      return inFlightGeminiQuotaPromiseRef.current;
-    }
-
-    inFlightGeminiQuotaPromiseRef.current = (async () => {
-      try {
-        lastGeminiQuotaFetchRef.current = Date.now();
-        const emailParam = `?userEmail=${encodeURIComponent(email)}`;
-        const activeId = sessId || currentSessionId;
-        const sessionParam = activeId ? `&sessionId=${encodeURIComponent(activeId)}` : '';
-        const res = await apiFetch(`/api/v1/quota/gemini${emailParam}${sessionParam}`);
-        if (res.ok) {
-          const json = await res.json();
-          if (json.data) {
-            setGeminiQuota((prev) => {
-              if (JSON.stringify(prev) === JSON.stringify(json.data)) return prev;
-              return json.data;
-            });
-            return json.data;
-          }
-        }
-      } catch {
-        // offline fallback
-      } finally {
-        inFlightGeminiQuotaPromiseRef.current = null;
-      }
-    })();
-
-    return inFlightGeminiQuotaPromiseRef.current;
-  };
-
-  const fetchCodexQuota = async (sessId?: string, force = false, emailOverride?: string) => {
-    // Guard 1: If Codex CLI is not linked, never fetch quota!
-    const isLinked = cliStatusRef.current?.codex?.linked;
-    if (!isLinked) {
-      setCodexQuota(null);
-      return null;
-    }
-    // Guard 2: If user has no active sandbox, never fetch quota (quotas execute strictly inside microVMs)
-    const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
-    if (!hasSandbox) {
       setCodexQuota(null);
       return null;
     }
 
     const email = emailOverride || currentUser?.email || currentUserRef.current?.email;
     if (!email) {
-      setCodexQuota(null);
-      return;
-    }
-    const now = Date.now();
-    if (!force && now - lastCodexQuotaFetchRef.current < 4000) {
-      return;
-    }
-    if (inFlightCodexQuotaPromiseRef.current) {
-      return inFlightCodexQuotaPromiseRef.current;
+      return null;
     }
 
-    inFlightCodexQuotaPromiseRef.current = (async () => {
+    const now = Date.now();
+    if (!force && now - lastQuotaFetchRef.current < 4000) {
+      return;
+    }
+    if (inFlightQuotaPromiseRef.current) {
+      return inFlightQuotaPromiseRef.current;
+    }
+
+    inFlightQuotaPromiseRef.current = (async () => {
       try {
-        lastCodexQuotaFetchRef.current = Date.now();
+        lastQuotaFetchRef.current = Date.now();
         const emailParam = `?userEmail=${encodeURIComponent(email)}`;
         const activeId = sessId || currentSessionId;
         const sessionParam = activeId ? `&sessionId=${encodeURIComponent(activeId)}` : '';
-        const res = await apiFetch(`/api/v1/quota/codex${emailParam}${sessionParam}`);
+        const res = await apiFetch(`/api/v1/quota${emailParam}${sessionParam}`);
         if (res.ok) {
           const json = await res.json();
           if (json.data) {
-            setCodexQuota((prev) => {
-              if (JSON.stringify(prev) === JSON.stringify(json.data)) return prev;
-              return json.data;
-            });
+            if (json.data.antigravity) {
+              setGeminiQuota((prev) => {
+                if (JSON.stringify(prev) === JSON.stringify(json.data.antigravity)) return prev;
+                return json.data.antigravity;
+              });
+            }
+            if (json.data.codex) {
+              setCodexQuota((prev) => {
+                if (JSON.stringify(prev) === JSON.stringify(json.data.codex)) return prev;
+                return json.data.codex;
+              });
+            }
             return json.data;
           }
         }
       } catch {
         // offline fallback
       } finally {
-        inFlightCodexQuotaPromiseRef.current = null;
+        inFlightQuotaPromiseRef.current = null;
       }
     })();
 
-    return inFlightCodexQuotaPromiseRef.current;
+    return inFlightQuotaPromiseRef.current;
   };
 
   const waitForWorkspaceAndProvidersReady = useCallback(
@@ -797,22 +736,25 @@ export const App: React.FC = () => {
       try {
         const email = emailOverride || currentUserRef.current?.email || currentUser?.email;
 
-        // 1. Fetch CLI status immediately and apply to state without waiting for quota discovery
-        const freshCliStatus = await fetchCliStatus(true).catch(() => null);
-        if (freshCliStatus && currentUserRef.current?.id === userId) {
-          setCliStatus(freshCliStatus);
-          cliStatusFetchedRef.current = true;
-          try {
-            localStorage.setItem(`harness_cli_status_${userId}`, JSON.stringify(freshCliStatus));
-          } catch {}
+        // 1. Fetch CLI status only if not already fetched during boot
+        let freshCliStatus = cliStatus;
+        if (!cliStatusFetchedRef.current) {
+          const status = await fetchCliStatus().catch(() => null);
+          if (status && currentUserRef.current?.id === userId) {
+            freshCliStatus = status;
+            setCliStatus(status);
+            cliStatusFetchedRef.current = true;
+            try {
+              localStorage.setItem(`harness_cli_status_${userId}`, JSON.stringify(status));
+            } catch {}
+          }
         }
 
         // 2. Discover models, quota limits, and sandbox telemetry in parallel
         setLoadingSubMessage('Connecting to cloud microVMs & discovering models...');
         const [freshModels] = await Promise.all([
-          fetchAvailableModels(true, targetSessionId || undefined, userId).catch(() => []),
-          fetchGeminiQuota(targetSessionId || undefined, true, email).catch(() => null),
-          fetchCodexQuota(targetSessionId || undefined, true, email).catch(() => null),
+          fetchAvailableModels(false, targetSessionId || undefined, userId).catch(() => []),
+          fetchQuota(targetSessionId || undefined, false, email).catch(() => null),
           fetchSandboxUsage().catch(() => null),
         ]);
 
@@ -852,42 +794,33 @@ export const App: React.FC = () => {
       setCodexQuota(null);
     } else {
       if (!initialLoadCompletedRef.current) return;
-      fetchGeminiQuota(currentSessionId || undefined);
-      fetchCodexQuota(currentSessionId || undefined);
+      fetchQuota(currentSessionId || undefined);
     }
   }, [currentUser?.id, currentSessionId]);
 
   useEffect(() => {
     if (!currentUser?.id || !initialLoadCompletedRef.current) return;
-    if (selectedModelOption?.hostedBy === 'codex' || selectedModelOption?.provider === 'codex') {
-      fetchCodexQuota(currentSessionId || undefined);
-    } else {
-      fetchGeminiQuota(currentSessionId || undefined);
-    }
+    fetchQuota(currentSessionId || undefined);
   }, [currentUser?.id, selectedModelOption?.id, selectedModelOption?.hostedBy, selectedModelOption?.provider]);
 
   const handleRefreshQuota = useCallback(() => {
     if (!currentUserRef.current?.email) return;
-    fetchGeminiQuota(currentSessionId || undefined, true);
-    fetchCodexQuota(currentSessionId || undefined, true);
+    fetchQuota(currentSessionId || undefined, true);
   }, [currentSessionId]);
 
   const prevActiveSandboxIdRef = useRef<string | null>(null);
 
-  // Re-fetch dynamic models and quota whenever activeSandbox changes
+  // Synchronize state when activeSandbox changes (without re-fetching models/quotas)
   useEffect(() => {
     if (!currentUser?.id || !initialLoadCompletedRef.current) return;
     const currentSbxId = activeSandbox?.sandboxId || null;
     if (prevActiveSandboxIdRef.current === currentSbxId) return;
     prevActiveSandboxIdRef.current = currentSbxId;
 
-    if (currentSbxId) {
-      refreshModels(true);
-      handleRefreshQuota();
-    } else {
+    if (!currentSbxId) {
       refreshModels(false);
     }
-  }, [currentUser?.id, activeSandbox?.sandboxId, refreshModels, handleRefreshQuota]);
+  }, [currentUser?.id, activeSandbox?.sandboxId, refreshModels]);
 
   // Auto-retry discovering models if a sandbox is active but models list is still empty
   useEffect(() => {
@@ -902,62 +835,9 @@ export const App: React.FC = () => {
 
   const handleCliStatusChange = useCallback((newStatus: CliStatus) => {
     setCliStatus(newStatus);
-    fetchGeminiQuota(currentSessionId || undefined);
-    fetchCodexQuota(currentSessionId || undefined);
+    fetchQuota(currentSessionId || undefined);
   }, [currentSessionId]);
 
-  const fetchQuota = async (force = false) => {
-    if (!currentUserRef.current?.id) return;
-    const now = Date.now();
-    if (!force && now - lastQuotaFetchTimeRef.current < 4000) {
-      return;
-    }
-    if (!force && inFlightQuotaPromiseRef.current) {
-      return inFlightQuotaPromiseRef.current;
-    }
-
-    inFlightQuotaPromiseRef.current = (async () => {
-      try {
-        const res = await apiFetch('/api/v1/rate-limit/status');
-        if (res.ok) {
-          const json = await res.json();
-          if (json.data) {
-            setRateLimit({
-              limit: json.data.limit,
-              remaining: json.data.remaining,
-              resetInSeconds: json.data.resetInSeconds,
-            });
-            lastQuotaFetchTimeRef.current = Date.now();
-          }
-        }
-      } catch {
-        // offline fallback
-      } finally {
-        inFlightQuotaPromiseRef.current = null;
-      }
-    })();
-
-    return inFlightQuotaPromiseRef.current;
-  };
-
-  useEffect(() => {
-    if (!currentUser?.id) return;
-    fetchQuota();
-  }, [currentUser?.id]);
-
-  useEffect(() => {
-    if (!currentUser?.id || rateLimit.resetInSeconds <= 0) return;
-    const timer = setInterval(() => {
-      setRateLimit((prev) => {
-        if (prev.resetInSeconds <= 1) {
-          fetchQuota(true);
-          return { ...prev, remaining: prev.limit, resetInSeconds: 0 };
-        }
-        return { ...prev, resetInSeconds: prev.resetInSeconds - 1 };
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [currentUser?.id, rateLimit.resetInSeconds]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -967,12 +847,17 @@ export const App: React.FC = () => {
   // Day / Night Theme state managed via Jotai
   const [isDarkMode, setIsDarkMode] = useAtom(isDarkModeAtom);
 
-  // Keep DOM class in sync and respond to system changes if no manual preference stored
+  // Keep DOM class and favicon in sync and respond to system changes if no manual preference stored
   useEffect(() => {
     if (isDarkMode) {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
+    }
+
+    const faviconEl = (document.getElementById('app-favicon') || document.querySelector('link[rel="icon"]')) as HTMLLinkElement | null;
+    if (faviconEl) {
+      faviconEl.href = isDarkMode ? '/favicon-white.svg' : '/favicon-black.svg';
     }
 
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -985,6 +870,9 @@ export const App: React.FC = () => {
         } else {
           document.documentElement.classList.remove('dark');
         }
+        if (faviconEl) {
+          faviconEl.href = e.matches ? '/favicon-white.svg' : '/favicon-black.svg';
+        }
       }
     };
 
@@ -996,6 +884,10 @@ export const App: React.FC = () => {
     const nextMode = !isDarkMode;
     setIsDarkMode(nextMode);
     localStorage.setItem('theme_preference', nextMode ? 'dark' : 'light');
+    const faviconEl = (document.getElementById('app-favicon') || document.querySelector('link[rel="icon"]')) as HTMLLinkElement | null;
+    if (faviconEl) {
+      faviconEl.href = nextMode ? '/favicon-white.svg' : '/favicon-black.svg';
+    }
     if (nextMode) {
       document.documentElement.classList.add('dark');
       showToast('Switched to Night Mode');
@@ -1163,7 +1055,7 @@ export const App: React.FC = () => {
         if (!res.ok) throw new Error('Unauthenticated');
         return res.json();
       }),
-      fetchCliStatus(true).catch(() => null),
+      fetchCliStatus().catch(() => null),
     ])
       .then(async ([meData, cliData]) => {
         authMeCompletedRef.current = true;
@@ -1182,12 +1074,6 @@ export const App: React.FC = () => {
             } catch {}
           }
 
-          // Auto-refresh token if within refresh window (weekly refresh requirement)
-          refreshAuthToken().then((refreshed) => {
-            if (refreshed?.token) {
-              localStorage.setItem('auth_token', refreshed.token);
-            }
-          });
           // Do NOT dismiss loading screen yet!
           // We wait until sidebar sessions & active session messages are fetched.
         } else {
@@ -1329,7 +1215,7 @@ export const App: React.FC = () => {
           setRemainingMessageCount(0);
           await waitForWorkspaceAndProvidersReady(currentUser.id, null, currentUser.email);
           if (!cliStatusFetchedRef.current) {
-            const status = await fetchCliStatus(true).catch(() => null);
+            const status = await fetchCliStatus().catch(() => null);
             if (status && currentUserRef.current?.id === currentUser.id) {
               setCliStatus(status);
               cliStatusFetchedRef.current = true;
@@ -1369,7 +1255,7 @@ export const App: React.FC = () => {
         } finally {
           await waitForWorkspaceAndProvidersReady(currentUser.id, targetSessionId, currentUser.email);
           if (!cliStatusFetchedRef.current) {
-            const status = await fetchCliStatus(true).catch(() => null);
+            const status = await fetchCliStatus().catch(() => null);
             if (status && currentUserRef.current?.id === currentUser.id) {
               setCliStatus(status);
               cliStatusFetchedRef.current = true;
@@ -1383,7 +1269,7 @@ export const App: React.FC = () => {
       .catch(async (err) => {
         console.warn('Initial session sync encountered error:', err);
         if (!cliStatusFetchedRef.current && currentUserRef.current?.id) {
-          const status = await fetchCliStatus(true).catch(() => null);
+          const status = await fetchCliStatus().catch(() => null);
           if (status) {
             setCliStatus(status);
             cliStatusFetchedRef.current = true;
@@ -1474,22 +1360,6 @@ export const App: React.FC = () => {
       setMessages([]);
       setHasMoreEarlierMessages(false);
       setRemainingMessageCount(0);
-    }
-
-    // Release/detach associated cloud sandbox and refresh usage immediately
-    try {
-      const url = updated.length === 0
-        ? `/api/v1/sandbox?sessionId=${encodeURIComponent(sessionId)}&clearAllSessions=true`
-        : `/api/v1/sandbox?sessionId=${encodeURIComponent(sessionId)}`;
-      const res = await apiFetch(url, { method: 'DELETE' });
-      const data = await res.json();
-      if (data.success && data.data?.usage) {
-        setSandboxUsage(data.data.usage);
-      } else {
-        await fetchSandboxUsage();
-      }
-    } catch {
-      await fetchSandboxUsage();
     }
 
     showToast('Chat session deleted');
@@ -1588,9 +1458,6 @@ export const App: React.FC = () => {
       const normalizedUser = normalizeUser(loggedInUser);
       currentUserRef.current = normalizedUser;
       setCurrentUser(normalizedUser);
-      if (normalizedUser) {
-        syncUserProfileViaBackend(normalizedUser);
-      }
 
       // Synchronize workspace sessions & messages first
       setLoadingSubMessage('Loading your chat sessions & workspace...');
@@ -1807,7 +1674,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    if (!activeSandbox) {
+    if (!activeSandbox || !activeSandbox.sandboxId) {
       showToast('Please select or start a cloud sandbox from the top bar before sending a prompt.');
       const menuBtn = document.getElementById('cloud-sandboxes-menu-button');
       if (menuBtn) {
@@ -1822,6 +1689,7 @@ export const App: React.FC = () => {
     }
 
     let newMessages: ChatMessage[];
+    let userMsgId: string | undefined;
 
     if (customHistory) {
       // Re-send after an edit: history already contains the updated user message.
@@ -1829,8 +1697,9 @@ export const App: React.FC = () => {
       newMessages = customHistory;
       setMessages(newMessages);
     } else {
+      userMsgId = `usr_${Date.now()}`;
       const userMsg: ChatMessage = {
-        id: `usr_${Date.now()}`,
+        id: userMsgId,
         role: 'user',
         author: currentUser.name,
         authorBadge: 'YOU',
@@ -1880,7 +1749,6 @@ export const App: React.FC = () => {
         };
         updated = [targetSession, ...prev];
       }
-      sessionSyncService.saveSession(targetSession, currentUser?.id).catch(() => {});
       return updated;
     });
 
@@ -1892,16 +1760,7 @@ export const App: React.FC = () => {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    if (activeSandbox?.sandboxId) {
-      const clean = activeSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
-      await apiFetch('/api/v1/sandbox/attach', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: clean, sandboxId: activeSandbox.sandboxId }),
-      }).catch(() => {});
-      fetchSandboxUsage();
-    }
-
+    // Single-call flow: backend handles sandbox attachment & auto-reconnect via Phase 4
     const currentModelOpt = selectedModelOption;
     const modelDisplayName = currentModelOpt.name;
 
@@ -1943,7 +1802,6 @@ export const App: React.FC = () => {
           };
           updated = [targetSession, ...prev];
         }
-        sessionSyncService.saveSession(targetSession, currentUser?.id).catch(() => {});
         return updated;
       });
     };
@@ -1984,6 +1842,8 @@ export const App: React.FC = () => {
           sessionId: activeSessionId,
           sandboxId: activeSandbox?.sandboxId,
           userId: currentUser?.id,
+          userMessageId: userMsgId,
+          truncateAfterMessageId: editOptions?.truncateAfterMessageId,
           prompt: promptText,
           selectedModel: selectedModel,
           files: attachedFiles?.map((f) => ({
@@ -2168,9 +2028,16 @@ export const App: React.FC = () => {
                     resetInSeconds: data.rateLimit.resetInSeconds,
                   });
                 }
-                fetchGeminiQuota(activeSessionId, true);
-                fetchCodexQuota(activeSessionId, true);
-                fetchSandboxUsage();
+                // Ingest single-call piggybacked live quotas and sandbox usage
+                if (data.codexQuota) {
+                  setCodexQuota(data.codexQuota);
+                }
+                if (data.geminiQuota) {
+                  setGeminiQuota(data.geminiQuota);
+                }
+                if (data.sandboxUsage) {
+                  setSandboxUsage(data.sandboxUsage);
+                }
               } else if (event === 'error') {
                 const errMsg = data.message || 'Execution error';
                 if (data.code === 'CLI_NOT_LINKED' || errMsg.toLowerCase().includes('requires an active') || errMsg.toLowerCase().includes('subscription link')) {
@@ -2422,18 +2289,10 @@ export const App: React.FC = () => {
           isDarkMode={isDarkMode}
           onToggleTheme={handleToggleTheme}
           currentSessionId={currentSessionId}
-          validSessionIds={validSessionIds}
           onSandboxChanged={(newSandboxId, updatedUsage) => {
             setSelectedSandboxId(newSandboxId || null);
             if (updatedUsage) {
               setSandboxUsage(updatedUsage);
-            } else {
-              fetchSandboxUsage();
-            }
-            refreshModels(true);
-            if (currentSessionId) {
-              fetchGeminiQuota(currentSessionId, true);
-              fetchCodexQuota(currentSessionId, true);
             }
             showToast('Sandbox workspace synchronized');
           }}
@@ -2500,30 +2359,19 @@ export const App: React.FC = () => {
 
                     <div className="flex flex-wrap items-center justify-center gap-2">
                       {sandboxUsage.sandboxes.map((sb) => {
-                        const validSet = new Set(sessions.map((s) => s.id));
-                        const attachedCount = sb.attachedSessionIds?.filter((id) => validSet.has(id)).length || 0;
-                        const isAttaching = isAttachingSandbox === sb.sandboxId;
                         return (
                           <button
                             key={sb.sandboxId}
                             type="button"
                             onClick={() => handleAttachExistingSandbox(sb.sandboxId)}
-                            disabled={isAttaching}
-                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-surface-container-high hover:bg-surface-container-highest border border-primary/30 hover:border-primary text-on-surface text-xs font-semibold shadow-xs transition-all cursor-pointer active:scale-95 disabled:opacity-50 group"
+                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-surface-container-high hover:bg-surface-container-highest border border-primary/30 hover:border-primary text-on-surface text-xs font-semibold shadow-xs transition-all cursor-pointer active:scale-95 group"
                             title={`Connect this chat to ${sb.name} (${sb.sandboxId})`}
                           >
-                            {isAttaching ? (
-                              <span className="material-symbols-outlined text-[14px] animate-spin text-primary">progress_activity</span>
-                            ) : (
-                              <span className="relative flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                              </span>
-                            )}
-                            <span>Attach to {sb.name}</span>
-                            <span className="text-[10px] text-outline font-mono font-normal">
-                              ({attachedCount} {attachedCount === 1 ? 'chat' : 'chats'})
+                            <span className="relative flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                             </span>
+                            <span>Connect to {sb.name}</span>
                             <span className="material-symbols-outlined text-[13px] text-primary group-hover:translate-x-0.5 transition-transform">
                               arrow_forward
                             </span>
@@ -2868,7 +2716,6 @@ export const App: React.FC = () => {
                   onStartSandboxVM={handleStartSandboxVM}
                   onAttachExistingSandbox={handleAttachExistingSandbox}
                   isStartingSandbox={isStartingSandbox}
-                  isAttachingSandbox={isAttachingSandbox}
                   onRefreshModels={() => refreshModels(true)}
                   onOpenAuthModal={() => setIsAuthModalOpen(true)}
                 />

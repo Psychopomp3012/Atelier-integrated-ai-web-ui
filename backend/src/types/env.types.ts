@@ -12,5 +12,6 @@ export interface AppEnvConfig {
   SANDBOX_MEMORY_LIMIT: string;
   SANDBOX_PROVIDER?: 'e2b' | 'docker';
   E2B_API_KEY?: string;
+  E2B_TEMPLATE?: string;
   MAX_SANDBOXES_PER_USER?: number;
 }

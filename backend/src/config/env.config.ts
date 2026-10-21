@@ -20,6 +20,7 @@ export const envConfig: AppEnvConfig = {
   SANDBOX_MEMORY_LIMIT: process.env.SANDBOX_MEMORY_LIMIT || '4g',
   SANDBOX_PROVIDER: (process.env.SANDBOX_PROVIDER as 'e2b' | 'docker') || 'e2b',
   E2B_API_KEY: process.env.E2B_API_KEY,
+  E2B_TEMPLATE: process.env.E2B_TEMPLATE || 'atelier-agent-vm',
   MAX_SANDBOXES_PER_USER: process.env.MAX_SANDBOXES_PER_USER
     ? parseInt(process.env.MAX_SANDBOXES_PER_USER, 10)
     : 3,

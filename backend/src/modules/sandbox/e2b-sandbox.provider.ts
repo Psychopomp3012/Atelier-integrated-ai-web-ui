@@ -14,6 +14,7 @@ import type {
 } from '../../types/sandbox.types.js';
 import { generateId } from '../../utils/id.util.js';
 import { logger } from '../../utils/logger.util.js';
+import { timingLogger } from '../../utils/timing.util.js';
 import { envConfig } from '../../config/env.config.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
@@ -22,7 +23,6 @@ export interface SandboxRecord {
   sandboxId: string;
   name: string;
   userId: string;
-  attachedSessionIds: Set<string>;
   createdAt: number;
   lastActiveAt: number;
   lastUpdateCheckAt?: number;
@@ -32,7 +32,6 @@ export interface SandboxRecord {
 
 export class E2BSandboxProvider implements ISandboxProvider {
   public readonly name = 'e2b-cloud';
-  private readonly sessionToSandboxId = new Map<string, string>();
   private readonly sandboxRecords = new Map<string, SandboxRecord>();
   private readonly activeSandboxes = new Map<string, Sandbox>();
   private readonly terminalLogs: TerminalLogEntry[] = [];
@@ -41,6 +40,10 @@ export class E2BSandboxProvider implements ISandboxProvider {
   private readonly initializedSandboxes = new Set<string>();
   private readonly activeExecutions = new Map<string, number>();
   private readonly maintenancePromises = new Map<string, Promise<void>>();
+  private readonly inFlightCredentialSyncs = new Map<string, Promise<void>>();
+  private readonly inFlightConnections = new Map<string, Promise<Sandbox>>();
+  private readonly inFlightResumes = new Map<string, Promise<Sandbox>>();
+  private readonly lastSyncedCredentialsHash = new Map<string, string>();
   private static readonly MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
   constructor() {
@@ -80,12 +83,11 @@ export class E2BSandboxProvider implements ISandboxProvider {
   private saveRecordsToDisk(): void {
     try {
       for (const r of this.sandboxRecords.values()) {
-        if (r && r.userId && r.userId !== 'default_user') {
+        if (r && r.userId) {
           firestoreBackendService.saveSandboxRecord(r.userId, {
             sandboxId: r.sandboxId,
             name: r.name,
             userId: r.userId,
-            attachedSessionIds: Array.from(r.attachedSessionIds),
             createdAt: r.createdAt,
             lastActiveAt: r.lastActiveAt,
             provider: 'e2b',
@@ -99,7 +101,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
   }
 
   public async syncWithCloud(userId?: string): Promise<void> {
-    if (userId && userId !== 'default_user') {
+    if (userId) {
       try {
         const remoteRecords = await firestoreBackendService.getUserSandboxes(userId);
         if (remoteRecords && remoteRecords.length > 0) {
@@ -109,7 +111,6 @@ export class E2BSandboxProvider implements ISandboxProvider {
                 sandboxId: item.sandboxId,
                 name: item.name || `Sandbox (${item.sandboxId.substring(0, 6)})`,
                 userId: item.userId || userId,
-                attachedSessionIds: new Set(Array.isArray(item.attachedSessionIds) ? item.attachedSessionIds : []),
                 createdAt: item.createdAt || Date.now(),
                 lastActiveAt: item.lastActiveAt || Date.now(),
                 lastUpdateCheckAt: item.lastUpdateCheckAt || item.createdAt || Date.now(),
@@ -126,17 +127,32 @@ export class E2BSandboxProvider implements ISandboxProvider {
 
     const apiKey = this.getApiKey();
     if (!apiKey) return;
-    if (!userId || userId === 'default_user') return;
+    if (!userId) return;
 
     try {
-      const paginator = await Sandbox.list({ apiKey });
+      const paginator = await Sandbox.list({
+        apiKey,
+        query: {
+          metadata: { userId },
+          state: ['running', 'paused'],
+        },
+      });
       const items = (await paginator.nextItems().catch(() => [])) || [];
-      if (!items || !items.length) return;
 
-      const activeCloudIds = new Set(items.map((i) => i.sandboxId));
+      // Defensive multi-tenant filter: only accept sandboxes that explicitly belong to this user
+      const userCloudItems = items.filter((i) => {
+        if (i.metadata && (i.metadata as Record<string, string>).userId) {
+          return (i.metadata as Record<string, string>).userId === userId;
+        }
+        // If legacy untagged sandbox, only accept if locally already assigned to this user
+        const local = this.sandboxRecords.get(i.sandboxId);
+        return local?.userId === userId;
+      });
+
+      const activeCloudIds = new Set(userCloudItems.map((i) => i.sandboxId));
 
       // Sort items by startedAt ascending so oldest is #1, second is #2, third is #3
-      const sorted = items.slice().sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+      const sorted = userCloudItems.slice().sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
 
       let hasChanges = false;
       let index = 0;
@@ -147,7 +163,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
         const existing = this.sandboxRecords.get(sbId);
 
         if (existing) {
-          if (startedTime > existing.lastActiveAt) {
+          if (existing.userId === userId && startedTime > existing.lastActiveAt) {
             existing.lastActiveAt = startedTime;
           }
         } else {
@@ -156,7 +172,6 @@ export class E2BSandboxProvider implements ISandboxProvider {
             sandboxId: sbId,
             name: `Sandbox #${index} (${sbId.substring(0, 6)})`,
             userId: userId,
-            attachedSessionIds: new Set(),
             createdAt: startedTime,
             lastActiveAt: startedTime,
             lastUpdateCheckAt: startedTime,
@@ -165,20 +180,16 @@ export class E2BSandboxProvider implements ISandboxProvider {
         }
       }
 
-      // Prune records deleted from cloud
+      // Prune records deleted from cloud strictly scoped to THIS user
       for (const localId of Array.from(this.sandboxRecords.keys())) {
-        if (!activeCloudIds.has(localId)) {
-          hasChanges = true;
-          const rec = this.sandboxRecords.get(localId);
-          if (rec && rec.userId && rec.userId !== 'default_user') {
-            firestoreBackendService.deleteSandboxRecord(rec.userId, localId).catch(() => {});
-          }
-          this.sandboxRecords.delete(localId);
-          this.activeSandboxes.delete(localId);
-          for (const [sess, targetId] of this.sessionToSandboxId.entries()) {
-            if (targetId === localId) {
-              this.sessionToSandboxId.delete(sess);
-            }
+        const rec = this.sandboxRecords.get(localId);
+        // Multi-Tenant Isolation: NEVER touch or prune records belonging to another tenant!
+        if (rec && rec.userId === userId) {
+          if (!activeCloudIds.has(localId)) {
+            hasChanges = true;
+            firestoreBackendService.deleteSandboxRecord(userId, localId).catch(() => {});
+            this.sandboxRecords.delete(localId);
+            this.activeSandboxes.delete(localId);
           }
         }
       }
@@ -232,243 +243,71 @@ export class E2BSandboxProvider implements ISandboxProvider {
       return cached;
     }
 
+    const inFlight = this.inFlightConnections.get(sandboxId);
+    if (inFlight) {
+      return inFlight;
+    }
+
     const apiKey = this.getApiKey();
-    this.addLog('INFO', `Connecting to E2B sandbox ${sandboxId.substring(0, 8)}...`);
-    const sandbox = await Sandbox.connect(sandboxId, { apiKey });
-    this.activeSandboxes.set(sandboxId, sandbox);
-    return sandbox;
+    const connectPromise = (async () => {
+      const connectStart = performance.now();
+      try {
+        this.addLog('INFO', `Connecting to E2B sandbox ${sandboxId.substring(0, 8)}...`);
+        const sandbox = await Sandbox.connect(sandboxId, { apiKey });
+        this.activeSandboxes.set(sandboxId, sandbox);
+        timingLogger.logTiming('E2B MicroVM', 'Sandbox.connect', Math.round(performance.now() - connectStart), { sandboxId });
+        return sandbox;
+      } finally {
+        this.inFlightConnections.delete(sandboxId);
+      }
+    })();
+
+    this.inFlightConnections.set(sandboxId, connectPromise);
+    return connectPromise;
   }
 
   private async resumeIfPaused(sandboxId: string, apiKey?: string): Promise<Sandbox> {
+    const inFlight = this.inFlightResumes.get(sandboxId);
+    if (inFlight) {
+      return inFlight;
+    }
+
     const key = apiKey || this.getApiKey();
-    const sandbox = await this.getSandboxInstance(sandboxId);
-    const isRunning = await sandbox.isRunning().catch(() => false);
-    if (!isRunning) {
-      this.addLog('INFO', `Resuming paused E2B sandbox ${sandboxId.substring(0, 8)}...`);
-      const resumed = await Sandbox.connect(sandboxId, { apiKey: key });
-      this.activeSandboxes.set(sandboxId, resumed);
-      this.addLog('READY', `E2B sandbox resumed with full workspace preserved.`);
-      return resumed;
-    }
-    return sandbox;
-  }
-
-  private deduplicateAttachedSessions(): void {
-    const sessionOwner = new Map<string, string>();
-    for (const [sess, sbId] of this.sessionToSandboxId.entries()) {
-      sessionOwner.set(sess, sbId);
-    }
-    for (const record of this.sandboxRecords.values()) {
-      for (const sess of Array.from(record.attachedSessionIds)) {
-        const ownerSbId = sessionOwner.get(sess);
-        if (ownerSbId && ownerSbId !== record.sandboxId) {
-          record.attachedSessionIds.delete(sess);
-          logger.info('[Sandbox Session Deduplication] Removed duplicate session attachment from prior sandbox', {
-            sessionId: sess,
-            removedFromSandboxId: record.sandboxId,
-            activeOwnerSandboxId: ownerSbId,
-          });
-        } else if (!ownerSbId) {
-          sessionOwner.set(sess, record.sandboxId);
-          this.sessionToSandboxId.set(sess, record.sandboxId);
+    const resumePromise = (async () => {
+      try {
+        const sandbox = await this.getSandboxInstance(sandboxId);
+        const isRunning = await sandbox.isRunning().catch(() => false);
+        if (!isRunning) {
+          this.addLog('INFO', `Resuming paused E2B sandbox ${sandboxId.substring(0, 8)}...`);
+          const resumed = await Sandbox.connect(sandboxId, { apiKey: key });
+          this.activeSandboxes.set(sandboxId, resumed);
+          this.addLog('READY', `E2B sandbox resumed with full workspace preserved.`);
+          return resumed;
         }
+        return sandbox;
+      } finally {
+        this.inFlightResumes.delete(sandboxId);
       }
-    }
-  }
+    })();
 
-  public attachSessionToSandbox(sessionId: string, sandboxId: string, userId?: string): boolean {
-    const cleanSession = this.sanitizeSessionId(sessionId);
-    const record = this.sandboxRecords.get(sandboxId);
-    if (!record) {
-      logger.warn('[Sandbox Attach] Sandbox not found for attachment', { sessionId: cleanSession, sandboxId, userId });
-      return false;
-    }
-    // Strict Multi-Tenant Isolation: User can only attach to their own sandboxes
-    if (userId && record.userId && record.userId !== userId) {
-      logger.warn('[Sandbox Attach] Unauthorized session attachment attempt: ownership mismatch', {
-        sessionId: cleanSession,
-        sandboxId,
-        requestedBy: userId,
-        ownedBy: record.userId,
-      });
-      return false;
-    }
-    const prevSandboxId = this.sessionToSandboxId.get(cleanSession);
-
-    // CRITICAL FIX: Detach cleanSession from ALL other sandboxes (both in memory and persistent storage)
-    // A single chat session can ONLY be attached to ONE sandbox at a time.
-    for (const [otherSbId, otherRecord] of this.sandboxRecords.entries()) {
-      if (otherSbId !== sandboxId) {
-        if (otherRecord.attachedSessionIds.has(cleanSession) || otherRecord.attachedSessionIds.has(sessionId)) {
-          otherRecord.attachedSessionIds.delete(cleanSession);
-          otherRecord.attachedSessionIds.delete(sessionId);
-          logger.info('[Sandbox Attach] Detached session from prior sandbox', {
-            sessionId: cleanSession,
-            priorSandboxId: otherSbId,
-            targetSandboxId: sandboxId,
-          });
-        }
-      }
-    }
-
-    this.sessionToSandboxId.set(cleanSession, sandboxId);
-    record.attachedSessionIds.add(cleanSession);
-    record.lastActiveAt = Date.now();
-    logger.info('[Sandbox Attach] Successfully attached session to sandbox', {
-      sessionId: cleanSession,
-      sandboxId,
-      priorSandboxId: prevSandboxId,
-      userId,
-      totalAttachedSessions: record.attachedSessionIds.size,
-    });
-    this.addLog(
-      'INFO',
-      `Session [${cleanSession}] attached to sandbox ${sandboxId.substring(0, 8)} (${record.attachedSessionIds.size} sessions sharing this workspace).`
-    );
-    this.saveRecordsToDisk();
-
-    // Ensure credentials for this user are synchronized to the sandbox microVM
-    const effectiveUid = record.userId || userId;
-    if (effectiveUid && effectiveUid !== 'default_user') {
-      this.getSandboxInstance(sandboxId)
-        .then((sb) => this.syncCredentialsToSandbox(sb, effectiveUid))
-        .catch((err) => logger.warn('[Sandbox Attach] Credential sync on attach failed', { error: String(err) }));
-    }
-
-    return true;
-  }
-
-  public detachSession(sessionId: string, userId?: string): boolean {
-    const cleanSession = this.sanitizeSessionId(sessionId);
-    let detached = false;
-
-    // If userId is provided, ensure we only detach if the target sandbox belongs to this user
-    const targetSbId = this.sessionToSandboxId.get(cleanSession) || this.sessionToSandboxId.get(sessionId);
-    if (targetSbId) {
-      const record = this.sandboxRecords.get(targetSbId);
-      if (record && userId && record.userId && record.userId !== userId && record.userId !== 'default_user') {
-        logger.warn('[Sandbox Detach] Unauthorized attempt to detach session owned by another user', {
-          sessionId: cleanSession,
-          targetSandboxId: targetSbId,
-          requestedBy: userId,
-          ownedBy: record.userId,
-        });
-        return false;
-      }
-    }
-
-    for (const [sess, sbId] of this.sessionToSandboxId.entries()) {
-      if (sess === cleanSession || sess === sessionId) {
-        const record = this.sandboxRecords.get(sbId);
-        if (userId && record?.userId && record.userId !== userId && record.userId !== 'default_user') {
-          continue;
-        }
-        this.sessionToSandboxId.delete(sess);
-        detached = true;
-      }
-    }
-
-    for (const record of this.sandboxRecords.values()) {
-      if (userId && record.userId && record.userId !== userId && record.userId !== 'default_user') {
-        continue;
-      }
-      if (
-        record.attachedSessionIds.has(cleanSession) ||
-        record.attachedSessionIds.has(sessionId)
-      ) {
-        record.attachedSessionIds.delete(cleanSession);
-        record.attachedSessionIds.delete(sessionId);
-        detached = true;
-      }
-    }
-
-    if (detached) {
-      this.saveRecordsToDisk();
-    }
-    return detached;
-  }
-
-  public clearAllAttachedSessions(userId?: string): void {
-    if (!userId || userId === 'default_user') {
-      // Global clear only when no specific user is provided (e.g. system wipe/maintenance)
-      this.sessionToSandboxId.clear();
-      for (const record of this.sandboxRecords.values()) {
-        record.attachedSessionIds.clear();
-      }
-    } else {
-      // Strictly scoped to sandboxes owned by this user
-      for (const record of this.sandboxRecords.values()) {
-        if (record.userId === userId) {
-          for (const sess of record.attachedSessionIds) {
-            this.sessionToSandboxId.delete(sess);
-          }
-          record.attachedSessionIds.clear();
-        }
-      }
-    }
-    this.saveRecordsToDisk();
-  }
-
-  public syncActiveSessions(activeSessionIds: string[], userId?: string): void {
-    const validCleanIds = new Set(
-      activeSessionIds
-        .map((s) => this.sanitizeSessionId(s))
-        .filter((s) => s && s !== 'default')
-    );
-
-    // If caller has no active session IDs (e.g. initial load), do NOT wipe existing attached sessions
-    if (validCleanIds.size === 0) {
-      return;
-    }
-
-    let changed = false;
-
-    // Scope session synchronization strictly to sandboxes owned by the caller
-    for (const record of this.sandboxRecords.values()) {
-      if (userId && record.userId && record.userId !== userId && record.userId !== 'default_user') {
-        continue;
-      }
-      for (const sess of Array.from(record.attachedSessionIds)) {
-        if (!validCleanIds.has(sess)) {
-          record.attachedSessionIds.delete(sess);
-          this.sessionToSandboxId.delete(sess);
-          changed = true;
-        }
-      }
-    }
-
-    if (changed) {
-      this.saveRecordsToDisk();
-    }
+    this.inFlightResumes.set(sandboxId, resumePromise);
+    return resumePromise;
   }
 
   public async getOrCreateSandbox(
     sessionId: string,
     userId?: string,
-    targetSandboxId?: string,
-    replaceOldest?: boolean
+    targetSandboxId?: string
   ): Promise<string> {
     // If targetSandboxId is an existing sandbox, resolve owner if userId was not explicitly passed
-    if ((!userId || userId === 'default_user') && targetSandboxId && targetSandboxId !== 'new') {
+    if (!userId && targetSandboxId && targetSandboxId !== 'new') {
       const targetRecord = this.sandboxRecords.get(targetSandboxId);
       if (targetRecord?.userId) {
         userId = targetRecord.userId;
       }
     }
 
-    // Also resolve from session if session is already attached to a known sandbox
-    if (!userId || userId === 'default_user') {
-      const cleanId = this.sanitizeSessionId(sessionId);
-      const existingSbId = this.sessionToSandboxId.get(cleanId);
-      if (existingSbId) {
-        const record = this.sandboxRecords.get(existingSbId);
-        if (record?.userId) {
-          userId = record.userId;
-        }
-      }
-    }
-
-    if (!userId || userId === 'default_user') {
+    if (!userId) {
       throw new Error('Authentication required: You must be signed in to create or access cloud sandboxes.');
     }
     const cleanId = this.sanitizeSessionId(sessionId);
@@ -478,82 +317,41 @@ export class E2BSandboxProvider implements ISandboxProvider {
       throw new Error('E2B_API_KEY is not configured in environment.');
     }
 
-    // 1. If explicit existing sandboxId requested, attach session directly (verifying ownership)
+    // 1. If explicit existing sandboxId requested, verify ownership and resume
     if (targetSandboxId && targetSandboxId !== 'new') {
       const targetRecord = this.sandboxRecords.get(targetSandboxId);
       if (targetRecord) {
         if (targetRecord.userId && targetRecord.userId !== userId) {
           throw new Error('Access denied: You do not own this sandbox.');
         }
-        this.attachSessionToSandbox(cleanId, targetSandboxId);
         await this.resumeIfPaused(targetSandboxId, apiKey);
         return targetSandboxId;
       }
     }
 
-    // 2. If this session is already attached to a sandbox, reuse it (only if not explicitly requesting a new one)
-    if (targetSandboxId !== 'new') {
-      let existingSandboxId = this.sessionToSandboxId.get(cleanId);
-      if (!existingSandboxId) {
-        existingSandboxId = this.getActiveSandboxId(cleanId, userId) || undefined;
-        if (existingSandboxId) {
-          this.sessionToSandboxId.set(cleanId, existingSandboxId);
-        }
-      }
-      if (existingSandboxId) {
-        const record = this.sandboxRecords.get(existingSandboxId);
-        if (record) {
-          if (record.userId && record.userId !== userId) {
-            this.sessionToSandboxId.delete(cleanId);
-          } else {
-            record.lastActiveAt = Date.now();
-            try {
-              await this.resumeIfPaused(existingSandboxId, apiKey);
-              return existingSandboxId;
-            } catch (err) {
-              logger.warn('Failed to reconnect to existing E2B sandbox, will allocate another', {
-                sessionId: cleanId,
-                sandboxId: existingSandboxId,
-                error: String(err),
-              });
-              this.activeSandboxes.delete(existingSandboxId);
-              this.sessionToSandboxId.delete(cleanId);
-              this.sandboxRecords.delete(existingSandboxId);
-            }
-          }
-        }
-      }
-    }
-
-    // Detach session from prior sandbox if explicitly launching a new isolated microVM
-    if (targetSandboxId === 'new') {
-      this.detachSession(cleanId);
-    }
-
-    // 3. User sandboxes lookup - strictly for THIS user
+    // 2. User sandboxes lookup - strictly for THIS user
     const userSandboxes = Array.from(this.sandboxRecords.values())
       .filter((r) => r.userId === userId)
       .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 
-    // 4. If targetSandboxId is NOT explicitly 'new', explicit attachment is required
+    // 3. If targetSandboxId is NOT explicitly 'new', use existing active sandbox if available
     if (targetSandboxId !== 'new') {
+      if (userSandboxes.length > 0) {
+        const primary = userSandboxes[userSandboxes.length - 1];
+        await this.resumeIfPaused(primary.sandboxId, apiKey);
+        return primary.sandboxId;
+      }
       throw new Error(
-        'No cloud sandbox is attached to this session. Please select an active sandbox from the top bar before executing.'
+        'No cloud sandbox is available for this session. Please select or create an active sandbox from the top bar before executing.'
       );
     }
 
-    // 5. Enforce Per-User Maximum Sandbox Quota when allocating a brand new sandbox
+    // 4. Enforce Per-User Maximum Sandbox Quota when allocating a brand new sandbox
     const maxSandboxes = envConfig.MAX_SANDBOXES_PER_USER ?? 3;
     if (userSandboxes.length >= maxSandboxes) {
-      if (replaceOldest && userSandboxes.length > 0) {
-        const oldest = userSandboxes[0];
-        logger.info('[Sandbox] Replacing oldest sandbox to stay within quota', { oldestSandboxId: oldest.sandboxId, userId });
-        await this.destroySandbox(oldest.sandboxId);
-      } else {
-        throw new Error(
-          `Sandbox quota limit reached (${maxSandboxes}/${maxSandboxes} full). Please delete an existing sandbox using the trash icon to free a quota slot before creating a new one.`
-        );
-      }
+      throw new Error(
+        `Sandbox quota limit reached (${maxSandboxes}/${maxSandboxes} full). Please delete an existing sandbox using the trash icon to free a quota slot before creating a new one.`
+      );
     }
 
     // 5. Launch a new dedicated E2B cloud microVM with auto-pause lifecycle
@@ -561,18 +359,37 @@ export class E2BSandboxProvider implements ISandboxProvider {
       this.addLog('EXEC', `Spinning up dedicated E2B Firecracker microVM for session [${cleanId}]...`);
       const start = Date.now();
 
-      const sandbox = await Sandbox.create({
+      const template = envConfig.E2B_TEMPLATE || process.env.E2B_TEMPLATE;
+      const sandboxOpts = {
         apiKey,
         timeoutMs: 15 * 60 * 1000, // 15 minutes of idle before auto-pause
+        metadata: { userId }, // Explicit multi-tenant ownership tag in E2B Cloud
         lifecycle: {
-          onTimeout: 'pause', // Preserves RAM and disk state indefinitely
+          onTimeout: 'pause' as const, // Preserves RAM and disk state indefinitely
           autoResume: true,
         },
-      });
+      };
+
+      let sandbox: Sandbox;
+      if (template && template !== 'base') {
+        try {
+          sandbox = await Sandbox.create(template, sandboxOpts);
+          logger.info(`[Sandbox Provisioning] Launched microVM from custom E2B template '${template}'`, { sandboxId: sandbox.sandboxId });
+        } catch (templateErr) {
+          logger.warn(`[Sandbox Provisioning] Custom template '${template}' launch failed, falling back to base template: ${String(templateErr)}`);
+          sandbox = await Sandbox.create(sandboxOpts);
+        }
+      } else {
+        sandbox = await Sandbox.create(sandboxOpts);
+      }
 
       const vmBootDuration = Date.now() - start;
       this.lastPingMs = vmBootDuration;
       const sbId = sandbox.sandboxId;
+      timingLogger.logTiming('E2B MicroVM', `Sandbox.create (${template || 'default'})`, vmBootDuration, {
+        sandboxId: sbId,
+        userId,
+      });
       logger.info(`[Sandbox Provisioning] E2B microVM instance created in ${vmBootDuration}ms`, { sandboxId: sbId });
 
       this.activeSandboxes.set(sbId, sandbox);
@@ -580,7 +397,6 @@ export class E2BSandboxProvider implements ISandboxProvider {
         sandboxId: sbId,
         name: `Sandbox (${sbId.substring(0, 6)})`,
         userId: userId,
-        attachedSessionIds: new Set(), // Attach only once provisioning completes
         createdAt: Date.now(),
         lastActiveAt: Date.now(),
         lastUpdateCheckAt: Date.now(),
@@ -594,21 +410,18 @@ export class E2BSandboxProvider implements ISandboxProvider {
       await sandbox.commands.run(`mkdir -p ${this.workspaceRoot}`);
 
       // Initialize dual-user permission boundary and secure credentials
+      const secStart = performance.now();
       await this.ensureSecurityBoundaryAndCredentials(sandbox, userId);
+      timingLogger.logTiming('E2B MicroVM', 'ensureSecurityBoundaryAndCredentials', Math.round(performance.now() - secStart), {
+        sandboxId: sbId,
+        userId,
+      });
 
-      // Finalize provisioning: attach session and clear provisioning state
+      // Finalize provisioning: clear provisioning state
       const rec = this.sandboxRecords.get(sbId);
       if (rec) {
         rec.isProvisioning = false;
-        // Detach cleanId from any other sandbox to enforce single active sandbox invariant
-        for (const [otherId, otherRecord] of this.sandboxRecords.entries()) {
-          if (otherId !== sbId) {
-            otherRecord.attachedSessionIds.delete(cleanId);
-          }
-        }
-        rec.attachedSessionIds.add(cleanId);
       }
-      this.sessionToSandboxId.set(cleanId, sbId);
       this.saveRecordsToDisk();
 
       const totalProvisionMs = Date.now() - start;
@@ -621,6 +434,48 @@ export class E2BSandboxProvider implements ISandboxProvider {
       logger.error('Failed to create E2B sandbox', { error: msg });
       throw new Error(`E2B sandbox creation failed: ${msg}`);
     }
+  }
+
+  /**
+   * Phase 4 Sandbox Guard & Auto-Reactivation:
+   * Verifies sandbox ownership, reloads from Firestore/E2B cloud if needed,
+   * resumes paused or detached microVMs seamlessly, and attaches the active session.
+   */
+  public async verifyAndReactivateSandbox(
+    sandboxId: string,
+    userId: string,
+    sessionId?: string
+  ): Promise<{ sandboxId: string; name: string }> {
+    if (!sandboxId) {
+      throw new Error('Sandbox ID is required.');
+    }
+
+    // 1. Sync records if this sandbox is not currently in memory
+    if (!this.sandboxRecords.has(sandboxId)) {
+      await this.syncWithCloud(userId);
+    }
+
+    const record = this.sandboxRecords.get(sandboxId);
+    if (!record || (record.userId && record.userId !== userId)) {
+      throw new Error('Access denied: You do not own this sandbox or sandbox was deleted.');
+    }
+
+    // 2. Reactivate / connect if idle or paused
+    const apiKey = this.getApiKey();
+    if (apiKey) {
+      try {
+        await this.resumeIfPaused(sandboxId, apiKey);
+      } catch (resumeErr) {
+        logger.warn('Failed to resume sandbox, reconnecting via Sandbox.connect', {
+          sandboxId,
+          error: String(resumeErr),
+        });
+        await this.getSandboxInstance(sandboxId);
+      }
+    }
+
+    record.lastActiveAt = Date.now();
+    return { sandboxId: record.sandboxId, name: record.name };
   }
 
   /**
@@ -686,185 +541,225 @@ export class E2BSandboxProvider implements ISandboxProvider {
    * 2. 'user' (developer): owns /home/user/workspace (rw), but CANNOT read /home/agent-runner.
    */
   public async syncCredentialsToSandbox(sandbox: Sandbox, userId?: string): Promise<void> {
-    const syncStart = Date.now();
-    const homedir = os.homedir();
-    try {
-      const safeUid = userId && userId !== 'default' && userId !== 'default_user'
-        ? userId.replace(/[^a-zA-Z0-9_-]/g, '_')
-        : undefined;
+    const syncKey = `${sandbox.sandboxId}:${userId || 'default'}`;
+    const inFlight = this.inFlightCredentialSyncs.get(syncKey);
+    if (inFlight) {
+      return inFlight;
+    }
 
-      const userProfileDir = safeUid
-        ? path.join(homedir, '.agent-user-profiles', safeUid)
-        : homedir;
+    const syncPromise = (async () => {
+      const syncStart = Date.now();
+      const homedir = os.homedir();
+      try {
+        const safeUid = userId
+          ? userId.replace(/[^a-zA-Z0-9_-]/g, '_')
+          : undefined;
 
-      let expectedUserEmail: string | undefined;
-      if (safeUid) {
-        const userRec = cliAuthService.getUserCliRecord(userId!);
-        expectedUserEmail = userRec?.email || userRec?.antigravity?.email || userRec?.gemini?.email;
-      }
+        const userProfileDir = safeUid
+          ? path.join(homedir, '.agent-user-profiles', safeUid)
+          : undefined;
 
-      const filesToSync: Array<{ targetPath: string; content: string; mode?: string }> = [];
-      const cleanupCommands: string[] = [];
+        let expectedUserEmail: string | undefined;
+        if (safeUid) {
+          const userRec = cliAuthService.getUserCliRecord(userId!);
+          expectedUserEmail = userRec?.email || userRec?.antigravity?.email || userRec?.gemini?.email || userRec?.codex?.email || userRec?.claude?.email;
+        }
 
-      // 1. Antigravity credentials resolution (per-user isolated priority)
-      const userAgyTokenPaths = safeUid ? [
-        path.join(userProfileDir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
-        path.join(userProfileDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
-        path.join(userProfileDir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
-        path.join(userProfileDir, '.gemini', 'oauth_creds.json'),
-      ] : [];
+        const filesToSync: Array<{ targetPath: string; content: string; mode?: string }> = [];
+        const cleanupCommands: string[] = [];
 
-      let agyTokenContent = '';
-      for (const tp of userAgyTokenPaths) {
-        if (fs.existsSync(tp)) {
-          try {
-            const st = fs.statSync(tp);
-            if (st.size > 20) {
-              const text = fs.readFileSync(tp, 'utf8');
-              if (text.includes('token') || text.includes('Bearer') || text.includes('access') || text.includes('refresh')) {
-                const tokenEmail = cliAuthService.extractEmailFromToken(text);
-                if (expectedUserEmail && tokenEmail && tokenEmail.toLowerCase() !== expectedUserEmail.toLowerCase()) {
-                  logger.warn('[Sandbox Sync] Skipping mismatched token in user profile to prevent credential leak', {
-                    expectedUserEmail,
-                    tokenEmail,
-                    path: tp,
-                  });
-                  continue;
+        // 1. Antigravity credentials resolution (per-user isolated priority)
+        const userAgyTokenPaths = userProfileDir ? [
+          path.join(userProfileDir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
+          path.join(userProfileDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+          path.join(userProfileDir, '.gemini', 'antigravity-cli', 'cache', 'antigravity-oauth-token'),
+          path.join(userProfileDir, '.gemini', 'oauth_creds.json'),
+        ] : [];
+
+        let agyTokenContent = '';
+        for (const tp of userAgyTokenPaths) {
+          if (fs.existsSync(tp)) {
+            try {
+              const st = fs.statSync(tp);
+              if (st.size > 20) {
+                const text = fs.readFileSync(tp, 'utf8');
+                if (text.includes('token') || text.includes('Bearer') || text.includes('access') || text.includes('refresh')) {
+                  const tokenEmail = cliAuthService.extractEmailFromToken(text);
+                  if (expectedUserEmail && tokenEmail && tokenEmail.toLowerCase() !== expectedUserEmail.toLowerCase()) {
+                    logger.warn('[Sandbox Sync] Skipping mismatched token in user profile to prevent credential leak', {
+                      expectedUserEmail,
+                      tokenEmail,
+                      path: tp,
+                    });
+                    continue;
+                  }
+                  agyTokenContent = text;
+                  break;
                 }
-                agyTokenContent = text;
-                break;
               }
-            }
-          } catch {}
+            } catch {}
+          }
         }
-      }
 
-      // If not yet in user profile, find token matching expectedUserEmail across stashed & host tokens
-      if (!agyTokenContent && expectedUserEmail) {
-        agyTokenContent = cliAuthService.findValidAntigravityTokenForEmail(expectedUserEmail, userId) || '';
-        if (agyTokenContent && userId && userId !== 'default' && userId !== 'default_user') {
-          cliAuthService.persistUserAntigravityProfile(userId, expectedUserEmail);
+        // If not yet in user profile, find token matching expectedUserEmail across stashed & host tokens
+        if (!agyTokenContent && expectedUserEmail) {
+          agyTokenContent = cliAuthService.findValidAntigravityTokenForEmail(expectedUserEmail, userId) || '';
+          if (agyTokenContent && userId) {
+            cliAuthService.persistUserAntigravityProfile(userId, expectedUserEmail);
+          }
         }
-      }
 
-      // Queue Antigravity tokens
-      if (agyTokenContent) {
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-keyring-unavailable-oauth-token', content: agyTokenContent });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/antigravity-oauth-token', content: agyTokenContent });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-oauth-token', content: agyTokenContent });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/cache/jetski-keyring-unavailable-oauth-token', content: agyTokenContent });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/jetski-oauth-token', content: agyTokenContent });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/oauth_creds.json', content: agyTokenContent });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/oauth_creds.json', content: agyTokenContent });
-      } else {
-        // Multi-tenant security guarantee: If no valid token for this user, purge any old token in microVM
-        cleanupCommands.push('sudo rm -f /home/agent-runner/.gemini/antigravity-cli/*token* /home/agent-runner/.gemini/antigravity-cli/cache/*token* /home/agent-runner/.gemini/oauth_creds.json /home/agent-runner/.gemini/antigravity-cli/oauth_creds.json');
-      }
+        // Queue Antigravity tokens
+        if (agyTokenContent) {
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-keyring-unavailable-oauth-token', content: agyTokenContent });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/antigravity-oauth-token', content: agyTokenContent });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/cache/antigravity-oauth-token', content: agyTokenContent });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/cache/jetski-keyring-unavailable-oauth-token', content: agyTokenContent });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/jetski-oauth-token', content: agyTokenContent });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/oauth_creds.json', content: agyTokenContent });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/oauth_creds.json', content: agyTokenContent });
+        } else {
+          // Multi-tenant security guarantee: If no valid token for this user, purge any old token in microVM
+          cleanupCommands.push('sudo rm -f /home/agent-runner/.gemini/antigravity-cli/*token* /home/agent-runner/.gemini/antigravity-cli/cache/*token* /home/agent-runner/.gemini/oauth_creds.json /home/agent-runner/.gemini/antigravity-cli/oauth_creds.json');
+        }
 
-      // Seed google_accounts.json and user_info.json scoped to the user email
-      const targetEmail = expectedUserEmail || (agyTokenContent ? cliAuthService.extractEmailFromToken(agyTokenContent) : null);
-      if (targetEmail) {
-        const accountsContent = JSON.stringify({ active: targetEmail, accounts: [{ email: targetEmail }] }, null, 2);
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/google_accounts.json', content: accountsContent });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/google_accounts.json', content: accountsContent });
-        const userInfoContent = JSON.stringify({ email: targetEmail }, null, 2);
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/user_info.json', content: userInfoContent });
-      }
+        // Seed google_accounts.json and user_info.json scoped to the user email
+        const targetEmail = expectedUserEmail || (agyTokenContent ? cliAuthService.extractEmailFromToken(agyTokenContent) : null);
+        if (targetEmail) {
+          const accountsContent = JSON.stringify({ active: targetEmail, accounts: [{ email: targetEmail }] }, null, 2);
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/google_accounts.json', content: accountsContent });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/google_accounts.json', content: accountsContent });
+          const userInfoContent = JSON.stringify({ email: targetEmail }, null, 2);
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/user_info.json', content: userInfoContent });
+        } else {
+          cleanupCommands.push('sudo rm -f /home/agent-runner/.gemini/google_accounts.json /home/agent-runner/.gemini/antigravity-cli/google_accounts.json /home/agent-runner/.gemini/user_info.json');
+        }
 
-      // Seed settings.json: if Gemini API key is configured, use gemini-api-key; else use oauth-personal
-      const activeGeminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-      if (activeGeminiKey) {
-        const agySettings = JSON.stringify({
-          modelProvider: 'gemini',
-          security: {
-            auth: {
-              selectedType: 'gemini-api-key',
+        // Seed settings.json: if Gemini API key is configured, use gemini-api-key; else use oauth-personal
+        const activeGeminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+        if (activeGeminiKey) {
+          const agySettings = JSON.stringify({
+            modelProvider: 'gemini',
+            security: {
+              auth: {
+                selectedType: 'gemini-api-key',
+              },
             },
-          },
-        }, null, 2);
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/settings.json', content: agySettings });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/settings.json', content: agySettings });
-      } else {
-        const agyOAuthSettings = JSON.stringify({
-          security: {
-            auth: {
-              selectedType: 'oauth-personal',
+          }, null, 2);
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/settings.json', content: agySettings });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/settings.json', content: agySettings });
+        } else {
+          const agyOAuthSettings = JSON.stringify({
+            security: {
+              auth: {
+                selectedType: 'oauth-personal',
+              },
             },
-          },
-        }, null, 2);
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/settings.json', content: agyOAuthSettings });
-        filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/settings.json', content: agyOAuthSettings });
-      }
+          }, null, 2);
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/settings.json', content: agyOAuthSettings });
+          filesToSync.push({ targetPath: '/home/agent-runner/.gemini/antigravity-cli/settings.json', content: agyOAuthSettings });
+        }
 
-      // Seed Claude credentials securely to /home/agent-runner
-      const claudeCredsPath = path.join(userProfileDir, '.claude', '.credentials.json');
-      const hostClaudeCreds = fs.existsSync(claudeCredsPath)
-        ? claudeCredsPath
-        : path.join(homedir, '.claude', '.credentials.json');
+        // Seed Claude credentials securely to /home/agent-runner (strictly isolated per-user, never leak host credentials)
+        let claudeContent = '';
+        if (userProfileDir) {
+          const userClaudeCredsPath = path.join(userProfileDir, '.claude', '.credentials.json');
+          if (fs.existsSync(userClaudeCredsPath)) {
+            try {
+              claudeContent = fs.readFileSync(userClaudeCredsPath, 'utf8');
+            } catch {}
+          }
+        }
 
-      if (fs.existsSync(hostClaudeCreds)) {
-        filesToSync.push({ targetPath: '/home/agent-runner/.claude/.credentials.json', content: fs.readFileSync(hostClaudeCreds, 'utf8') });
-      }
+        if (claudeContent) {
+          filesToSync.push({ targetPath: '/home/agent-runner/.claude/.credentials.json', content: claudeContent });
+        } else {
+          // Multi-tenant security guarantee: purge any unlinked or stale Claude credentials in microVM
+          cleanupCommands.push('sudo rm -f /home/agent-runner/.claude/.credentials.json');
+        }
 
-      // Seed Codex credentials securely to /home/agent-runner
-      const candidateCodexPaths = [
-        safeUid ? path.join(homedir, '.agent-user-profiles', safeUid, '.codex', 'auth.json') : '',
-        path.join(userProfileDir, '.codex', 'auth.json'),
-        path.join(homedir, '.codex', 'auth.json'),
-      ];
-      let codexContent = '';
-      for (const p of candidateCodexPaths) {
-        if (p && fs.existsSync(p)) {
-          try {
-            const raw = fs.readFileSync(p, 'utf8');
-            const parsed = JSON.parse(raw);
-            let email = parsed.email;
-            if (!email && parsed.tokens?.id_token) {
-              const parts = parsed.tokens.id_token.split('.');
-              if (parts.length > 1) {
-                const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-                if (payload.email) email = payload.email;
+        // Seed Codex credentials securely to /home/agent-runner (strictly isolated per-user, never leak host credentials)
+        if (expectedUserEmail && userId) {
+          cliAuthService.persistUserCodexProfile(userId, expectedUserEmail);
+        }
+
+        const candidateCodexPaths = userProfileDir
+          ? [path.join(userProfileDir, '.codex', 'auth.json')]
+          : [];
+        let codexContent = '';
+        for (const p of candidateCodexPaths) {
+          if (p && fs.existsSync(p)) {
+            try {
+              const raw = fs.readFileSync(p, 'utf8');
+              const email = cliAuthService.extractEmailFromCodexAuth(raw);
+              if (expectedUserEmail && email && email.toLowerCase() !== expectedUserEmail.toLowerCase()) {
+                logger.warn('[Sandbox Sync] Skipping mismatched Codex credentials to prevent leak', {
+                  expectedUserEmail,
+                  tokenEmail: email,
+                  path: p,
+                });
+                continue;
               }
-            }
-            if (expectedUserEmail && email && email.toLowerCase() !== expectedUserEmail.toLowerCase()) {
-              logger.warn('[Sandbox Sync] Skipping mismatched Codex credentials to prevent leak', {
-                expectedUserEmail,
-                tokenEmail: email,
-                path: p,
-              });
-              continue;
-            }
-            codexContent = raw;
-            break;
-          } catch {}
+              codexContent = raw;
+              break;
+            } catch {}
+          }
         }
+
+        // If not yet in user profile, find valid Codex auth matching expectedUserEmail across candidates
+        if (!codexContent && expectedUserEmail && userId) {
+          const validCodex = cliAuthService.findValidCodexAuthForEmail(expectedUserEmail, userId);
+          if (validCodex) {
+            codexContent = validCodex.authContent;
+            cliAuthService.persistUserCodexProfile(userId, expectedUserEmail);
+          }
+        }
+
+        if (codexContent) {
+          filesToSync.push({ targetPath: '/home/agent-runner/.codex/auth.json', content: codexContent });
+        } else {
+          cleanupCommands.push('sudo rm -f /home/agent-runner/.codex/auth.json');
+        }
+
+        // Content hash check: Avoid re-writing identical credentials to microVM if unchanged
+        const contentHash = filesToSync.map((f) => `${f.targetPath}:${f.content}`).join('|') + '||' + cleanupCommands.join(';');
+        if (this.lastSyncedCredentialsHash.get(syncKey) === contentHash) {
+          return; // Credentials have not changed, skip redundant write & logging
+        }
+        this.lastSyncedCredentialsHash.set(syncKey, contentHash);
+
+        // Execute batched write in one fast atomic operation
+        await this.writeAgentRunnerFilesBatch(sandbox, filesToSync, cleanupCommands);
+
+        const syncDuration = Date.now() - syncStart;
+        timingLogger.logTiming('E2B MicroVM', 'syncCredentialsToSandbox', syncDuration, {
+          sandboxId: sandbox.sandboxId,
+          userId,
+          fileCount: filesToSync.length,
+        });
+        logger.info(`[Sandbox Credential Sync] Synchronized credentials to sandbox microVM in ${syncDuration}ms`, {
+          sandboxId: sandbox.sandboxId,
+          userId,
+          expectedUserEmail,
+          hasAgyToken: Boolean(agyTokenContent),
+          hasCodexCreds: Boolean(codexContent),
+          fileCount: filesToSync.length,
+        });
+      } catch (err) {
+        logger.warn('Failed to sync credentials into sandbox microVM', { error: String(err) });
       }
+    })();
 
-      if (codexContent) {
-        filesToSync.push({ targetPath: '/home/agent-runner/.codex/auth.json', content: codexContent });
-      } else {
-        cleanupCommands.push('sudo rm -f /home/agent-runner/.codex/auth.json');
-      }
-
-      // Execute batched write in one fast atomic operation
-      await this.writeAgentRunnerFilesBatch(sandbox, filesToSync, cleanupCommands);
-
-      const syncDuration = Date.now() - syncStart;
-      logger.info(`[Sandbox Credential Sync] Synchronized credentials to sandbox microVM in ${syncDuration}ms`, {
-        sandboxId: sandbox.sandboxId,
-        userId,
-        expectedUserEmail,
-        hasAgyToken: Boolean(agyTokenContent),
-        hasCodexCreds: Boolean(codexContent),
-        fileCount: filesToSync.length,
-      });
-    } catch (err) {
-      logger.warn('Failed to sync credentials into sandbox microVM', { error: String(err) });
+    this.inFlightCredentialSyncs.set(syncKey, syncPromise);
+    try {
+      await syncPromise;
+    } finally {
+      this.inFlightCredentialSyncs.delete(syncKey);
     }
   }
 
   public async syncCredentialsToUserSandboxes(userId?: string): Promise<void> {
-    if (!userId || userId === 'default_user') return;
+    if (!userId) return;
     const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const targets: Sandbox[] = [];
     for (const [sbId, rec] of this.sandboxRecords.entries()) {
@@ -882,7 +777,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
    * Purges credentials for a specific CLI (or all CLIs) from all running microVMs belonging to a user.
    */
   public async purgeUserCredentialsFromSandboxes(userId?: string, cli?: 'antigravity' | 'gemini' | 'claude' | 'codex'): Promise<void> {
-    if (!userId || userId === 'default_user') return;
+    if (!userId) return;
     const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const targets: Sandbox[] = [];
     for (const [sbId, rec] of this.sandboxRecords.entries()) {
@@ -972,61 +867,29 @@ export class E2BSandboxProvider implements ISandboxProvider {
         `;
         await sandbox.commands.run(setupScript).catch(() => {});
 
-        // Check installed toolchains in parallel to minimize network latency
+        // Verify pre-baked toolchains in custom E2B template (Zero runtime downloads)
         const [checkAgy, checkCodex, checkClaude] = await Promise.all([
           sandbox.commands.run('which agy || test -f /usr/local/bin/agy').catch(() => null),
           sandbox.commands.run('which codex || test -f /usr/local/bin/codex').catch(() => null),
           sandbox.commands.run('which claude || test -f /usr/local/bin/claude').catch(() => null),
         ]);
 
-        const installTasks: Promise<void>[] = [];
-
-        if (checkAgy?.exitCode !== 0) {
-          installTasks.push((async () => {
-            this.addLog('INFO', 'Provisioning agy CLI binary into cloud sandbox microVM via release download...');
-            const installAgyCmd = `curl -sSL "https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz 2>/dev/null || curl -sSL "https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.6/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz && sudo tar -xzf /tmp/agy.tar.gz -C /usr/local/bin && sudo ln -sf /usr/local/bin/antigravity /usr/local/bin/agy && sudo chmod +x /usr/local/bin/antigravity /usr/local/bin/agy && rm -f /tmp/agy.tar.gz`;
-            const installRes = await sandbox.commands.run(installAgyCmd, { timeoutMs: 60000 }).catch(() => null);
-            if (installRes?.exitCode === 0) {
-              this.addLog('READY', 'agy CLI binary successfully installed in /usr/local/bin/agy');
-            } else {
-              logger.warn('Failed to install agy CLI in microVM via release download', { exitCode: installRes?.exitCode });
-            }
-          })());
+        if (checkAgy?.exitCode === 0) {
+          this.addLog('READY', 'agy CLI verified ready in sandbox template');
+        } else {
+          logger.warn('[Sandbox Provisioning] agy CLI not found in template. Pre-bake it into custom E2B template.');
         }
 
-        if (checkCodex?.exitCode !== 0) {
-          installTasks.push((async () => {
-            this.addLog('INFO', 'Provisioning codex CLI binary into cloud sandbox microVM via npm...');
-            const npmRes = await sandbox.commands
-              .run('sudo npm install -g @openai/codex@latest', { timeoutMs: 120000 })
-              .catch(() => null);
-            if (npmRes?.exitCode === 0) {
-              this.addLog('READY', 'codex CLI binary successfully installed in /usr/local/bin/codex');
-            } else {
-              const currentCodex = path.join(homedir, '.codex', 'packages', 'app-server-daemon', 'current', 'bin', 'codex');
-              const localCodex = path.join(homedir, '.local', 'bin', 'codex');
-              const hostCodex = fs.existsSync(currentCodex) ? currentCodex : fs.existsSync(localCodex) ? localCodex : null;
-              if (hostCodex && fs.existsSync(hostCodex)) {
-                const rawBuf = fs.readFileSync(hostCodex);
-                const gzipped = zlib.gzipSync(rawBuf);
-                await sandbox.files.write('/tmp/codex.gz', gzipped.buffer as ArrayBuffer).catch(() => {});
-                await sandbox.commands.run('gunzip -f /tmp/codex.gz && sudo mv /tmp/codex /usr/local/bin/codex && sudo chmod +x /usr/local/bin/codex').catch(() => {});
-                this.addLog('READY', 'codex CLI binary successfully installed from host fallback');
-              }
-            }
-          })());
+        if (checkCodex?.exitCode === 0) {
+          this.addLog('READY', 'codex CLI verified ready in sandbox template');
+        } else {
+          logger.warn('[Sandbox Provisioning] codex CLI not found in template. Pre-bake it into custom E2B template.');
         }
 
-        if (checkClaude?.exitCode !== 0) {
-          installTasks.push((async () => {
-            this.addLog('INFO', 'Provisioning claude CLI binary into cloud sandbox microVM via npm...');
-            await sandbox.commands.run('sudo npm install -g @anthropic-ai/claude-code@latest', { timeoutMs: 120000 }).catch(() => {});
-            this.addLog('READY', 'claude CLI binary successfully installed in /usr/local/bin/claude');
-          })());
-        }
-
-        if (installTasks.length > 0) {
-          await Promise.all(installTasks);
+        if (checkClaude?.exitCode === 0) {
+          this.addLog('READY', 'claude CLI verified ready in sandbox template');
+        } else {
+          logger.warn('[Sandbox Provisioning] claude CLI not found in template. Pre-bake it into custom E2B template.');
         }
 
         // Ensure /workspace is symlinked to /home/user/workspace for path compatibility (prevent duplicate circular symlink)
@@ -1485,6 +1348,11 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
 
       const durationMs = Date.now() - start;
       cliUsage.duration_seconds = Math.round(durationMs / 1000);
+      timingLogger.logTiming('E2B Agent CLI', `${req.cli.toUpperCase()} prompt execution`, durationMs, {
+        sandboxId,
+        sessionId: req.sessionId,
+        userId: req.userId,
+      });
       this.addLog('READY', `[Sandbox-Native] ${req.cli.toUpperCase()} finished in microVM (${durationMs}ms)`);
 
       // Ensure all files created or modified by agent-runner are readable and traversable by user
@@ -1547,6 +1415,10 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       const durationMs = Date.now() - start;
       this.lastPingMs = Math.min(this.lastPingMs, durationMs);
       this.addLog('STREAM', `E2B command completed in ${durationMs}ms (exit code ${result.exitCode})`);
+      timingLogger.logTiming('E2B Exec', command.length > 80 ? command.substring(0, 80) + '...' : command, durationMs, {
+        sandboxId,
+        exitCode: result.exitCode,
+      });
 
       return {
         success: result.exitCode === 0,
@@ -1633,22 +1505,27 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       try {
         const sandbox = await this.getSandboxInstance(sandboxId);
 
-        // Update CLI toolchains inside microVM (run with 90s safety timeout)
-        const updateCmd = `
-          sudo npm install -g @openai/codex@latest @anthropic-ai/claude-code@latest 2>/dev/null || sudo npm update -g @openai/codex @anthropic-ai/claude-code 2>/dev/null || true;
-          if command -v agy >/dev/null 2>&1 || test -f /usr/local/bin/agy; then
-            agy update 2>/dev/null || (curl -sSL "https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz 2>/dev/null && sudo tar -xzf /tmp/agy.tar.gz -C /usr/local/bin 2>/dev/null && sudo ln -sf /usr/local/bin/antigravity /usr/local/bin/agy 2>/dev/null && sudo chmod +x /usr/local/bin/antigravity /usr/local/bin/agy 2>/dev/null && rm -f /tmp/agy.tar.gz 2>/dev/null) || true;
-          fi;
+        // Health check CLI toolchains inside microVM (inspect versions without downloading)
+        const checkCmd = `
+          echo "=== Sandbox Toolchain Status ===";
+          command -v agy >/dev/null 2>&1 && agy --version 2>/dev/null || echo "agy: not found";
+          command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null || echo "codex: not found";
+          command -v claude >/dev/null 2>&1 && claude --version 2>/dev/null || echo "claude: not found";
         `;
 
-        await sandbox.commands.run(updateCmd, { timeoutMs: 90000 }).catch((err) => {
-          logger.warn('Sandbox toolchain update command encountered warning', { sandboxId, error: String(err) });
+        const checkRes = await sandbox.commands.run(checkCmd, { timeoutMs: 15000 }).catch((err) => {
+          logger.warn('Sandbox toolchain check encountered warning', { sandboxId, error: String(err) });
+          return null;
         });
+
+        if (checkRes?.stdout) {
+          logger.info(`[Maintenance] Sandbox ${sandboxId.substring(0, 6)} toolchains verified: ${checkRes.stdout.trim().replace(/\n/g, ', ')}`);
+        }
 
         if (record) {
           record.lastUpdateCheckAt = Date.now();
         }
-        this.addLog('READY', `[Maintenance] Toolchains in sandbox ${sandboxId.substring(0, 6)} updated to latest versions`);
+        this.addLog('READY', `[Maintenance] Toolchains in sandbox ${sandboxId.substring(0, 6)} verified active`);
         this.saveRecordsToDisk();
       } catch (err) {
         logger.warn('Failed to complete maintenance update for sandbox', { sandboxId, error: String(err) });
@@ -1752,34 +1629,26 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     return this.workspaceRoot;
   }
 
-  public getActiveSandboxId(sessionId: string, userId?: string): string | null {
-    if (!userId || userId === 'default_user') {
+  public getActiveSandboxId(sandboxId?: string, userId?: string): string | null {
+    if (!userId) {
       return null;
     }
-    const cleanId = this.sanitizeSessionId(sessionId);
-    if (this.sandboxRecords.has(cleanId)) {
+    if (sandboxId) {
+      const cleanId = this.sanitizeSessionId(sandboxId);
       const rec = this.sandboxRecords.get(cleanId);
       if (rec && rec.userId === userId) {
         return cleanId;
       }
     }
-    const directId = this.sessionToSandboxId.get(cleanId);
-    if (directId && this.sandboxRecords.has(directId)) {
-      const rec = this.sandboxRecords.get(directId);
-      if (rec && rec.userId === userId) {
-        return directId;
-      }
-    }
-    for (const record of this.sandboxRecords.values()) {
-      if (record.userId === userId && record.attachedSessionIds.has(cleanId)) {
-        return record.sandboxId;
-      }
-    }
-    return null;
+    // Fall back to most recently active sandbox for this user
+    const userSandboxes = Array.from(this.sandboxRecords.values())
+      .filter((r) => r.userId === userId)
+      .sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
+    return userSandboxes[0]?.sandboxId || null;
   }
 
-  public hasActiveSandbox(sessionId: string, userId?: string): boolean {
-    return this.getActiveSandboxId(sessionId, userId) !== null;
+  public hasActiveSandbox(sandboxId?: string, userId?: string): boolean {
+    return this.getActiveSandboxId(sandboxId, userId) !== null;
   }
 
   public async readFile(sandboxId: string, filePath: string): Promise<string> {
@@ -1866,12 +1735,12 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     }
   }
 
-  public async killAgentProcesses(sandboxIdOrSessionId: string): Promise<boolean> {
-    const targetSandboxId = this.sessionToSandboxId.get(sandboxIdOrSessionId) || sandboxIdOrSessionId;
+  public async killAgentProcesses(sandboxId: string): Promise<boolean> {
+    const targetSandboxId = sandboxId;
     const sandbox = this.activeSandboxes.get(targetSandboxId);
     if (!sandbox) {
       logger.info('No active sandbox instance found to terminate agent processes', {
-        sandboxIdOrSessionId,
+        sandboxId,
         targetSandboxId,
       });
       return false;
@@ -1890,10 +1759,10 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     }
   }
 
-  public async destroySandbox(sandboxIdOrSessionId: string): Promise<void> {
-    const targetSandboxId = this.sessionToSandboxId.get(sandboxIdOrSessionId) || sandboxIdOrSessionId;
+  public async destroySandbox(sandboxId: string): Promise<void> {
+    const targetSandboxId = sandboxId;
     const targetRec = this.sandboxRecords.get(targetSandboxId);
-    if (targetRec && targetRec.userId && targetRec.userId !== 'default_user') {
+    if (targetRec && targetRec.userId) {
       firestoreBackendService.deleteSandboxRecord(targetRec.userId, targetSandboxId).catch(() => {});
     }
     try {
@@ -1906,22 +1775,12 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       this.activeExecutions.delete(targetSandboxId);
       this.maintenancePromises.delete(targetSandboxId);
 
-      for (const [sessId, sbId] of this.sessionToSandboxId.entries()) {
-        if (sbId === targetSandboxId || sessId === sandboxIdOrSessionId) {
-          this.sessionToSandboxId.delete(sessId);
-        }
-      }
       this.addLog('READY', `E2B microVM ${targetSandboxId.substring(0, 8)} destroyed.`);
     } catch (err) {
       this.activeSandboxes.delete(targetSandboxId);
       this.sandboxRecords.delete(targetSandboxId);
       this.activeExecutions.delete(targetSandboxId);
       this.maintenancePromises.delete(targetSandboxId);
-      for (const [sessId, sbId] of this.sessionToSandboxId.entries()) {
-        if (sbId === targetSandboxId || sessId === sandboxIdOrSessionId) {
-          this.sessionToSandboxId.delete(sessId);
-        }
-      }
       logger.warn('Failed to kill E2B sandbox', { targetSandboxId, error: err });
     }
     this.renumberSandboxes();
@@ -1936,7 +1795,7 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
     const max = envConfig.MAX_SANDBOXES_PER_USER ?? 3;
 
     // Strict multi-tenant isolation: Unauthenticated or empty userId returns 0 sandboxes.
-    if (!userId || userId === 'default_user' || userId.trim() === '') {
+    if (!userId || userId.trim() === '') {
       return {
         used: 0,
         max,
@@ -1944,7 +1803,6 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       };
     }
 
-    this.deduplicateAttachedSessions();
     if (this.sandboxRecords.size === 0) {
       this.loadRecordsFromDisk();
     }
@@ -1963,21 +1821,13 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       used: visibleSandboxes.length,
       max,
       sandboxes: visibleSandboxes.map((r, idx) => {
-        // Purge legacy/phantom 'default' placeholder from session attachments
-        if (r.attachedSessionIds.has('default')) {
-          r.attachedSessionIds.delete('default');
-          this.sessionToSandboxId.delete('default');
-        }
-        const realSessions = Array.from(r.attachedSessionIds).filter((s) => s && s !== 'default');
         const isUpdating = Boolean(this.maintenancePromises.has(r.sandboxId) || r.isUpdating);
         return {
           sandboxId: r.sandboxId,
           name: `Sandbox #${idx + 1} (${r.sandboxId.substring(0, 6)})`,
-          sessionId: realSessions[0] || '',
+          sessionId: '',
           lastActiveAt: r.lastActiveAt,
           createdAt: r.createdAt,
-          attachedSessionCount: realSessions.length,
-          attachedSessionIds: realSessions,
           lastUpdateCheckAt: r.lastUpdateCheckAt || r.createdAt,
           isUpdating,
           isProvisioning: Boolean(r.isProvisioning),

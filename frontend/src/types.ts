@@ -80,6 +80,11 @@ export interface CodexQuotaStats {
   lastUpdated: string;
 }
 
+export interface UnifiedQuotaStats {
+  antigravity: AntigravityQuotaStats;
+  codex: CodexQuotaStats;
+}
+
 export interface TokenUsageState {
   promptTokens: number;
   completionTokens: number;

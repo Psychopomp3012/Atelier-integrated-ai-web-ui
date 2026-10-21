@@ -3,6 +3,7 @@ import { cliAuthService } from '../auth/cli-auth.service.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 import { logger } from '../../utils/logger.util.js';
+import { timingLogger } from '../../utils/timing.util.js';
 
 interface CliTelemetryPersistence {
   totalTurns: number;
@@ -144,7 +145,7 @@ export class AntigravityQuotaService {
       }
     }
     // Strict multi-tenant isolation: if a specific userId was passed, DO NOT fall back to another user's sandbox
-    if (userId && userId !== 'default' && userId !== 'default_user') {
+    if (userId) {
       return null;
     }
 
@@ -172,6 +173,7 @@ export class AntigravityQuotaService {
    * Executes strictly in the user's active cloud sandbox microVM without host CLI dependency.
    */
   private async queryLiveGoogleQuota(userId?: string, sessionId?: string): Promise<CliQuotaLimits | null> {
+    const start = performance.now();
     try {
       const activeSandboxId = this.resolveSandboxId(userId, sessionId);
       if (!activeSandboxId) {
@@ -217,11 +219,17 @@ export class AntigravityQuotaService {
               : [],
           }));
 
-          logger.info('[Antigravity Quota] Resolved live Google Code Assist quota', {
+          logger.debug('[Antigravity Quota] Resolved live Google Code Assist quota', {
             sandboxId: activeSandboxId,
             userId,
             groupsCount: groups.length,
             groups: groups.map((g) => g.name),
+          });
+
+          timingLogger.logTiming('Quota', 'queryLiveGoogleQuota (agy -p /quota)', Math.round(performance.now() - start), {
+            sandboxId: activeSandboxId,
+            userId,
+            groupsCount: groups.length,
           });
 
           return {
@@ -251,7 +259,7 @@ export class AntigravityQuotaService {
     const cacheKey = `${userKey}:${activeSandboxId || 'none'}`;
     const cached = this.cachedQuotaLimitsMap.get(cacheKey);
     const now = Date.now();
-    if (cached && now - cached.timestamp < 10000) {
+    if (cached && now - cached.timestamp < 60000) {
       return cached.limits;
     }
 
@@ -294,6 +302,7 @@ export class AntigravityQuotaService {
     sessionId?: string,
     userId?: string
   ): Promise<AntigravityQuotaStats> {
+    const start = performance.now();
     const effectiveUserId = userId || (userEmail ? cliAuthService.getUserIdByEmail(userEmail) || undefined : undefined);
     const inFlightKey = `${effectiveUserId || userId || userEmail || 'default'}:${sessionId || ''}`;
     const existing = this.inFlightQuotaMap.get(inFlightKey);
@@ -383,10 +392,10 @@ export class AntigravityQuotaService {
       const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, email, sessionId, effectiveUserId);
 
       const logKey = `${effectiveUserId || userId || userEmail || 'default'}`;
-      const logSnapshot = `${isLinked}:${totalTurnsCount}:${quotaLimits.groups.length}`;
+      const logSnapshot = `${isLinked}:${totalTurnsCount}:${quotaLimits.groups.map((g) => g.name).join(',')}`;
       const lastLog = this.lastQuotaLogMap.get(logKey);
       const now = Date.now();
-      if (!lastLog || lastLog.snapshot !== logSnapshot || now - lastLog.timestamp > 15_000) {
+      if (!lastLog || lastLog.snapshot !== logSnapshot || now - lastLog.timestamp > 60_000) {
         this.lastQuotaLogMap.set(logKey, { snapshot: logSnapshot, timestamp: now });
         logger.info('[Antigravity Quota] Resolved user quota status', {
           userId,
@@ -398,6 +407,12 @@ export class AntigravityQuotaService {
           groupsDetected: quotaLimits.groups.map((g) => g.name),
         });
       }
+
+      timingLogger.logTiming('Quota', 'getAntigravityQuota', Math.round(performance.now() - start), {
+        userId: effectiveUserId,
+        userEmail: email,
+        isLinked,
+      });
 
       return {
         linked: true,

@@ -1,0 +1,87 @@
+flowchart TD
+    %% -------------------------------------------------------------
+    %% 1. CLIENT & DRIVING TRANSPORT LAYER
+    %% -------------------------------------------------------------
+    subgraph DrivingLayer ["1. Driving Layer (Client & Real-Time Transport)"]
+        CLIENT["React 19 Frontend<br/>(Jotai State, Optimistic UI, Single Dispatch)"]
+        SSE_CLIENT["SSE Stream Receiver<br/>(Typewriter Token Chunks, Steps, Done Event)"]
+    end
+
+    %% -------------------------------------------------------------
+    %% 2. 4-PHASE DEFENSE GATEWAY
+    %% -------------------------------------------------------------
+    subgraph Gateway ["2. Fastify API Gateway (4-Phase Defense Pipeline)"]
+        PHASE1["Phase 1: JWT Verification<br/>(requireAuth, HMAC-SHA256, binds req.userId)"]
+        PHASE2["Phase 2: Velocity Rate Limiter<br/>(Multi-Tenant Sliding-Window, O(1) Fast Drop)"]
+        PHASE3["Phase 3: Schema Validation<br/>(Strict Ajv Type Checking: body, params)"]
+        PHASE4["Phase 4: Resource & Ownership Guard<br/>(Session IDOR Check, Sandbox Ownership, Credential Link)"]
+        
+        PHASE1 --> PHASE2 --> PHASE3 --> PHASE4
+    end
+
+    CLIENT -->|"POST /api/v1/agent/prompt/stream"| PHASE1
+    PHASE4 -->|"Handshake & Transport Setup"| CTRL["AgentController<br/>(SSE Header Negotiation & Client Disconnect Hooks)"]
+
+    %% -------------------------------------------------------------
+    %% 3. CORE HEXAGON: DOMAIN & STREAMING ORCHESTRATION
+    %% -------------------------------------------------------------
+    subgraph CoreDomain ["3. Core Orchestration Domain (Hexagon Core)"]
+        ORCH["AgentService (Turn Orchestrator)<br/>• Session Snapshot Coordinator<br/>• MicroVM Process Lifecycle<br/>• Live Terminal Piggybacker"]
+        COMPACT["ContextCompactor<br/>(3-Anchor History Pruning)"]
+        STREAM_ENG["Streaming Pipeline Engine<br/>(Token Multiplexer & Step Observer)"]
+
+        ORCH --> COMPACT
+        ORCH --> STREAM_ENG
+    end
+
+    CTRL -->|"executePromptStream()"| ORCH
+    STREAM_ENG -.->|"Real-Time event: token / step"| SSE_CLIENT
+
+    %% -------------------------------------------------------------
+    %% 4. PORTS (INTERFACES & CONTRACTS)
+    %% -------------------------------------------------------------
+    subgraph Ports ["4. Ports (Abstract Contracts & Domain Interfaces)"]
+        PORT_SANDBOX["ISandboxProvider<br/>(MicroVM Lifecycle & Exec Port)"]
+        PORT_CLI["IAgentCli<br/>(Standard I/O CLI Execution Port)"]
+        PORT_STORE["IStorageRepository<br/>(Atomic Persistence & Quota Port)"]
+    end
+
+    ORCH --> PORT_SANDBOX
+    ORCH --> PORT_CLI
+    ORCH --> PORT_STORE
+
+    %% -------------------------------------------------------------
+    %% 5. DRIVEN ADAPTERS (INFRASTRUCTURE & PERSISTENCE)
+    %% -------------------------------------------------------------
+    subgraph Adapters ["5. Driven Infrastructure Adapters"]
+        subgraph SandboxAdapter ["Cloud Sandbox Adapter"]
+            E2B_PROV["E2BSandboxProvider<br/>• MicroVM Connect / Auto-Reactivate<br/>• Linux DAC agent-runner<br/>• Credential File Hot-Swap"]
+            E2B_CLOUD[("E2B Cloud Linux VM<br/>Isolated MicroVM Pool")]
+            E2B_PROV <--> E2B_CLOUD
+        end
+
+        subgraph CliAdapters ["Multi-Provider CLI Adapters"]
+            CODEX_CLI["Codex CLI Adapter<br/>(OpenAI GPT-5.6 / GPT-6)"]
+            AGY_CLI["Antigravity CLI Adapter<br/>(Google Gemini 3.8 / Pro)"]
+            CLAUDE_CLI["Claude CLI Adapter<br/>(Anthropic Claude 4.6 Sonnet/Opus)"]
+        end
+
+        subgraph StorageAdapter ["Persistence & Telemetry Adapters"]
+            FIRE_SVC["FirestoreBackendService<br/>(Atomic Turn & Session Persistence)"]
+            QUOTA_SVC["Live Quota Observers<br/>(codex app-server, agy -p /quota)"]
+            GCLOUD[("Google Cloud Firestore<br/>users / sessions / credentials")]
+            FIRE_SVC <--> GCLOUD
+        end
+    end
+
+    PORT_SANDBOX === E2B_PROV
+    PORT_CLI === CODEX_CLI
+    PORT_CLI === AGY_CLI
+    PORT_CLI === CLAUDE_CLI
+    PORT_STORE === FIRE_SVC
+    PORT_STORE === QUOTA_SVC
+
+    %% Link CLIs to microVM execution
+    CODEX_CLI -.->|"Runs inside Sandbox"| E2B_CLOUD
+    AGY_CLI -.->|"Runs inside Sandbox"| E2B_CLOUD
+    CLAUDE_CLI -.->|"Runs inside Sandbox"| E2B_CLOUD

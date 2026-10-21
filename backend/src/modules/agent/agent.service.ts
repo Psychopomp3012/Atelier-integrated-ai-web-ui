@@ -13,6 +13,7 @@ import {
 } from '../../types/agent.types.js';
 import { generateId } from '../../utils/id.util.js';
 import { logger } from '../../utils/logger.util.js';
+import { timingLogger } from '../../utils/timing.util.js';
 import { authService } from '../auth/auth.service.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
 import { antigravityQuotaService } from '../quota/antigravity-quota.service.js';
@@ -106,7 +107,7 @@ function getModelVisuals(modelId: string, modelName: string): {
 }
 
 export class AgentService {
-  private readonly sandboxModelsCache: Map<string, { models: DynamicModelOption[]; timestamp: number }> = new Map();
+  private readonly sandboxModelsCache: Map<string, { models: DynamicModelOption[]; timestamp: number; ttl: number }> = new Map();
   private readonly inFlightModelDiscovery: Map<string, Promise<DynamicModelOption[]>> = new Map();
   private antigravityModelIds: Set<string> = new Set();
   private codexModelIds: Set<string> = new Set();
@@ -372,6 +373,23 @@ export class AgentService {
     sessionId?: string
   ): Promise<DynamicModelOption[]> {
     if (!sandboxId) return [];
+
+    // 1. Multi-tenant linkage guard: if user is known and Codex is not linked, return [] immediately
+    if (userId) {
+      const cliStatus = await cliAuthService.getCliStatus(userId).catch(() => null);
+      if (!cliStatus?.codex?.linked) {
+        logger.info('[Model Discovery] User does not have linked Codex account; skipping Codex model discovery', { userId });
+        return [];
+      }
+      // Proactively ensure Codex credentials are refreshed in user profile & sync'd to the sandbox microVM before querying
+      const userRec = cliAuthService.getUserCliRecord(userId);
+      const userEmail = cliStatus?.codex?.email || userRec?.email || userRec?.codex?.email;
+      if (userEmail) {
+        cliAuthService.persistUserCodexProfile(userId, userEmail);
+      }
+      await sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+    }
+
     const result: DynamicModelOption[] = [];
     let stdout = '';
 
@@ -381,8 +399,12 @@ export class AgentService {
         userId,
         sessionId,
       });
+      // 2. Strict authentication guard in the microVM shell:
+      // Run the test inside the agent-runner subshell so permission boundaries are honored.
+      // Only execute `codex debug models` if auth.json exists and is non-empty.
+      // If auth.json is absent, exit immediately so the CLI never emits its built-in offline dummy catalogue.
       const cmdRes = await sandboxService.executeInSandbox({
-        command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" codex debug models',
+        command: `sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" bash -c 'test -s /home/agent-runner/.codex/auth.json && codex debug models'`,
         code: '',
         language: 'bash',
         sandboxId,
@@ -399,9 +421,10 @@ export class AgentService {
           preview: stdout.slice(0, 100),
         });
       } else if (cmdRes?.stderr) {
-        logger.warn('[Model Discovery] Codex CLI returned stderr', {
+        logger.warn('[Model Discovery] Codex CLI returned stderr or unauthenticated exit', {
           sandboxId,
           stderr: cmdRes.stderr,
+          exitCode: cmdRes.exitCode,
         });
       }
     } catch (err) {
@@ -495,20 +518,32 @@ export class AgentService {
     return combined;
   }
 
-  public async getAvailableModels(userId?: string, sessionId?: string): Promise<DynamicModelOption[]> {
+  public async getAvailableModels(userId?: string, sessionId?: string, force = false): Promise<DynamicModelOption[]> {
+    const start = performance.now();
     const sandboxId = this.resolveSandboxId(userId, sessionId);
     if (!sandboxId) {
       return [];
     }
 
+    if (force) {
+      this.sandboxModelsCache.delete(sandboxId);
+      logger.info('[Model Discovery] Force refresh requested: invalidated cache for sandbox', { sandboxId, userId });
+    }
+
     const now = Date.now();
     const cached = this.sandboxModelsCache.get(sandboxId);
-    if (cached && now - cached.timestamp < 300_000 && cached.models.length > 0) {
+    if (!force && cached && now - cached.timestamp < (cached.ttl || 300_000) && cached.models.length > 0) {
+      timingLogger.logTiming('Model Discovery', 'getAvailableModels', Math.round(performance.now() - start), {
+        sandboxId,
+        userId,
+        cached: true,
+        count: cached.models.length,
+      });
       return cached.models;
     }
 
     const existingPromise = this.inFlightModelDiscovery.get(sandboxId);
-    if (existingPromise) {
+    if (!force && existingPromise) {
       return existingPromise;
     }
 
@@ -516,8 +551,18 @@ export class AgentService {
       try {
         const models = await this.fetchDynamicModelsFromCli(sandboxId, userId, sessionId);
         if (models.length > 0) {
-          this.sandboxModelsCache.set(sandboxId, { models, timestamp: Date.now() });
+          const hasCodexModels = models.some((m) => m.provider === 'codex');
+          const isCodexLinked = userId ? (await cliAuthService.getCliStatus(userId).catch(() => null))?.codex?.linked : false;
+          // If user has Codex linked, but 0 codex models were discovered (transient VM sync), cache for only 5s so subsequent refresh can retry immediately
+          const ttl = (isCodexLinked && !hasCodexModels) ? 5_000 : 300_000;
+          this.sandboxModelsCache.set(sandboxId, { models, timestamp: Date.now(), ttl });
         }
+        timingLogger.logTiming('Model Discovery', 'getAvailableModels', Math.round(performance.now() - start), {
+          sandboxId,
+          userId,
+          cached: false,
+          count: models.length,
+        });
         return models;
       } finally {
         this.inFlightModelDiscovery.delete(sandboxId);
@@ -614,18 +659,15 @@ export class AgentService {
       });
     }
 
-    let activeSandboxId = sandboxId || (sessionId ? (sandboxService.getActiveSandboxId(sessionId, userId) || sessionId) : undefined);
+    let activeSandboxId = sandboxId || sandboxService.getActiveSandboxId(undefined, userId) || undefined;
     if (!activeSandboxId && userId) {
       const usage = sandboxService.getSandboxUsage(userId);
       if (usage.sandboxes && usage.sandboxes.length > 0) {
         activeSandboxId = usage.sandboxes[0].sandboxId;
       }
     }
-    if (activeSandboxId && sessionId && !sandboxService.hasActiveSandbox(sessionId, userId)) {
-      sandboxService.attachSessionToSandbox(sessionId, activeSandboxId);
-    }
-    const isSandboxActive = Boolean(activeSandboxId && (sessionId ? sandboxService.hasActiveSandbox(sessionId, userId) : true));
-    const sandboxFiles = isSandboxActive && sessionId ? await sandboxService.listFiles(sessionId, userId).catch(() => []) : [];
+    const isSandboxActive = Boolean(activeSandboxId && sandboxService.hasActiveSandbox(activeSandboxId, userId));
+    const sandboxFiles = isSandboxActive && activeSandboxId ? await sandboxService.listFiles(sessionId || 'default', userId, activeSandboxId).catch(() => []) : [];
     const fileListStr =
       sandboxFiles.length > 0
         ? sandboxFiles.map((f) => `- ${f.name} (${f.type === 'directory' ? 'directory' : `${f.size}B`})`).join('\n')
@@ -814,19 +856,19 @@ export class AgentService {
     });
 
     const userId = user?.id || input.userId;
-    // Ensure cloud sandbox is explicitly attached before executing any prompt or command
-    if (input.sandboxId && sessionId) {
-      sandboxService.attachSessionToSandbox(sessionId, input.sandboxId);
-    }
-    const isSandboxActive = sandboxService.hasActiveSandbox(sessionId, userId) || Boolean(input.sandboxId);
-    if (!isSandboxActive) {
+    const targetSandboxId = input.sandboxId || sandboxService.getActiveSandboxId(sessionId, userId) || undefined;
+    if (!targetSandboxId) {
       throw new AppError(
         'No cloud sandbox is attached to this session. Please select an active sandbox from the top bar before executing prompts.',
         400,
         'NO_ACTIVE_SANDBOX'
       );
     }
-    const activeSbId = sandboxService.getActiveSandboxId(sessionId, userId) || input.sandboxId;
+    if (userId) {
+      await sandboxService.verifyAndReactivateSandbox(targetSandboxId, userId, sessionId);
+    }
+    const activeSbId = targetSandboxId;
+    const isSandboxActive = true;
 
     // 1. Explicit Shell Command Bypass (e.g. `$ ls`, `$ pwd`, `$ npm test`)
     const directCmd = this.extractDirectCommand(input.prompt);
@@ -1025,6 +1067,12 @@ export class AgentService {
         }
       }
 
+      const promptDurationMs = Date.now() - start;
+      timingLogger.logTiming('Agent Execution', `executePrompt (${modelUsed})`, promptDurationMs, {
+        sessionId,
+        userId,
+        model: modelUsed,
+      });
       return { sessionId, message: assistantMessage };
     }
 
@@ -1138,12 +1186,40 @@ export class AgentService {
     const modelUsed: ModelEngine = input.selectedModel;
     const modelMeta = (await this.getAvailableModels()).find((m) => m.id === modelUsed);
     const modelTitle = modelMeta?.displayName || modelUsed;
-    const effectiveSandboxId = input.sandboxId || sandboxService.getActiveSandboxId(sessionId, input.userId) || undefined;
+
+    const authSession = token ? await authService.getSession(token) : null;
+    const targetUserId = input.userId || authSession?.user?.id;
+    const userEmail = authSession?.user?.email;
+
+    // Phase 4.1: Session Ownership IDOR verification
+    if (targetUserId && input.sessionId) {
+      const isSessionOwned = await firestoreBackendService.verifySessionOwnership(targetUserId, input.sessionId);
+      if (!isSessionOwned) {
+        throw new AppError(
+          'Access denied: You do not own this session.',
+          403,
+          'UNAUTHORIZED_SESSION'
+        );
+      }
+    }
+
+    // Phase 4.2: Sandbox Ownership & Auto-Reactivation
+    const effectiveSandboxId = input.sandboxId || sandboxService.getActiveSandboxId(sessionId, targetUserId) || undefined;
+    if (!effectiveSandboxId) {
+      throw new AppError(
+        'No cloud sandbox is attached to this session. Please select an active sandbox from the top bar before executing prompts.',
+        400,
+        'NO_ACTIVE_SANDBOX'
+      );
+    }
+    if (targetUserId) {
+      await sandboxService.verifyAndReactivateSandbox(effectiveSandboxId, targetUserId, sessionId);
+    }
 
     const inFlight: ActiveAgentExecution = {
       executionId,
       sessionId,
-      userId: input.userId,
+      userId: targetUserId,
       sandboxId: effectiveSandboxId,
       isExplicitlyStopped: false,
       isClientDisconnected: false,
@@ -1152,6 +1228,32 @@ export class AgentService {
     this.activeExecutions.set(sessionId, inFlight);
 
     try {
+      // Upfront turn persistence: Save user prompt to Firestore atomically
+      const userMessageId = input.userMessageId || generateId('usr');
+      const userMessage: any = {
+        id: userMessageId,
+        role: 'user',
+        author: 'User',
+        authorBadge: 'YOU',
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        avatarUrl: '',
+        content: input.prompt,
+      };
+
+      if (targetUserId) {
+        firestoreBackendService.saveSession(targetUserId, {
+          id: sessionId,
+          title: input.prompt.slice(0, 32),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          messages: [userMessage],
+          model: modelUsed,
+          truncateAfterMessageId: input.truncateAfterMessageId,
+        }).catch((err) => {
+          logger.warn('Failed upfront save of user message to Firestore', { sessionId, error: String(err) });
+        });
+      }
+
       onEvent({ type: 'start', sessionId, model: modelUsed });
 
       const initStepId = 'step_init';
@@ -1239,54 +1341,52 @@ export class AgentService {
         onEvent({ type: 'step', step: finalStep2 });
       }
 
-      onEvent({ type: 'done', response });
-
-      // Resilient background completion: If client disconnected while execution was running,
-      // persist the completed response directly to Firestore so the user doesn't lose their answer!
-      if (inFlight.isClientDisconnected && !inFlight.isExplicitlyStopped) {
-        const authSession = token ? await authService.getSession(token) : null;
-        const targetUserId = authSession?.user?.id || input.userId;
-        if (targetUserId) {
-          try {
-            const historyMessages: any[] = (input.messages || []).map((m: any) => ({
-              id: m.id || generateId('msg'),
-              role: m.role,
-              content: m.content,
-              timestamp: m.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              modelUsed: m.modelUsed,
-            }));
-            if (!historyMessages.some((m: any) => m.content === input.prompt)) {
-              historyMessages.push({
-                id: generateId('msg'),
-                role: 'user',
-                content: input.prompt,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              });
-            }
-            historyMessages.push(response.message);
-
-            await firestoreBackendService.saveSession(targetUserId, {
-              id: sessionId,
-              title: input.prompt.slice(0, 32),
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              messages: historyMessages,
-              model: modelUsed,
-            });
-            logger.info('[BACKGROUND_PERSISTENCE] Successfully saved background agent response to Firestore for session', {
-              sessionId,
-              userId: targetUserId,
-              messageId: response.message.id,
-              latencyMs: response.message.latencyMs,
-            });
-          } catch (persistErr) {
-            logger.error('[BACKGROUND_PERSISTENCE] Failed to persist background agent response to Firestore', persistErr, {
-              sessionId,
-              userId: targetUserId,
-            });
-          }
+      // Persist complete turn to Firestore
+      if (targetUserId) {
+        try {
+          await firestoreBackendService.saveSession(targetUserId, {
+            id: sessionId,
+            title: input.prompt.slice(0, 32),
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            messages: [userMessage, response.message],
+            model: modelUsed,
+          });
+          logger.info('[PERSISTENCE] Successfully saved complete turn to Firestore for session', {
+            sessionId,
+            userId: targetUserId,
+            messageId: response.message.id,
+            latencyMs: response.message.latencyMs,
+          });
+        } catch (persistErr) {
+          logger.error('[PERSISTENCE] Failed to persist complete turn to Firestore', persistErr, {
+            sessionId,
+            userId: targetUserId,
+          });
         }
       }
+
+      // Query live quota and sandbox usage for single-call piggybacked delivery
+      const isCodex = modelUsed.includes('codex') || modelUsed.includes('gpt') || modelUsed.startsWith('o1') || modelUsed.startsWith('o3');
+      const isGemini = modelUsed.includes('gemini') || modelUsed.includes('antigravity');
+
+      let codexQuota: any = null;
+      let geminiQuota: any = null;
+
+      if (isCodex && userEmail) {
+        codexQuota = await codexQuotaService.getCodexQuota(userEmail, sessionId, targetUserId).catch(() => null);
+      } else if (isGemini && userEmail) {
+        geminiQuota = await antigravityQuotaService.getGeminiQuota(userEmail, sessionId, targetUserId).catch(() => null);
+      }
+      const sandboxUsage = sandboxService.getSandboxUsage(targetUserId);
+
+      onEvent({
+        type: 'done',
+        response,
+        codexQuota,
+        geminiQuota,
+        sandboxUsage,
+      });
 
       return response;
     } finally {

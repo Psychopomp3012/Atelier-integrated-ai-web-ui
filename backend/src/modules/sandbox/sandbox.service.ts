@@ -118,17 +118,17 @@ export class SandboxService {
     return this.provider.writeFile(sandboxId, filePath, content);
   }
 
-  public hasActiveSandbox(sessionId: string, userId?: string): boolean {
+  public hasActiveSandbox(sandboxId?: string, userId?: string): boolean {
     if (this.provider.hasActiveSandbox) {
-      return this.provider.hasActiveSandbox(sessionId, userId);
+      return this.provider.hasActiveSandbox(sandboxId, userId);
     }
     const usage = this.getSandboxUsage(userId);
     return usage.used > 0;
   }
 
-  public getActiveSandboxId(sessionId: string, userId?: string): string | null {
+  public getActiveSandboxId(sandboxId?: string, userId?: string): string | null {
     if (this.provider.getActiveSandboxId) {
-      return this.provider.getActiveSandboxId(sessionId, userId);
+      return this.provider.getActiveSandboxId(sandboxId, userId);
     }
     const usage = this.getSandboxUsage(userId);
     return usage.sandboxes[0]?.sandboxId || null;
@@ -178,36 +178,9 @@ export class SandboxService {
   public async getOrCreateSandbox(
     sessionId: string,
     userId?: string,
-    targetSandboxId?: string,
-    replaceOldest?: boolean
+    targetSandboxId?: string
   ): Promise<string> {
-    return this.provider.getOrCreateSandbox(sessionId, userId, targetSandboxId, replaceOldest);
-  }
-
-  public attachSessionToSandbox(sessionId: string, sandboxId: string, userId?: string): boolean {
-    if (this.provider.attachSessionToSandbox) {
-      return this.provider.attachSessionToSandbox(sessionId, sandboxId, userId);
-    }
-    return false;
-  }
-
-  public detachSession(sessionId: string, userId?: string): boolean {
-    if (this.provider.detachSession) {
-      return this.provider.detachSession(sessionId, userId);
-    }
-    return false;
-  }
-
-  public clearAllAttachedSessions(userId?: string): void {
-    if (this.provider.clearAllAttachedSessions) {
-      this.provider.clearAllAttachedSessions(userId);
-    }
-  }
-
-  public syncActiveSessions(activeSessionIds: string[], userId?: string): void {
-    if (this.provider.syncActiveSessions) {
-      this.provider.syncActiveSessions(activeSessionIds, userId);
-    }
+    return this.provider.getOrCreateSandbox(sessionId, userId, targetSandboxId);
   }
 
   public async destroySandbox(sandboxIdOrSessionId: string): Promise<void> {
@@ -263,6 +236,17 @@ export class SandboxService {
       return this.provider.getSandboxWorkspaceDir(sessionId);
     }
     return '/workspace';
+  }
+
+  public async verifyAndReactivateSandbox(
+    sandboxId: string,
+    userId: string,
+    sessionId?: string
+  ): Promise<{ sandboxId: string; name: string }> {
+    if (this.provider.verifyAndReactivateSandbox) {
+      return await this.provider.verifyAndReactivateSandbox(sandboxId, userId, sessionId);
+    }
+    return { sandboxId, name: `Sandbox (${sandboxId.slice(0, 6)})` };
   }
 }
 

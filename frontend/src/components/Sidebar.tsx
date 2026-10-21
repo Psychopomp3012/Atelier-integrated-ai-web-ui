@@ -241,7 +241,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               Atelier Studio
             </span>
             <div className="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/25 text-primary text-[10px] font-mono font-semibold tracking-wider shadow-[0_0_8px_rgba(99,102,241,0.15)] group-hover:shadow-[0_0_12px_rgba(99,102,241,0.3)] transition-all">
-              v0.1.0
+              v0.1.1
             </div>
           </div>
         </div>

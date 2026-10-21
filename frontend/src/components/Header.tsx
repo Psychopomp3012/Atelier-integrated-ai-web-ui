@@ -26,8 +26,6 @@ interface SandboxUsageData {
     sessionId?: string;
     lastActiveAt: number;
     createdAt: number;
-    attachedSessionCount: number;
-    attachedSessionIds: string[];
     lastUpdateCheckAt?: number;
     isUpdating?: boolean;
     isProvisioning?: boolean;
@@ -55,7 +53,6 @@ interface HeaderProps {
   currentSessionId?: string | null;
   onSandboxChanged?: (sandboxId: string, usage?: SandboxUsageData) => void;
   sandboxUsage?: SandboxUsageData | null;
-  validSessionIds?: string[];
   activeSandbox?: { sandboxId: string; name: string } | null;
   onRefreshSandboxUsage?: () => void;
   onRefreshQuota?: () => void;
@@ -84,7 +81,6 @@ export const Header: React.FC<HeaderProps> = ({
   activeSandbox: propActiveSandbox,
   onRefreshSandboxUsage,
   onRefreshQuota,
-  validSessionIds,
 }) => {
   const [atomDarkMode, setAtomDarkMode] = useAtom(isDarkModeAtom);
   const [atomInspectorOpen, setAtomInspectorOpen] = useAtom(isInspectorOpenAtom);
@@ -111,14 +107,13 @@ export const Header: React.FC<HeaderProps> = ({
   const [showSandboxDropdown, setShowSandboxDropdown] = useState(false);
   const [internalSandboxUsage, setInternalSandboxUsage] = useState<SandboxUsageData | null>(null);
   const [isCreatingSandbox, setIsCreatingSandbox] = useState(false);
-  const [switchingSandboxId, setSwitchingSandboxId] = useState<string | null>(null);
+  const [switchingSandboxId] = useState<string | null>(null);
   const [deletingSandboxId, setDeletingSandboxId] = useState<string | null>(null);
   const [sandboxPendingDelete, setSandboxPendingDelete] = useState<SandboxPendingDelete | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const sandboxRef = useRef<HTMLDivElement>(null);
   const mobileSandboxModalRef = useRef<HTMLDivElement>(null);
 
-  const validSessionSet = useMemo(() => new Set(validSessionIds || []), [validSessionIds]);
   const sandboxUsage = propSandboxUsage !== undefined ? propSandboxUsage : (atomSandboxUsage || internalSandboxUsage);
 
   const fetchSandboxUsage = async () => {
@@ -131,11 +126,9 @@ export const Header: React.FC<HeaderProps> = ({
         setInternalSandboxUsage({ used: 0, max: 3, sandboxes: [] });
         return;
       }
-      const activeIds = (validSessionIds || []).join(',');
       const params = new URLSearchParams();
       params.set('userId', user.id);
-      params.set('activeSessionIds', activeIds);
-      const url = `/api/v1/sandbox/usage?${params.toString()}`;
+      const url = `/api/v1/sandboxes?${params.toString()}`;
       const res = await apiFetch(url);
       const data = await res.json();
       if (data.success && data.data) {
@@ -192,36 +185,14 @@ export const Header: React.FC<HeaderProps> = ({
   const activeSandbox = useMemo(() => {
     if (propActiveSandbox) return propActiveSandbox;
     if (!sandboxUsage?.sandboxes || sandboxUsage.sandboxes.length === 0) return null;
-    if (!currentSessionId) return null;
-    const cleanSession = currentSessionId.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
-    return sandboxUsage.sandboxes.find((s) => s.attachedSessionIds?.includes(cleanSession)) || null;
-  }, [propActiveSandbox, sandboxUsage, currentSessionId]);
+    return sandboxUsage.sandboxes[0] || null;
+  }, [propActiveSandbox, sandboxUsage]);
 
-  const handleSwitchSandbox = async (targetSandboxId: string) => {
-    if (switchingSandboxId) return;
-    setSwitchingSandboxId(targetSandboxId);
-    try {
-      const cleanSession = (currentSessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
-      const res = await apiFetch('/api/v1/sandbox/attach', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: cleanSession, sandboxId: targetSandboxId, userId: user?.id }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        if (data.data?.usage) {
-          setInternalSandboxUsage(data.data.usage);
-        }
-        setSwitchingSandboxId(null);
-        fetchSandboxUsage();
-        onSandboxChanged?.(targetSandboxId, data.data?.usage);
-        setShowSandboxDropdown(false);
-      }
-    } catch (err) {
-      console.error('Failed to attach session to sandbox', err);
-    } finally {
-      setSwitchingSandboxId(null);
-    }
+  const handleSwitchSandbox = (targetSandboxId: string) => {
+    onSandboxChanged?.(targetSandboxId, sandboxUsage || undefined);
+    setShowSandboxDropdown(false);
+    const targetName = sandboxUsage?.sandboxes?.find((s) => s.sandboxId === targetSandboxId)?.name || 'Sandbox';
+    setToastMessage(`Switched to ${targetName}`);
   };
 
   const handleCreateSandbox = async () => {
@@ -245,7 +216,7 @@ export const Header: React.FC<HeaderProps> = ({
       const res = await apiFetch('/api/v1/sandbox/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: cleanSession, userId: user?.id }),
+        body: JSON.stringify({ sessionId: cleanSession }),
       });
       const data = await res.json();
       if (data.success && data.data?.sandboxId) {
@@ -253,8 +224,7 @@ export const Header: React.FC<HeaderProps> = ({
           setInternalSandboxUsage(data.data.usage);
         }
         setIsCreatingSandbox(false);
-        fetchSandboxUsage();
-        onSandboxChanged?.(data.data.sandboxId);
+        onSandboxChanged?.(data.data.sandboxId, data.data.usage);
         setShowSandboxDropdown(false);
         setToastMessage('Cloud Sandbox VM created and ready');
       } else {
@@ -296,7 +266,11 @@ export const Header: React.FC<HeaderProps> = ({
       });
       const data = await res.json();
       if (data.success) {
-        await fetchSandboxUsage();
+        if (data.data?.usage) {
+          setInternalSandboxUsage(data.data.usage);
+        } else {
+          await fetchSandboxUsage();
+        }
         onSandboxChanged?.('');
         setSandboxPendingDelete(null);
       } else {
@@ -523,10 +497,10 @@ export const Header: React.FC<HeaderProps> = ({
             {isNoneSelected
               ? 'CLI Telemetry'
               : isCodex
-                ? 'OpenAI Codex Telemetry'
+                ? 'OpenAI Codex Quota'
                 : isClaude
                   ? 'Anthropic Claude Telemetry'
-                  : 'Antigravity CLI Telemetry'}
+                  : 'Antigravity Quota'}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -732,9 +706,6 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
               </div>
             </div>
-            <span className="text-[10px] font-medium text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20 shrink-0">
-              Connected
-            </span>
           </div>
 
           {/* Quota Groups */}
@@ -904,30 +875,29 @@ export const Header: React.FC<HeaderProps> = ({
   );
 
   return (
-    <header className={`fixed top-0 left-0 right-0 lg:left-[260px] ${isInspectorOpen ? 'xl:right-[380px]' : 'xl:right-0'} h-14 bg-background/90 backdrop-blur-md border-b border-outline-variant/30 px-3 md:px-gutter-desktop flex items-center justify-between z-40 transition-all duration-300`}>
-      <div className="flex items-center gap-2 md:gap-space-md shrink-0">
+    <header className={`fixed top-0 left-0 right-0 lg:left-[260px] ${isInspectorOpen ? 'xl:right-[380px]' : 'xl:right-0'} h-14 bg-background/90 backdrop-blur-md border-b border-outline-variant/30 pl-2 sm:pl-2.5 lg:pl-gutter-desktop pr-3 sm:pr-4 md:pr-gutter-desktop flex items-center justify-between z-40 transition-all duration-300`}>
+      <div className="flex items-center shrink-0">
         {/* Mobile Hamburger Toggle for Left Sidebar */}
         <button
           onClick={onToggleSidebar}
-          className="lg:hidden p-1.5 rounded-lg text-outline hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer shrink-0 z-20"
+          className="lg:hidden h-[34px] w-[34px] inline-flex items-center justify-center rounded-lg text-outline hover:text-on-surface hover:bg-surface-container transition-colors cursor-pointer shrink-0 z-20"
           title="Open Workflows Menu"
           aria-label="Open sidebar"
         >
-          <span className="material-symbols-outlined text-[20px]">menu</span>
+          <span className="material-symbols-outlined text-[20px] leading-none">menu</span>
         </button>
       </div>
 
       <div className="flex items-center gap-1 sm:gap-2 md:gap-space-md min-w-0 shrink">
         {/* Interactive Sandbox Selector & Quota Chip */}
-        <div className="relative shrink-0" ref={sandboxRef}>
+        <div className="relative shrink-0 flex items-center" ref={sandboxRef}>
           <button
             id="cloud-sandboxes-menu-button"
             type="button"
             onClick={() => {
               setShowSandboxDropdown(!showSandboxDropdown);
-              if (!showSandboxDropdown) fetchSandboxUsage();
             }}
-            className="flex items-center gap-1 sm:gap-1.5 bg-surface-container-low hover:bg-surface-container px-1.5 sm:px-2.5 py-1 rounded-lg border border-outline-variant/30 hover:border-outline-variant/60 font-code-sm text-code-sm text-on-surface transition-all cursor-pointer shadow-xs max-w-[150px] xs:max-w-[190px] sm:max-w-none"
+            className="h-[34px] inline-flex items-center gap-1 sm:gap-1.5 bg-surface-container-low hover:bg-surface-container px-2 sm:px-2.5 rounded-lg border border-outline-variant/30 hover:border-outline-variant/60 font-code-sm text-code-sm text-on-surface transition-all cursor-pointer shadow-xs max-w-[150px] xs:max-w-[190px] sm:max-w-none"
             title={
               activeSandbox
                 ? `Cloud Sandbox: ${activeSandbox.name} (Active)`
@@ -946,25 +916,25 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-400 dark:bg-slate-500" />
               </div>
             )}
-            <span className={`material-symbols-outlined text-[15px] shrink-0 ${activeSandbox ? 'text-primary' : 'text-outline'}`}>
+            <span className={`material-symbols-outlined text-[15px] leading-none shrink-0 ${activeSandbox ? 'text-primary' : 'text-outline'}`}>
               {activeSandbox ? 'deployed_code' : 'cloud_off'}
             </span>
-            <span className={`font-medium text-xs truncate max-w-[55px] xs:max-w-[85px] sm:max-w-[140px] ${activeSandbox ? 'text-on-surface' : 'text-on-surface-variant'}`}>
+            <span className={`font-medium text-xs truncate leading-none max-w-[55px] xs:max-w-[85px] sm:max-w-[105px] lg:max-w-[140px] ${activeSandbox ? 'text-on-surface' : 'text-on-surface-variant'}`}>
               {activeSandbox ? activeSandbox.name : user ? 'No Sandbox' : 'Sandbox'}
             </span>
             {user && sandboxUsage && (
               <span
-                className={`text-[9px] sm:text-[10px] px-1 sm:px-1.5 py-0.2 rounded font-mono font-medium shrink-0 ${activeSandbox
+                className={`text-[9px] sm:text-[10px] px-1 sm:px-1.5 py-0.5 rounded font-mono font-medium leading-none shrink-0 ${activeSandbox
                   ? sandboxUsage.used >= sandboxUsage.max
-                    ? 'bg-amber-500/20 text-amber-300'
-                    : 'bg-emerald-500/15 text-emerald-300'
+                    ? 'bg-amber-500/20 text-amber-400'
+                    : 'bg-secondary/10 text-secondary'
                   : 'bg-surface-container-high text-on-surface-variant'
                   }`}
               >
                 {sandboxUsage.used}/{sandboxUsage.max}
               </span>
             )}
-            <span className="material-symbols-outlined text-[14px] text-outline shrink-0">
+            <span className="material-symbols-outlined text-[14px] leading-none text-outline shrink-0">
               {showSandboxDropdown ? 'expand_less' : 'expand_more'}
             </span>
           </button>
@@ -986,8 +956,8 @@ export const Header: React.FC<HeaderProps> = ({
                   {sandboxUsage && (
                     <span
                       className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${sandboxUsage.used >= sandboxUsage.max
-                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                        : 'bg-secondary/10 text-secondary border-secondary/20'
                         }`}
                     >
                       {sandboxUsage.used}/{sandboxUsage.max} {sandboxUsage.used >= sandboxUsage.max ? 'FULL' : 'SLOTS'}
@@ -1060,9 +1030,6 @@ export const Header: React.FC<HeaderProps> = ({
                       const isCurrent = activeSandbox?.sandboxId === sb.sandboxId;
                       const isSwitching = switchingSandboxId === sb.sandboxId;
                       const displayName = sb.name || `Sandbox #${index + 1} (${sb.sandboxId.substring(0, 6)})`;
-                      const realChatCount = validSessionIds !== undefined
-                        ? (sb.attachedSessionIds?.filter((id) => validSessionSet.has(id)).length || 0)
-                        : (sb.attachedSessionCount || 0);
                       return (
                         <div
                           key={sb.sandboxId}
@@ -1090,8 +1057,8 @@ export const Header: React.FC<HeaderProps> = ({
                           className={`p-2.5 rounded-lg border transition-all select-none active:scale-[0.99] ${sb.isProvisioning
                             ? 'bg-surface-container-low/60 border-primary/20 opacity-80 cursor-wait'
                             : isCurrent
-                            ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
-                            : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
+                              ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
+                              : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
                             }`}
                           title={sb.isProvisioning ? `${displayName} is initializing cloud microVM and toolchains...` : isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
                         >
@@ -1140,7 +1107,7 @@ export const Header: React.FC<HeaderProps> = ({
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleDeleteSandbox(sb.sandboxId, displayName, realChatCount, isCurrent);
+                                  handleDeleteSandbox(sb.sandboxId, displayName, 0, isCurrent);
                                 }}
                                 disabled={deletingSandboxId === sb.sandboxId || sb.isProvisioning}
                                 className={`p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors ${sb.isProvisioning ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
@@ -1151,13 +1118,6 @@ export const Header: React.FC<HeaderProps> = ({
                                 </span>
                               </button>
                             </div>
-                          </div>
-
-                          <div className="flex items-center justify-between text-[11px] text-outline pl-5">
-                            <span className="flex items-center gap-1">
-                              <span className="material-symbols-outlined text-[12px] text-primary">link</span>
-                              <span>{realChatCount} chat{realChatCount === 1 ? '' : 's'} sharing workspace</span>
-                            </span>
                           </div>
                         </div>
                       );
@@ -1243,8 +1203,8 @@ export const Header: React.FC<HeaderProps> = ({
                         {sandboxUsage && (
                           <span
                             className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${sandboxUsage.used >= sandboxUsage.max
-                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                              : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                              ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                              : 'bg-secondary/10 text-secondary border-secondary/20'
                               }`}
                           >
                             {sandboxUsage.used}/{sandboxUsage.max} {sandboxUsage.used >= sandboxUsage.max ? 'FULL' : 'SLOTS'}
@@ -1326,9 +1286,6 @@ export const Header: React.FC<HeaderProps> = ({
                           const isCurrent = activeSandbox?.sandboxId === sb.sandboxId;
                           const isSwitching = switchingSandboxId === sb.sandboxId;
                           const displayName = sb.name || `Sandbox #${index + 1} (${sb.sandboxId.substring(0, 6)})`;
-                          const realChatCount = validSessionIds !== undefined
-                            ? (sb.attachedSessionIds?.filter((id) => validSessionSet.has(id)).length || 0)
-                            : (sb.attachedSessionCount || 0);
                           return (
                             <div
                               key={sb.sandboxId}
@@ -1356,8 +1313,8 @@ export const Header: React.FC<HeaderProps> = ({
                               className={`p-2.5 rounded-lg border transition-all select-none active:scale-[0.99] ${sb.isProvisioning
                                 ? 'bg-surface-container-low/60 border-primary/20 opacity-80 cursor-wait'
                                 : isCurrent
-                                ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
-                                : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
+                                  ? 'bg-primary/10 border-primary/40 shadow-xs cursor-default'
+                                  : 'bg-surface-container-low hover:bg-surface-container active:bg-surface-container-high hover:border-primary/40 border-outline-variant/20 cursor-pointer'
                                 }`}
                               title={sb.isProvisioning ? `${displayName} is initializing cloud microVM and toolchains...` : isCurrent ? `${displayName} is currently active in this chat` : `Click to switch active chat to ${displayName}`}
                             >
@@ -1406,7 +1363,7 @@ export const Header: React.FC<HeaderProps> = ({
                                     type="button"
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handleDeleteSandbox(sb.sandboxId, displayName, realChatCount, isCurrent);
+                                      handleDeleteSandbox(sb.sandboxId, displayName, 0, isCurrent);
                                     }}
                                     disabled={deletingSandboxId === sb.sandboxId || sb.isProvisioning}
                                     className={`p-1 rounded text-outline hover:text-error hover:bg-error/10 transition-colors ${sb.isProvisioning ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
@@ -1417,13 +1374,6 @@ export const Header: React.FC<HeaderProps> = ({
                                     </span>
                                   </button>
                                 </div>
-                              </div>
-
-                              <div className="flex items-center justify-between text-[11px] text-outline pl-5">
-                                <span className="flex items-center gap-1">
-                                  <span className="material-symbols-outlined text-[12px] text-primary">link</span>
-                                  <span>{realChatCount} chat{realChatCount === 1 ? '' : 's'} sharing workspace</span>
-                                </span>
                               </div>
                             </div>
                           );
@@ -1487,18 +1437,19 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Real CLI Telemetry Chip */}
-        <div className="relative shrink-0" ref={popoverRef}>
+        <div className="relative shrink-0 flex items-center" ref={popoverRef}>
           {isNoneSelected ? (
             <button
               type="button"
               onClick={() => setShowLimitsPopover(!showLimitsPopover)}
-              className="flex items-center gap-1 sm:gap-1.5 px-1.5 sm:px-space-sm py-1 rounded border border-dashed border-outline-variant/40 bg-surface-container-low text-outline hover:text-on-surface hover:border-outline-variant/80 font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0"
+              className="h-[34px] inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 rounded-lg border border-dashed border-outline-variant/40 bg-surface-container-low text-outline hover:text-on-surface hover:border-outline-variant/80 font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 shadow-xs"
               title="No model selected. Click to view status or select a model below to activate live quota telemetry."
             >
-              <span className="material-symbols-outlined text-[14px] text-outline shrink-0">speed</span>
-              <span className="text-[11px] font-mono text-outline whitespace-nowrap hidden sm:inline">Telemetry: Standby</span>
-              <span className="text-[10px] font-mono text-outline whitespace-nowrap sm:hidden">Standby</span>
-              <span className="material-symbols-outlined text-[13px] text-outline shrink-0 hidden sm:inline">
+              <span className="material-symbols-outlined text-[14px] leading-none text-outline shrink-0">speed</span>
+              <span className="text-[11px] font-mono text-outline whitespace-nowrap hidden lg:inline leading-none">Telemetry: Standby</span>
+              <span className="text-[11px] font-mono text-outline whitespace-nowrap hidden sm:inline lg:hidden leading-none">Standby</span>
+              <span className="text-[10px] font-mono text-outline whitespace-nowrap sm:hidden leading-none">Standby</span>
+              <span className="material-symbols-outlined text-[13px] leading-none text-outline shrink-0 hidden sm:inline">
                 {showLimitsPopover ? 'expand_less' : 'expand_more'}
               </span>
             </button>
@@ -1506,7 +1457,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => setShowLimitsPopover(!showLimitsPopover)}
-              className={`flex items-center gap-1 sm:gap-1.5 px-1.5 sm:px-space-sm py-1 rounded border font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 ${!isModelLinked
+              className={`h-[34px] inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 rounded-lg border font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 shadow-xs ${!isModelLinked
                 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/15'
                 : isAnyLimitExhausted
                   ? 'bg-rose-500/10 text-rose-300 border-rose-500/30 hover:bg-rose-500/15'
@@ -1525,24 +1476,25 @@ export const Header: React.FC<HeaderProps> = ({
             >
               {!isModelLinked ? (
                 <>
-                  <span className="material-symbols-outlined text-[14px] text-amber-400 shrink-0">
+                  <span className="material-symbols-outlined text-[14px] leading-none text-amber-400 shrink-0">
                     lock
                   </span>
-                  <span className="text-amber-400 font-medium whitespace-nowrap hidden sm:inline">
+                  <span className="text-amber-400 font-medium whitespace-nowrap hidden sm:inline leading-none">
                     {`${providerLabel} Not Linked`}
                   </span>
-                  <span className="text-amber-400 font-medium whitespace-nowrap sm:hidden text-[10px]">
+                  <span className="text-amber-400 font-medium whitespace-nowrap sm:hidden text-[10px] leading-none">
                     Unlinked
                   </span>
                 </>
               ) : (
                 <>
                   {providerIcon}
-                  <span className="whitespace-nowrap hidden sm:inline">{`${providerLabel}: ${quotaBadgeText}`}</span>
-                  <span className="whitespace-nowrap sm:hidden font-mono text-[10px] font-semibold">{mobileQuotaBadgeText}</span>
+                  <span className="whitespace-nowrap hidden lg:inline leading-none">{`${providerLabel}: ${quotaBadgeText}`}</span>
+                  <span className="whitespace-nowrap hidden sm:inline lg:hidden font-mono text-xs leading-none">{quotaBadgeText}</span>
+                  <span className="whitespace-nowrap sm:hidden font-mono text-[10px] font-semibold leading-none">{mobileQuotaBadgeText}</span>
                 </>
               )}
-              <span className="material-symbols-outlined text-[13px] text-outline shrink-0 hidden sm:inline">
+              <span className="material-symbols-outlined text-[13px] leading-none text-outline shrink-0 hidden sm:inline">
                 {showLimitsPopover ? 'expand_less' : 'expand_more'}
               </span>
             </button>
@@ -1589,10 +1541,11 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Day / Night Mode Toggle */}
         <button
           onClick={onToggleTheme}
-          className="p-1.5 rounded-lg hover:bg-surface-container text-outline hover:text-on-surface transition-colors cursor-pointer"
+          className="h-[34px] w-[34px] inline-flex items-center justify-center rounded-lg border border-outline-variant/30 bg-surface-container-low hover:bg-surface-container text-outline hover:text-on-surface transition-all cursor-pointer shrink-0 shadow-xs"
           title={isDarkMode ? 'Switch to Day Mode' : 'Switch to Night Mode'}
+          aria-label={isDarkMode ? 'Switch to Day Mode' : 'Switch to Night Mode'}
         >
-          <span className="material-symbols-outlined text-[18px]">
+          <span className="material-symbols-outlined text-[18px] leading-none">
             {isDarkMode ? 'light_mode' : 'dark_mode'}
           </span>
         </button>
@@ -1600,24 +1553,26 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Cloud Inspector Toggle (Desktop & Mobile) */}
         <button
           onClick={onToggleInspector}
-          className={`flex items-center gap-1.5 p-1.5 sm:px-2.5 sm:py-1 rounded-lg font-code-sm text-code-sm border cursor-pointer shrink-0 transition-all active:scale-95 ${isInspectorOpen
-            ? 'bg-primary/15 text-primary border-primary/35 shadow-xs'
-            : 'bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface border-outline-variant/30'
+          className={`h-[34px] inline-flex items-center gap-1.5 px-2.5 rounded-lg font-code-sm text-code-sm border cursor-pointer shrink-0 transition-all active:scale-95 shadow-xs ${isInspectorOpen
+            ? 'bg-primary/15 text-primary border-primary/35'
+            : 'bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-on-surface border-outline-variant/30'
             }`}
           title={isInspectorOpen ? 'Hide Cloud Inspector' : 'Show Cloud Inspector'}
         >
-          <span className="material-symbols-outlined text-[16px]">troubleshoot</span>
-          <span className="hidden sm:inline font-medium">Inspector</span>
+          <span className="material-symbols-outlined text-[16px] leading-none">troubleshoot</span>
+          <span className="hidden sm:inline font-medium leading-none">Inspector</span>
         </button>
 
-        <div className="hidden sm:block h-4 w-px bg-outline-variant/30" />
+        <div className="hidden sm:block h-5 w-px bg-outline-variant/30 self-center shrink-0" />
 
         {/* User Account & Dual Platform Login */}
-        <UserMenu
-          user={user}
-          onOpenAuthModal={onOpenAuthModal}
-          onLogout={onLogout}
-        />
+        <div className="mr-2 sm:mr-3 md:mr-3.5 shrink-0 flex items-center">
+          <UserMenu
+            user={user}
+            onOpenAuthModal={onOpenAuthModal}
+            onLogout={onLogout}
+          />
+        </div>
       </div>
 
       {/* Custom Delete Sandbox Confirmation Modal */}

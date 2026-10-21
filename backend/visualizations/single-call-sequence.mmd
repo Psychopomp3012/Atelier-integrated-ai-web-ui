@@ -1,0 +1,88 @@
+sequenceDiagram
+    autonumber
+    actor User as User (Browser)
+    participant FE as Frontend (React UI)
+    participant GW as Fastify Gateway (4-Phase Defense)
+    participant DB as Google Cloud Firestore
+    participant VM as Cloud MicroVM (E2B Sandbox)
+
+    %% -----------------------------------------------------------
+    %% 1. USER ACTION & FRONTEND PRE-FLIGHT
+    %% -----------------------------------------------------------
+    rect rgb(24, 24, 37)
+        Note over User,FE: 1. User Action & Local Verification
+        User->>FE: Types prompt & clicks "Send"
+        FE->>FE: Local pre-flight checks:<br/>1. Prompt not empty<br/>2. Model selected<br/>3. Active sandbox selected<br/>4. In-flight lock (no concurrent prompt)
+        alt No Sandbox Selected
+            FE->>User: Prompt: "Select or allocate an active microVM sandbox"
+        else Pre-flight Passed
+            FE->>FE: Optimistic UI render (append user bubble, typing pulse, clear input)
+            FE->>GW: POST /api/v1/agent/prompt/stream (1 SINGLE REQUEST)
+        end
+    end
+
+    %% -----------------------------------------------------------
+    %% 2. BACKEND 4-PHASE DEFENSE PIPELINE
+    %% -----------------------------------------------------------
+    rect rgb(35, 30, 50)
+        Note over GW: 2. Backend 4-Phase Defense Pipeline
+        GW->>GW: Phase 1: JWT Auth (verify token, bind req.userId)
+        GW->>GW: Phase 2: Rate Limiting Guard (20 req/min sliding window, fast O(1) drop)
+        GW->>GW: Phase 3: Schema Validation (strict Ajv check: prompt, model, session, sandbox)
+        GW->>GW: Phase 4: Endpoint Security & Resource Legitimacy:<br/>1. Session Ownership (verify sessionId belongs to req.userId - IDOR prevention)<br/>2. Sandbox Ownership (verify sandboxId belongs to req.userId)<br/>3. Provider Auth (verify linked CLI credentials for selected model)
+        opt MicroVM Idle / Detached
+            GW->>VM: Auto-reconnect / wake microVM (seamless reactivation, no user prompt)
+            VM-->>GW: MicroVM active & socket ready
+        end
+        opt Session or Sandbox Unauthorized
+            GW-->>FE: 403 Forbidden { code: 'UNAUTHORIZED_RESOURCE', message: '...' }
+            FE->>User: Display security toast & abort
+        end
+    end
+
+    %% -----------------------------------------------------------
+    %% 3. BACKGROUND PERSISTENCE & SSE STREAM OPEN
+    %% -----------------------------------------------------------
+    rect rgb(20, 32, 45)
+        Note over GW,DB: 3. Session Snapshot & Stream Initialization
+        GW->>DB: Atomic Firestore save (persists user prompt for crash resiliency)
+        GW-->>FE: HTTP 200 SSE Stream Headers (text/event-stream)
+        GW-->>FE: event: start { sessionId, model, sandboxId }
+        GW-->>FE: event: step { id: "step_init", text: "Connected to sandbox & initialized agent" }
+    end
+
+    %% -----------------------------------------------------------
+    %% 4. CLOUD MICROVM INFERENCE & REAL-TIME STREAMING
+    %% -----------------------------------------------------------
+    rect rgb(25, 40, 35)
+        Note over GW,VM: 4. Sandboxed CLI Execution & Token Streaming
+        GW->>VM: Execute CLI with compacted context (codex / agy / claude)
+        loop Live Token & Step Streaming
+            VM-->>GW: CLI stdout / stderr tokens
+            GW-->>FE: event: token { chunk: "..." }
+            FE->>User: Renders smooth typewriter text in chat bubble
+            VM-->>GW: Tool / bash execution event
+            GW-->>FE: event: step { tool, command, output }
+            FE->>User: Updates collapsible execution step list
+        end
+        opt User clicks "Stop" (Explicit Abort)
+            User->>FE: Clicks "Stop" button
+            FE->>GW: AbortController.abort() / POST /api/v1/agent/stop
+            GW->>VM: Send SIGINT / pkill CLI process in microVM (stops burning tokens)
+        end
+        opt Tab Closed / Disconnect (Resilient Background Completion)
+            Note over GW: Client disconnected midway -> backend marks execution as background,<br/>allows CLI to finish, and persists complete response to Firestore.
+        end
+        VM-->>GW: CLI process exits (exitCode: 0, turns, totalTokens)
+    end
+
+    %% -----------------------------------------------------------
+    %% 5. SERVER PERSISTENCE & PIGGYBACKED TERMINAL PAYLOAD
+    %% -----------------------------------------------------------
+    rect rgb(40, 28, 40)
+        Note over GW,DB: 5. Turn Finalization & Piggybacked Delivery
+        GW->>DB: Atomic Firestore save (persists complete assistant response & telemetry)
+        GW-->>FE: event: done (Consolidated Payload: Message + Quota + Sandbox)
+        Note over FE: Zero auxiliary API requests!<br/>- Updates chat state<br/>- Updates quota meters<br/>- Updates sandbox badge
+        FE->>User: Finalized response with code artifacts & copy buttons
+    end

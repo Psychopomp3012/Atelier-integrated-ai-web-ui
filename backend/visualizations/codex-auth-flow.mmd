@@ -48,6 +48,9 @@ flowchart TD
         B11 --> B12[fa:fa-broom Purge Temp Auth Directory: rm -rf ~/.agent-codex-auth/userId]
         B12 --> B13[fa:fa-arrows-rotate Trigger syncCredentialsToUserSandboxes]
         B13 --> P5
+
+        B_JIT[fa:fa-arrows-rotate JIT Refresh Sync: findValidCodexAuthForEmail & persistUserCodexProfile] --> B10
+        B_JIT --> B13
     end
 
     subgraph OpenAI["🌐 OpenAI OAuth & Device Service"]

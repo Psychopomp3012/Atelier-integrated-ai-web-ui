@@ -2,7 +2,7 @@
  * Centralized API utility with direct backend calls and JWT handling.
  */
 
-export const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/$/, '');
+export const API_BASE_URL = ((typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || 'http://localhost:4000').replace(/\/$/, '');
 
 /**
  * Checks if a JWT token string has passed its expiration time.

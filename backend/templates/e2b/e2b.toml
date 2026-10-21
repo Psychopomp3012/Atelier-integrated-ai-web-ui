@@ -1,0 +1,7 @@
+# E2B Sandbox Template Configuration
+# Team template for Atelier Cloud Agent Workspace
+
+template_name = "atelier-agent-vm"
+dockerfile = "e2b.Dockerfile"
+cpu_count = 2
+memory_mb = 2048

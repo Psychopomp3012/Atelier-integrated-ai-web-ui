@@ -27,3 +27,4 @@ export const toastMessageAtom: PrimitiveAtom<string | null> = atom<string | null
 export const isPageLoadingAtom: PrimitiveAtom<boolean> = atom<boolean>(true);
 export const loadingMessageAtom: PrimitiveAtom<string> = atom<string>('Initializing Atelier Workspace');
 export const loadingSubMessageAtom: PrimitiveAtom<string> = atom<string>('Verifying cloud credentials & session...');
+export const inspectorTargetFilePathAtom: PrimitiveAtom<string | null> = atom<string | null>(null);

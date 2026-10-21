@@ -62,8 +62,6 @@ export interface SandboxUsageInfo {
   sessionId?: string;
   lastActiveAt: number;
   createdAt: number;
-  attachedSessionCount: number;
-  attachedSessionIds: string[];
   lastUpdateCheckAt?: number;
   isUpdating?: boolean;
   isProvisioning?: boolean;
@@ -102,11 +100,7 @@ export interface SandboxCliExecutionResponse {
 export interface ISandboxProvider {
   readonly name: string;
   isAvailable(): Promise<boolean>;
-  getOrCreateSandbox(sessionId: string, userId?: string, targetSandboxId?: string, replaceOldest?: boolean): Promise<string>;
-  attachSessionToSandbox?(sessionId: string, sandboxId: string, userId?: string): boolean;
-  detachSession?(sessionId: string, userId?: string): boolean;
-  clearAllAttachedSessions?(userId?: string): void;
-  syncActiveSessions?(activeSessionIds: string[], userId?: string): void;
+  getOrCreateSandbox(sessionId: string, userId?: string, targetSandboxId?: string): Promise<string>;
   executeCommand(sandboxId: string, command: string, timeoutMs?: number): Promise<SandboxExecutionResponse>;
   executeCliInSandbox?(req: SandboxCliExecutionRequest): Promise<SandboxCliExecutionResponse>;
   writeFile(sandboxId: string, filePath: string, content: string | Buffer): Promise<boolean>;
@@ -115,8 +109,8 @@ export interface ISandboxProvider {
   destroySandbox(sandboxId: string): Promise<void>;
   getTerminalLogs(): TerminalLogEntry[];
   getSandboxWorkspaceDir?(sessionId: string): string;
-  hasActiveSandbox?(sessionId: string, userId?: string): boolean;
-  getActiveSandboxId?(sessionId: string, userId?: string): string | null;
+  hasActiveSandbox?(sandboxId?: string, userId?: string): boolean;
+  getActiveSandboxId?(sandboxId?: string, userId?: string): string | null;
   syncWithCloud?(userId?: string): Promise<void>;
   getSandboxUsage?(userId?: string): {
     used: number;
@@ -124,4 +118,9 @@ export interface ISandboxProvider {
     sandboxes: SandboxUsageInfo[];
   };
   killAgentProcesses?(sandboxIdOrSessionId: string): Promise<boolean>;
+  verifyAndReactivateSandbox?(
+    sandboxId: string,
+    userId: string,
+    sessionId?: string
+  ): Promise<{ sandboxId: string; name: string }>;
 }

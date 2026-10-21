@@ -1,9 +1,16 @@
+import dns from 'node:dns';
 import { initializeApp, getApps, cert, applicationDefault } from 'firebase-admin/app';
 import { getFirestore, FieldValue, type Firestore, type QueryDocumentSnapshot } from 'firebase-admin/firestore';
 import fs from 'node:fs';
+
+// Prioritize IPv4 for Firestore gRPC subchannels
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {}
 import path from 'node:path';
 import os from 'node:os';
 import { logger } from '../utils/logger.util.js';
+import { timingLogger } from '../utils/timing.util.js';
 import type {
   ChatMessage,
   ChatSession,
@@ -152,7 +159,14 @@ export class FirestoreBackendService {
     for (const m of baseExisting) {
       if (!m || !m.id) continue;
       if (incomingMap.has(m.id)) {
-        result.push(incomingMap.get(m.id)!);
+        const inc = incomingMap.get(m.id)!;
+        result.push({
+          ...m,
+          ...inc,
+          steps: inc.steps && inc.steps.length > 0 ? inc.steps : m.steps,
+          codeFiles: inc.codeFiles && inc.codeFiles.length > 0 ? inc.codeFiles : m.codeFiles,
+          executionResult: inc.executionResult || m.executionResult,
+        });
       } else {
         result.push(m);
       }
@@ -162,6 +176,10 @@ export class FirestoreBackendService {
     for (const m of incoming) {
       if (!m || !m.id) continue;
       if (!seenIds.has(m.id)) {
+        const lastMsg = result[result.length - 1];
+        if (lastMsg && lastMsg.role === m.role && lastMsg.content === m.content) {
+          continue;
+        }
         result.push(m);
         seenIds.add(m.id);
       }
@@ -243,6 +261,7 @@ export class FirestoreBackendService {
   // --- Session Management ---
 
   public async saveSession(userId: string, session: ChatSession): Promise<ChatSession> {
+    const start = performance.now();
     if (!session.id) {
       session.id = `sess_${Date.now()}`;
     }
@@ -300,6 +319,11 @@ export class FirestoreBackendService {
       }
     }
 
+    timingLogger.logTiming('Firestore', 'saveSession', Math.round(performance.now() - start), {
+      userId,
+      sessionId: cleanSession.id,
+      messageCount: cleanSession.messageCount,
+    });
     return cleanSession;
   }
 
@@ -339,6 +363,7 @@ export class FirestoreBackendService {
     }
 
     const promise = (async () => {
+      const start = performance.now();
       try {
         const sessionsRef = this.db!.collection('users').doc(userId).collection('sessions');
         const snapshot = await this.withTimeout(sessionsRef.limit(50).get(), 6000, null);
@@ -367,6 +392,10 @@ export class FirestoreBackendService {
             this.lastSessionsLog.set(userId, { count: sessions.length, timestamp: now });
             logger.info(`Loaded ${sessions.length} sessions from Firebase for user ${userId}`);
           }
+          timingLogger.logTiming('Firestore', 'getUserSessions', Math.round(performance.now() - start), {
+            userId,
+            count: sessions.length,
+          });
           return sessions;
         }
       } catch (err) {
@@ -374,6 +403,10 @@ export class FirestoreBackendService {
       } finally {
         this.inFlightUserSessions.delete(inFlightKey);
       }
+      timingLogger.logTiming('Firestore', 'getUserSessions', Math.round(performance.now() - start), {
+        userId,
+        count: 0,
+      });
       return [];
     })();
 
@@ -423,6 +456,45 @@ export class FirestoreBackendService {
       messageCount: rawSession.messages.length,
       pagination: paged.pagination,
     };
+  }
+
+  /**
+   * Phase 4 IDOR Defense: Verifies that a sessionId belongs to the requested userId.
+   * If the session exists under another user, returns false.
+   * If the session belongs to userId, or is a brand-new session not yet created, returns true.
+   */
+  public async verifySessionOwnership(userId: string, sessionId: string): Promise<boolean> {
+    if (!sessionId || !userId) return true;
+    if (!this.isAvailable || !this.db) return true;
+
+    try {
+      // 1. Direct check: Does this user own this session?
+      const userDocRef = this.db.collection('users').doc(userId).collection('sessions').doc(sessionId);
+      const userDocSnap = await this.withTimeout(userDocRef.get(), 4000, null);
+      if (userDocSnap && userDocSnap.exists) {
+        return true;
+      }
+
+      // 2. IDOR check: Does this session exist under a different user?
+      const groupSnap = await this.withTimeout(
+        this.db.collectionGroup('sessions').where('id', '==', sessionId).limit(1).get(),
+        4000,
+        null
+      );
+      if (groupSnap && !groupSnap.empty) {
+        logger.warn('[IDOR_VIOLATION] User attempted to access session owned by another user', {
+          userId,
+          sessionId,
+        });
+        return false;
+      }
+
+      // Doesn't exist yet anywhere -> valid new session
+      return true;
+    } catch (err) {
+      logger.warn('Failed to verify session ownership in Firestore, defaulting to allow', { error: String(err) });
+      return true;
+    }
   }
 
   public async getSessionMessages(
@@ -527,7 +599,7 @@ export class FirestoreBackendService {
     sandboxId: string;
     name: string;
     userId: string;
-    attachedSessionIds: string[];
+    attachedSessionIds?: string[];
     createdAt: number;
     lastActiveAt: number;
     provider?: string;
@@ -553,6 +625,7 @@ export class FirestoreBackendService {
         this.lastSavedSandboxSnapshot.set(cacheKey, recordSnapshot);
 
         const ref = this.db.collection('users').doc(userId).collection('sandboxes').doc(record.sandboxId);
+        const start = performance.now();
         await ref.set(
           {
             ...record,
@@ -560,6 +633,10 @@ export class FirestoreBackendService {
           },
           { merge: true }
         );
+        timingLogger.logTiming('Firestore', 'saveSandboxRecord', Math.round(performance.now() - start), {
+          userId,
+          sandboxId: record.sandboxId,
+        });
         logger.info(`Persisted sandbox record ${record.sandboxId} to Firebase for user ${userId}`);
       } catch (err) {
         this.lastSavedSandboxSnapshot.delete(cacheKey);
@@ -570,6 +647,7 @@ export class FirestoreBackendService {
 
   public async getUserSandboxes(userId: string): Promise<any[]> {
     if (this.isAvailable && this.db && userId) {
+      const start = performance.now();
       try {
         const snap = await this.db.collection('users').doc(userId).collection('sandboxes').limit(20).get();
         if (!snap.empty) {
@@ -591,11 +669,19 @@ export class FirestoreBackendService {
               );
             }
           });
+          timingLogger.logTiming('Firestore', 'getUserSandboxes', Math.round(performance.now() - start), {
+            userId,
+            count: list.length,
+          });
           return list;
         }
       } catch (err) {
         logger.warn('Failed to load sandbox records from Firebase Firestore', { error: String(err) });
       }
+      timingLogger.logTiming('Firestore', 'getUserSandboxes', Math.round(performance.now() - start), {
+        userId,
+        count: 0,
+      });
     }
     return [];
   }
@@ -650,11 +736,11 @@ export class FirestoreBackendService {
   }
 
   public async saveUserCliLinks(userId: string, cliLinks: Record<string, any>, userEmail?: string): Promise<void> {
-    if (!this.isAvailable || !this.db || !userId || userId === 'anonymous' || userId === 'default') return;
+    if (!this.isAvailable || !this.db || !userId || userId === 'anonymous') return;
     try {
       const cleanEmail = (userEmail || cliLinks.email || '').toLowerCase().trim();
       let targetDocId = userId;
-      if (targetDocId === 'anonymous' || targetDocId === 'default') return;
+      if (targetDocId === 'anonymous') return;
 
       // If userId looks like an email, check if a canonical user ID doc exists
       if (userId.includes('@') && cleanEmail) {
@@ -747,11 +833,11 @@ export class FirestoreBackendService {
     provider: 'antigravity' | 'codex' = 'antigravity',
     userEmail?: string
   ): Promise<void> {
-    if (!this.isAvailable || !this.db || !userId || userId === 'anonymous' || userId === 'default') return;
+    if (!this.isAvailable || !this.db || !userId || userId === 'anonymous') return;
     try {
       const cleanEmail = (userEmail || '').toLowerCase().trim();
       let targetDocId = userId;
-      if (targetDocId === 'anonymous' || targetDocId === 'default') return;
+      if (targetDocId === 'anonymous') return;
       if (userId.includes('@') && cleanEmail) {
         const querySnap = await this.db.collection('users').where('email', '==', cleanEmail).limit(1).get();
         if (!querySnap.empty && querySnap.docs[0].id) {

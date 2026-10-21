@@ -53,6 +53,8 @@ export interface PromptExecutionRequest {
   sessionId?: string;
   sandboxId?: string;
   userId?: string;
+  userMessageId?: string;
+  truncateAfterMessageId?: string;
   prompt: string;
   selectedModel: ModelEngine;
   model?: ModelEngine;
@@ -71,5 +73,11 @@ export type AgentStreamEvent =
   | { type: 'start'; sessionId: string; model: ModelEngine }
   | { type: 'step'; step: AgentStep }
   | { type: 'token'; token: string }
-  | { type: 'done'; response: PromptExecutionResponse }
+  | {
+      type: 'done';
+      response: PromptExecutionResponse;
+      codexQuota?: any;
+      geminiQuota?: any;
+      sandboxUsage?: any;
+    }
   | { type: 'error'; error: string };

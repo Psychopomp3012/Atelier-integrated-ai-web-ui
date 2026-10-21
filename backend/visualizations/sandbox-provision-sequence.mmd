@@ -1,0 +1,74 @@
+sequenceDiagram
+    autonumber
+    actor User as User (Browser)
+    participant FE as Frontend (React UI)
+    participant GW as Fastify Gateway (4-Phase Defense)
+    participant DB as Google Cloud Firestore
+    participant E2B as E2B Cloud Orchestrator
+    participant VM as Dedicated MicroVM (ikky1x7f)
+
+    %% -----------------------------------------------------------
+    %% 1. USER ACTION & PRE-FLIGHT
+    %% -----------------------------------------------------------
+    rect rgb(24, 24, 37)
+        Note over User,FE: 1. User Action & Frontend Pre-Flight
+        User->>FE: Clicks "Create New Sandbox"
+        FE->>FE: Local Pre-flight Verification:<br/>1. Verify JWT token exists<br/>2. Check current sandbox count < 3<br/>3. Set isCreatingSandbox = true (UI loading spinner)
+        FE->>GW: POST /api/v1/sandbox/create { sessionId }
+    end
+
+    %% -----------------------------------------------------------
+    %% 2. 4-PHASE DEFENSE GATEWAY & STRICT CAPACITY GUARD
+    %% -----------------------------------------------------------
+    rect rgb(35, 30, 50)
+        Note over GW,DB: 2. 4-Phase Defense Gateway & Capacity Guard
+        GW->>GW: Phase 1: JWT Verification (preValidation: [requireAuth], extracts req.userId)
+        GW->>GW: Phase 2: Tier 1 Velocity Limiter (5 req/min, fast O(1) drop)
+        GW->>GW: Phase 3: Schema Validation (strict body: { sessionId }, no replaceOldest)
+        GW->>DB: Phase 4: Tenant Capacity Guard (query active sandboxes for userId)
+        DB-->>GW: Tenant active sandbox count (used: N, max: 3)
+        alt Tenant at Capacity (3/3 full)
+            GW-->>FE: 400 Bad Request { code: 'QUOTA_EXCEEDED', message: 'Sandbox quota limit reached (3/3 full)...' }
+            FE->>FE: isCreatingSandbox = false
+            FE->>User: Toast Alert: "Capacity reached. Delete an existing sandbox first."
+        else Capacity Available (e.g. 1/3 -> 2/3)
+            Note over GW: Proceed to cloud microVM provisioning
+        end
+    end
+
+    %% -----------------------------------------------------------
+    %% 3. CLOUD MICROVM SPIN-UP & DAEMON INITIALIZATION
+    %% -----------------------------------------------------------
+    rect rgb(20, 32, 45)
+        Note over GW,E2B: 3. Cloud MicroVM Launch & Template Boot
+        GW->>E2B: Sandbox.create({ template: 'atelier-agent-vm', metadata: { userId } })
+        E2B->>VM: Boots isolated Firecracker microVM instance (~1,150ms)
+        VM-->>E2B: MicroVM online & control socket ready
+        E2B-->>GW: Returns instance { sandboxId: 'ikky1x7fi9cz3rjpk2tgv' }
+        GW->>VM: Verify pre-installed native CLIs (agy, codex, claude)
+        VM-->>GW: All 3 CLIs verified ready in PATH
+    end
+
+    %% -----------------------------------------------------------
+    %% 4. CREDENTIAL HOT-SWAP & LINUX SECURITY BOUNDARY
+    %% -----------------------------------------------------------
+    rect rgb(25, 40, 35)
+        Note over GW,VM: 4. Credential Injection & Security Boundary Enforcement
+        GW->>GW: Read multi-tenant credentials from local user profile store
+        GW->>VM: Atomic file staging into /tmp/cred_stage/
+        GW->>VM: Batch copy to /home/agent-runner/ (.codex/auth.json, .gemini/oauth_creds.json)
+        GW->>VM: Enforce Linux DAC boundary:<br/>chown -R agent-runner:agent-runner /home/agent-runner<br/>chmod 700 /home/agent-runner
+        VM-->>GW: Permissions locked & credentials secured
+        GW->>DB: Persist sandbox allocation to Firestore (users/{userId}/sandboxes/{sbId})
+        GW->>GW: Attach sessionId to new microVM
+    end
+
+    %% -----------------------------------------------------------
+    %% 5. STREAMLINED RESPONSE & DIRECT STATE HYDRATION
+    %% -----------------------------------------------------------
+    rect rgb(40, 28, 40)
+        Note over GW,FE: 5. Response & Direct State Update (Zero Secondary Network Calls)
+        GW-->>FE: HTTP 201 Created { sandboxId: 'ikky1x7fi9cz3rjpk2tgv', usage: { used: 2, max: 3 } }
+        FE->>FE: Direct Reactive State Hydration (Zero Secondary API Calls):<br/>1. setSelectedSandboxId(newSandboxId)<br/>2. setSandboxUsage(usage)<br/>3. Update top-bar badge to "2/3 Sandboxes"<br/>4. isCreatingSandbox = false
+        FE->>User: Toast: "Cloud Sandbox VM created and ready"
+    end

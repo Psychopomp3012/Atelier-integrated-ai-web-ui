@@ -1,7 +1,8 @@
 import { atom, type PrimitiveAtom } from 'jotai';
-import type { GeminiQuotaStats, CodexQuotaStats, RateLimitState } from '../types';
+import type { AntigravityQuotaStats, GeminiQuotaStats, CodexQuotaStats, RateLimitState } from '../types';
 
-export const geminiQuotaAtom: PrimitiveAtom<GeminiQuotaStats | null> = atom<GeminiQuotaStats | null>(null);
+export const antigravityQuotaAtom: PrimitiveAtom<AntigravityQuotaStats | null> = atom<AntigravityQuotaStats | null>(null);
+export const geminiQuotaAtom: PrimitiveAtom<GeminiQuotaStats | null> = antigravityQuotaAtom;
 export const codexQuotaAtom: PrimitiveAtom<CodexQuotaStats | null> = atom<CodexQuotaStats | null>(null);
 export const rateLimitAtom: PrimitiveAtom<RateLimitState> = atom<RateLimitState>({
   limit: 100,

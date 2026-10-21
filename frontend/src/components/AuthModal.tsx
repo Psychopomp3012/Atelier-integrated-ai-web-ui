@@ -14,7 +14,6 @@ import {
   closeCodexCliLoginPopup,
   getCodexAuthUrl,
   unlinkCodexCli,
-  refreshAuthToken,
   type CliStatus,
 } from '../services/cliAuth.service';
 import { apiFetch } from '../utils/api.util';
@@ -81,7 +80,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             onCliStatusChangeRef.current?.(status);
           }
         })
-        .catch(() => {});
+        .catch(() => { });
     };
     update();
     window.addEventListener('focus', update);
@@ -184,7 +183,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       } else {
         setAgyAuthError(
           res.error ||
-            'Could not verify Antigravity authorization code. Please click "Link Antigravity CLI" to get a fresh URL and try again.'
+          'Could not verify Antigravity authorization code. Please click "Link Antigravity CLI" to get a fresh URL and try again.'
         );
       }
     } catch (err: unknown) {
@@ -227,9 +226,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         const updated = await fetchCliStatus();
         setCliStatus(updated);
         onCliStatusChange?.(updated);
-        try {
-          await refreshAuthToken();
-        } catch {}
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Claude CLI linking was cancelled';
@@ -296,9 +292,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         }
         setCliStatus(updated);
         onCliStatusChange?.(updated);
-        try {
-          await refreshAuthToken();
-        } catch {}
         setCodexSuccess(true);
         setCodexProcessingStep('OpenAI Codex CLI linked successfully! 🎉');
         await new Promise((r) => setTimeout(r, 1200));
@@ -310,9 +303,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         if (freshStatus?.codex?.linked) {
           setCliStatus(freshStatus);
           onCliStatusChange?.(freshStatus);
-          try {
-            await refreshAuthToken();
-          } catch {}
           setCodexSuccess(true);
           setCodexProcessingStep('OpenAI Codex CLI linked successfully! 🎉');
           await new Promise((r) => setTimeout(r, 1200));
@@ -342,9 +332,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 setPendingDeviceAuth(null);
                 setCliStatus(status);
                 onCliStatusChange?.(status);
-                try {
-                  await refreshAuthToken();
-                } catch {}
               }
             };
             window.addEventListener('focus', checkDeviceAuthStatus);
@@ -473,7 +460,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 Sign in to Atelier
               </h3>
               <p className="font-body-sm text-body-sm text-on-surface-variant max-w-xs mx-auto mt-1">
-                Log in with your Google account to access your workspace and AI agents.
+                Log in to access your workspace and AI agents.
               </p>
             </div>
 
@@ -705,11 +692,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           <button
                             type="button"
                             onClick={() => setClaudeAuthMode('console')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
-                              claudeAuthMode === 'console'
-                                ? 'bg-primary text-on-primary shadow-xs'
-                                : 'text-on-surface-variant hover:text-on-surface'
-                            }`}
+                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${claudeAuthMode === 'console'
+                              ? 'bg-primary text-on-primary shadow-xs'
+                              : 'text-on-surface-variant hover:text-on-surface'
+                              }`}
                             title="Anthropic Console (API billing / free credits, no Claude Pro subscription needed)"
                           >
                             Console (Free / API)
@@ -717,11 +703,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           <button
                             type="button"
                             onClick={() => setClaudeAuthMode('claudeai')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
-                              claudeAuthMode === 'claudeai'
-                                ? 'bg-primary text-on-primary shadow-xs'
-                                : 'text-on-surface-variant hover:text-on-surface'
-                            }`}
+                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${claudeAuthMode === 'claudeai'
+                              ? 'bg-primary text-on-primary shadow-xs'
+                              : 'text-on-surface-variant hover:text-on-surface'
+                              }`}
                             title="Claude.ai (Pro or Team web subscription)"
                           >
                             Claude.ai (Subscription)
@@ -768,13 +753,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
 
                 {/* OpenAI Codex CLI (codex) */}
-                <div className={`p-3 sm:p-4 rounded-xl border transition-all flex flex-col gap-2.5 relative overflow-hidden ${
-                  codexProcessingStep
-                    ? 'bg-[#10A37F]/5 border-[#10A37F]/50 shadow-md shadow-[#10A37F]/10 ring-1 ring-[#10A37F]/20'
-                    : codexAuthError
+                <div className={`p-3 sm:p-4 rounded-xl border transition-all flex flex-col gap-2.5 relative overflow-hidden ${codexProcessingStep
+                  ? 'bg-[#10A37F]/5 border-[#10A37F]/50 shadow-md shadow-[#10A37F]/10 ring-1 ring-[#10A37F]/20'
+                  : codexAuthError
                     ? 'bg-error-container/10 border-error/30'
                     : 'bg-surface-container-lowest border-outline-variant/20'
-                }`}>
+                  }`}>
                   {/* Indeterminate loading bar when processing */}
                   {codexProcessingStep && (
                     <div className="absolute top-0 left-0 right-0 h-1 bg-[#10A37F]/20 overflow-hidden">
@@ -803,8 +787,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         <div className="text-[11px] sm:text-xs text-outline line-clamp-2 sm:line-clamp-1 mt-0.5">
                           {cliStatus?.codex?.linked
                             ? (cliStatus.codex.email
-                                ? `Authorized as ${cliStatus.codex.email} · Ready for model execution`
-                                : 'Authorized via ChatGPT Account · Ready for model execution')
+                              ? `Authorized as ${cliStatus.codex.email} · Ready for model execution`
+                              : 'Authorized via ChatGPT Account · Ready for model execution')
                             : 'Connect via one-click OAuth browser popup (ChatGPT Free or Plus)'}
                         </div>
                       </div>
@@ -861,11 +845,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                   {/* Dynamic Processing Status Card */}
                   {codexProcessingStep && (
-                    <div className={`flex items-center gap-3 p-3 rounded-xl border text-xs text-on-surface animate-fadeIn transition-all ${
-                      codexSuccess
-                        ? 'bg-emerald-500/10 border-emerald-500/30'
-                        : 'bg-[#10A37F]/10 border-[#10A37F]/30 shadow-xs'
-                    }`}>
+                    <div className={`flex items-center gap-3 p-3 rounded-xl border text-xs text-on-surface animate-fadeIn transition-all ${codexSuccess
+                      ? 'bg-emerald-500/10 border-emerald-500/30'
+                      : 'bg-[#10A37F]/10 border-[#10A37F]/30 shadow-xs'
+                      }`}>
                       {codexSuccess ? (
                         <div className="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
                           <span className="material-symbols-outlined text-[18px]">check_circle</span>
@@ -938,7 +921,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         <div className="text-[11px] sm:text-xs text-outline line-clamp-2 sm:line-clamp-1 mt-0.5">
                           {cliStatus?.antigravity?.linked
                             ? (cliStatus.antigravity?.details ||
-                                `Authorized as ${cliStatus.antigravity?.email || 'Google Account'}`)
+                              `Authorized as ${cliStatus.antigravity?.email || 'Google Account'}`)
                             : 'Sign in with Google to authorize Antigravity CLI without API keys'}
                         </div>
                       </div>
@@ -999,13 +982,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       {showAgyCodeInput && (
                         <div
                           ref={agyInputContainerRef}
-                          className={`p-3.5 rounded-xl border transition-all flex flex-col gap-3 mt-1 relative overflow-hidden ${
-                          agyProcessingStep 
-                            ? 'bg-[#4285F4]/5 border-[#4285F4]/50 shadow-md shadow-[#4285F4]/10 ring-1 ring-[#4285F4]/20' 
+                          className={`p-3.5 rounded-xl border transition-all flex flex-col gap-3 mt-1 relative overflow-hidden ${agyProcessingStep
+                            ? 'bg-[#4285F4]/5 border-[#4285F4]/50 shadow-md shadow-[#4285F4]/10 ring-1 ring-[#4285F4]/20'
                             : agyAuthError
-                            ? 'bg-error-container/10 border-error/30'
-                            : 'bg-surface-container/40 border-outline-variant/20'
-                        }`}>
+                              ? 'bg-error-container/10 border-error/30'
+                              : 'bg-surface-container/40 border-outline-variant/20'
+                            }`}>
                           {/* Indeterminate loading bar when processing */}
                           {agyProcessingStep && (
                             <div className="absolute top-0 left-0 right-0 h-1 bg-[#4285F4]/20 overflow-hidden">
@@ -1022,11 +1004,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                           {/* Dynamic Processing Status Card */}
                           {agyProcessingStep && (
-                            <div className={`flex items-center gap-3 p-3 rounded-xl border text-xs text-on-surface animate-fadeIn transition-all ${
-                              agySuccess
-                                ? 'bg-emerald-500/10 border-emerald-500/30'
-                                : 'bg-[#4285F4]/10 border-[#4285F4]/30 shadow-xs'
-                            }`}>
+                            <div className={`flex items-center gap-3 p-3 rounded-xl border text-xs text-on-surface animate-fadeIn transition-all ${agySuccess
+                              ? 'bg-emerald-500/10 border-emerald-500/30'
+                              : 'bg-[#4285F4]/10 border-[#4285F4]/30 shadow-xs'
+                              }`}>
                               {agySuccess ? (
                                 <div className="w-7 h-7 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
                                   <span className="material-symbols-outlined text-[18px]">check_circle</span>
@@ -1089,13 +1070,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter' && !agyProcessingStep) handleSubmitAgyCode();
                                 }}
-                                className={`w-full bg-surface-container-lowest border rounded-lg px-3 py-2 text-xs text-on-surface outline-none font-mono transition-all ${
-                                  agyProcessingStep
-                                    ? 'opacity-60 border-[#4285F4]/50 cursor-not-allowed bg-surface-container-low pl-8'
-                                    : agyAuthError
+                                className={`w-full bg-surface-container-lowest border rounded-lg px-3 py-2 text-xs text-on-surface outline-none font-mono transition-all ${agyProcessingStep
+                                  ? 'opacity-60 border-[#4285F4]/50 cursor-not-allowed bg-surface-container-low pl-8'
+                                  : agyAuthError
                                     ? 'border-error/50 focus:border-error'
                                     : 'border-outline-variant/30 focus:border-primary'
-                                }`}
+                                  }`}
                               />
                               {agyProcessingStep && (
                                 <span className="absolute left-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-[15px] text-[#4285F4] animate-spin">
@@ -1107,13 +1087,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                               type="button"
                               onClick={handleSubmitAgyCode}
                               disabled={!agyCodeInput.trim() || isSubmitting || Boolean(agyProcessingStep)}
-                              className={`flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg font-semibold text-xs transition-all text-center shrink-0 min-w-[125px] cursor-pointer ${
-                                agySuccess
-                                  ? 'bg-emerald-600 text-white shadow-sm'
-                                  : agyProcessingStep
+                              className={`flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg font-semibold text-xs transition-all text-center shrink-0 min-w-[125px] cursor-pointer ${agySuccess
+                                ? 'bg-emerald-600 text-white shadow-sm'
+                                : agyProcessingStep
                                   ? 'bg-[#4285F4]/80 text-white cursor-wait shadow-sm'
                                   : 'bg-[#4285F4] text-white hover:bg-[#3367D6] shadow-sm disabled:opacity-40 disabled:cursor-not-allowed'
-                              }`}
+                                }`}
                             >
                               {agySuccess ? (
                                 <>

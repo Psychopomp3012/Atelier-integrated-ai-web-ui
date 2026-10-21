@@ -832,29 +832,6 @@ export const PromptBar: React.FC<PromptBarProps> = ({
               <span>Commands</span>
               <span className="text-[10px] text-outline px-1 rounded bg-surface-container-highest border border-outline-variant/20 font-mono">/</span>
             </button>
-
-            {/* Target Sandbox Indicator Button */}
-            {!activeSandbox ? (
-              <button
-                type="button"
-                onClick={() => document.getElementById('cloud-sandboxes-menu-button')?.click()}
-                className="hidden xs:flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono text-amber-400 bg-amber-500/10 border border-amber-500/25 hover:bg-amber-500/20 transition-all cursor-pointer shrink-0"
-                title="No cloud sandbox selected. Click to select a Sandbox microVM"
-              >
-                <span className="material-symbols-outlined text-[14px]">cloud_off</span>
-                <span>Select Sandbox</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => document.getElementById('cloud-sandboxes-menu-button')?.click()}
-                className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono text-on-surface-variant hover:text-on-surface bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 transition-all cursor-pointer shrink-0"
-                title={`Target Sandbox: ${activeSandbox.name}. Click to switch.`}
-              >
-                <span className="material-symbols-outlined text-[14px] text-primary">cloud</span>
-                <span className="max-w-[110px] truncate">{activeSandbox.name}</span>
-              </button>
-            )}
           </div>
 
           {/* Action & Submit/Stop Button */}

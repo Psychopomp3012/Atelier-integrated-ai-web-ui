@@ -4,114 +4,80 @@ interface AtelierLogoProps {
   className?: string;
   size?: number;
   withGlow?: boolean;
+  variant?: 'auto' | 'color' | 'monochrome';
 }
 
 export const AtelierLogo: React.FC<AtelierLogoProps> = ({
   className = 'w-5 h-5',
   size = 24,
   withGlow = false,
+  variant = 'auto',
 }) => {
+  const isColor = variant === 'color';
+
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 32 32"
       width={size}
       height={size}
-      className={`shrink-0 ${className}`}
+      className={`shrink-0 transition-colors duration-200 ${className}`}
       fill="none"
     >
       <defs>
-        {/* Crown Top Facet Gradient */}
-        <linearGradient id="atelier-top-facet" x1="0%" y1="100%" x2="100%" y2="0%">
-          <stop offset="0%" stopColor="#818CF8" />
-          <stop offset="50%" stopColor="#A78BFA" />
-          <stop offset="100%" stopColor="#E0E7FF" />
+        <linearGradient id="atelier-prism" x1="4" y1="28" x2="28" y2="4" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#06B6D4" />
+          <stop offset="48%" stopColor="#6366F1" />
+          <stop offset="100%" stopColor="#8B5CF6" />
         </linearGradient>
-
-        {/* Left Wing Facet Gradient */}
-        <linearGradient id="atelier-left-facet" x1="0%" y1="0%" x2="100%" y2="100%">
+        <linearGradient id="atelier-facet" x1="8" y1="24" x2="24" y2="8" gradientUnits="userSpaceOnUse">
           <stop offset="0%" stopColor="#6366F1" />
-          <stop offset="100%" stopColor="#3730A3" />
+          <stop offset="100%" stopColor="#8B5CF6" />
         </linearGradient>
-
-        {/* Right Wing Facet Gradient */}
-        <linearGradient id="atelier-right-facet" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#8B5CF6" />
-          <stop offset="60%" stopColor="#6D28D9" />
-          <stop offset="100%" stopColor="#312E81" />
-        </linearGradient>
-
-        {/* Central Craftsman Core Shard (Emerald to Cyan Glow) */}
-        <linearGradient id="atelier-core-shard" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#38BDF8" />
-          <stop offset="40%" stopColor="#10B981" />
-          <stop offset="100%" stopColor="#34D399" />
-        </linearGradient>
-
-        {/* Optional Ambient Glow Filter */}
-        <filter id="atelier-glow" x="-25%" y="-25%" width="150%" height="150%">
-          <feGaussianBlur stdDeviation="1.5" result="blur" />
-          <feComposite in="SourceGraphic" in2="blur" operator="over" />
-        </filter>
+        {withGlow && (
+          <filter id="atelier-glow" x="-25%" y="-25%" width="150%" height="150%">
+            <feGaussianBlur stdDeviation="2" result="blur" />
+            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+          </filter>
+        )}
       </defs>
 
-      {/* Subtle Ambient Back-Glow */}
       {withGlow && (
         <path
-          d="M16 2.5 L26.5 12.5 L16 29.5 L5.5 12.5 Z"
-          fill="#818CF8"
-          opacity="0.25"
+          d="M14.15 3.8a2.1 2.1 0 0 1 3.7 0l12 22.1A1.5 1.5 0 0 1 28.53 28H3.47a1.5 1.5 0 0 1-1.32-2.1z"
+          fill={isColor ? 'url(#atelier-prism)' : 'currentColor'}
+          className={!isColor ? 'text-slate-900 dark:text-white opacity-20' : 'opacity-35'}
           filter="url(#atelier-glow)"
         />
       )}
 
-      {/* Top Facet (Diamond Crown) */}
-      <polygon
-        points="16,3 26.5,12 16,17 5.5,12"
-        fill="url(#atelier-top-facet)"
+      {/* Outer Prism Shell */}
+      <path
+        fill={isColor ? 'url(#atelier-prism)' : undefined}
+        className={!isColor ? 'fill-slate-900 dark:fill-white' : undefined}
+        d="M14.15 3.8a2.1 2.1 0 0 1 3.7 0l12 22.1A1.5 1.5 0 0 1 28.53 28H3.47a1.5 1.5 0 0 1-1.32-2.1z"
       />
 
-      {/* Left Lower Facet (Architectural Depth) */}
-      <polygon
-        points="5.5,12 16,17 16,29"
-        fill="url(#atelier-left-facet)"
+      {/* Inner Cutout Core */}
+      <path
+        fill={isColor ? '#0B1020' : undefined}
+        className={!isColor ? 'fill-slate-100 dark:fill-[#090D16]' : undefined}
+        d="M16 10.15 8.25 24.5h4.2L16 17.95l3.55 6.55h4.2z"
       />
 
-      {/* Right Lower Facet */}
-      <polygon
-        points="26.5,12 16,17 16,29"
-        fill="url(#atelier-right-facet)"
+      {/* Floating Center Facet */}
+      <path
+        fill={isColor ? 'url(#atelier-facet)' : undefined}
+        className={!isColor ? 'fill-slate-800 dark:fill-slate-100' : undefined}
+        d="M16 10.15 19.55 17H16l-2.1 3.9-2.1-3.9z"
+        opacity="0.95"
       />
 
-      {/* Precision Facet Split Lines */}
-      <line
-        x1="16"
-        y1="3"
-        x2="16"
-        y2="17"
-        stroke="#FFFFFF"
-        strokeOpacity="0.45"
-        strokeWidth="0.8"
-      />
-      <line
-        x1="5.5"
-        y1="12"
-        x2="26.5"
-        y2="12"
-        stroke="#FFFFFF"
-        strokeOpacity="0.25"
-        strokeWidth="0.6"
-      />
-
-      {/* Floating Center Core Jewel (Prism Focus) */}
-      <polygon
-        points="16,9.5 20.8,15.5 16,23 11.2,15.5"
-        fill="url(#atelier-core-shard)"
-      />
-      <polygon
-        points="16,9.5 16,23 11.2,15.5"
-        fill="#FFFFFF"
-        opacity="0.18"
+      {/* Accent Facet */}
+      <path
+        fill={isColor ? '#06B6D4' : undefined}
+        className={!isColor ? 'fill-slate-500 dark:fill-slate-400' : undefined}
+        d="M8.25 24.5h4.2l2.1-3.9-2.1-3.6z"
       />
     </svg>
   );

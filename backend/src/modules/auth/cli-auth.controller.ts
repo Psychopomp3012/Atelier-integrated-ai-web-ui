@@ -51,9 +51,12 @@ export class CliAuthController {
     return undefined;
   }
 
-  public async getAntigravityAuthUrl(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  public async getAntigravityAuthUrl(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     try {
-      const result = await cliAuthService.startAntigravityCliLogin();
+      const userId = await this.getUserIdFromReq(req);
+      const query = req.query as { force?: string } | undefined;
+      const force = query?.force === 'true';
+      const result = await cliAuthService.startAntigravityCliLogin(userId, force);
       return reply.status(200).send(createSuccessResponse(result));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to generate Antigravity CLI login URL';
@@ -61,9 +64,12 @@ export class CliAuthController {
     }
   }
 
-  public async loginAntigravity(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  public async loginAntigravity(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     try {
-      const { authUrl } = await cliAuthService.startAntigravityCliLogin();
+      const userId = await this.getUserIdFromReq(req);
+      const query = req.query as { force?: string } | undefined;
+      const force = query?.force === 'true';
+      const { authUrl } = await cliAuthService.startAntigravityCliLogin(userId, force);
       return reply.redirect(authUrl);
     } catch (err: unknown) {
       logger.error('Failed to initiate Antigravity CLI login redirect', err);
@@ -108,15 +114,7 @@ export class CliAuthController {
     });
   }
 
-  public async getGeminiAuthUrl(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    return this.getAntigravityAuthUrl(req, reply);
-  }
-
-  public async loginGemini(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    return this.loginAntigravity(req, reply);
-  }
-
-  public async unlinkGemini(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  public async unlinkAntigravity(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const userId = await this.getUserIdFromReq(req);
     const userEmail = await this.getUserEmailFromReq(req);
     if (userId || userEmail) {
@@ -126,8 +124,8 @@ export class CliAuthController {
         sandboxService.purgeUserCredentialsFromSandboxes(userId, 'antigravity').catch(() => {});
       }
     }
-    cliAuthService.unlinkGemini();
-    return reply.status(200).send(createSuccessResponse({ success: true, message: 'Antigravity / Gemini CLI unlinked' }));
+    cliAuthService.unlinkAntigravity();
+    return reply.status(200).send(createSuccessResponse({ success: true, message: 'Google Antigravity CLI unlinked' }));
   }
 
   public async handleOAuthCallback(req: FastifyRequest, reply: FastifyReply): Promise<void> {

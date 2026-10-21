@@ -77,17 +77,6 @@ export const tokenUtil: TokenGenerator = {
 
     const parts = token.split('.');
     if (parts.length !== 3) {
-      // Legacy session format fallback
-      if (token.startsWith('harness_sess_') && token.length > 20) {
-        return {
-          valid: true,
-          payload: {
-            sub: 'legacy_user',
-            iat: Math.floor(Date.now() / 1000),
-            exp: Math.floor(Date.now() / 1000) + 7 * 86400,
-          },
-        };
-      }
       return { valid: false, error: 'Malformed token structure' };
     }
 

@@ -6,11 +6,13 @@ import type { ModelOption } from '../types';
  */
 let inFlightModelsPromise: Promise<ModelOption[]> | null = null;
 let lastModels: ModelOption[] | null = null;
+let lastModelsUserId: string | null = null;
 let lastModelsFetchTime = 0;
 const MODELS_CACHE_TTL = 4000;
 
 export function invalidateModelsCache(): void {
   lastModels = null;
+  lastModelsUserId = null;
   lastModelsFetchTime = 0;
   inFlightModelsPromise = null;
 }
@@ -22,6 +24,12 @@ export function invalidateModelsCache(): void {
 export async function fetchAvailableModels(force = false, sessionId?: string, userId?: string): Promise<ModelOption[]> {
   if (!userId) {
     return [];
+  }
+  // Invalidate previous cache if user has switched
+  if (lastModelsUserId !== userId) {
+    lastModels = null;
+    lastModelsUserId = userId;
+    lastModelsFetchTime = 0;
   }
   const now = Date.now();
   if (!force && lastModels && now - lastModelsFetchTime < MODELS_CACHE_TTL) {
@@ -40,6 +48,7 @@ export async function fetchAvailableModels(force = false, sessionId?: string, us
       const params = new URLSearchParams();
       if (sessionId) params.set('sessionId', sessionId);
       if (userId) params.set('userId', userId);
+      if (force) params.set('force', 'true');
       const qStr = params.toString() ? `?${params.toString()}` : '';
 
       const res = await apiFetch(`/api/v1/agent/models${qStr}`);
@@ -47,8 +56,9 @@ export async function fetchAvailableModels(force = false, sessionId?: string, us
         return lastModels || [];
       }
       const json = await res.json();
-      if (Array.isArray(json.data) && json.data.length > 0) {
+      if (Array.isArray(json.data)) {
         lastModels = json.data as ModelOption[];
+        lastModelsUserId = userId;
         lastModelsFetchTime = Date.now();
         return lastModels;
       }

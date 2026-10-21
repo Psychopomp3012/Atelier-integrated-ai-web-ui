@@ -2,7 +2,6 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { registerCorsPlugin } from './plugins/cors.plugin.js';
 import { registerSensiblePlugin } from './plugins/sensible.plugin.js';
 import { registerSwaggerPlugin } from './plugins/swagger.plugin.js';
-import { rateLimitRoutes } from './modules/rate-limit/rate-limit.routes.js';
 import { agentRoutes } from './modules/agent/agent.routes.js';
 import { sandboxRoutes } from './modules/sandbox/sandbox.routes.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
@@ -11,6 +10,7 @@ import { sessionRoutes } from './modules/session/session.routes.js';
 import { createErrorResponse } from './utils/response.util.js';
 import { isAppError } from './utils/error.util.js';
 import { logger } from './utils/logger.util.js';
+import { timingLogger } from './utils/timing.util.js';
 import { tokenUtil } from './utils/token.util.js';
 import { cliAuthService } from './modules/auth/cli-auth.service.js';
 
@@ -59,11 +59,16 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   app.addHook('onResponse', async (request, reply) => {
     if ((request.url.startsWith('/api/') || request.url.startsWith('/oauth')) && request.method !== 'OPTIONS') {
+      const durationMs = Math.round(reply.elapsedTime);
+      timingLogger.logTiming('API Route', `${request.method} ${request.url} -> ${reply.statusCode}`, durationMs, {
+        reqId: request.id,
+        userId: request.userId,
+      });
+
       // Suppress noisy routine status checks from flooding app_debug.log
       if (request.url.startsWith('/api/v1/auth/cli/status') && reply.statusCode === 200) {
         return;
       }
-      const durationMs = Math.round(reply.elapsedTime);
       logger.info(`[API] ${request.method} ${request.url} -> ${reply.statusCode} (${durationMs}ms)`, {
         reqId: request.id,
         userId: request.userId,
@@ -109,7 +114,6 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   // Modular domain routes
-  await app.register(rateLimitRoutes);
   await app.register(agentRoutes);
   await app.register(sandboxRoutes);
   await app.register(authRoutes);

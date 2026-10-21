@@ -4,6 +4,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { logger } from '../../utils/logger.util.js';
+import { timingLogger } from '../../utils/timing.util.js';
 import { AppError } from '../../utils/error.util.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 
@@ -55,12 +56,15 @@ export class CliAuthService {
     'openid',
   ].join(' ');
 
-  private activeAntigravityLogin: {
-    process: ChildProcess;
-    authUrl?: string;
-    startedAt: number;
-    timeoutId: NodeJS.Timeout;
-  } | null = null;
+  private activeAntigravityLogins = new Map<
+    string,
+    {
+      process: ChildProcess;
+      authUrl?: string;
+      startedAt: number;
+      timeoutId: NodeJS.Timeout;
+    }
+  >();
 
   private activeClaudeLogin: {
     process: ChildProcess;
@@ -266,6 +270,7 @@ export class CliAuthService {
   }
 
   public async syncUserFromFirestore(userId?: string, userEmail?: string): Promise<void> {
+    const start = performance.now();
     try {
       const remote = await firestoreBackendService.getUserCliLinks(userId, userEmail);
       if (remote && typeof remote === 'object') {
@@ -299,6 +304,7 @@ export class CliAuthService {
         }
         this.saveUserCliLinks(links);
       }
+      timingLogger.logTiming('Auth', 'syncUserFromFirestore', Math.round(performance.now() - start), { userId, userEmail });
     } catch (e) {
       logger.debug('Failed to sync user CLI links from Firestore', { error: String(e) });
     }
@@ -354,6 +360,7 @@ export class CliAuthService {
               email: hostCodex.email || codexEmail,
               linkedAt: links[targetUser].codex?.linkedAt || new Date().toISOString(),
             };
+            this.persistUserCodexProfile(targetUser, codexEmail);
             try {
               const { codexQuotaService } = await import('../quota/codex-quota.service.js');
               await codexQuotaService.syncLocalTelemetryToFirestore(targetUser, codexEmail).catch(() => {});
@@ -398,6 +405,8 @@ export class CliAuthService {
     // Also persist per-user Antigravity profile if linking antigravity or gemini
     if (cli === 'antigravity' || cli === 'gemini') {
       this.persistUserAntigravityProfile(userId, email || links[userId].email);
+    } else if (cli === 'codex') {
+      this.persistUserCodexProfile(userId, email || links[userId].email);
     }
   }
 
@@ -453,6 +462,15 @@ export class CliAuthService {
       if (fs.existsSync(userGeminiDir)) {
         try {
           fs.rmSync(userGeminiDir, { recursive: true, force: true });
+        } catch {}
+      }
+    }
+    if (userId && cli === 'codex') {
+      const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const userCodexDir = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.codex');
+      if (fs.existsSync(userCodexDir)) {
+        try {
+          fs.rmSync(userCodexDir, { recursive: true, force: true });
         } catch {}
       }
     }
@@ -879,7 +897,7 @@ export class CliAuthService {
     const homedir = os.homedir();
 
     // 1. Check in user profile directory if userId is supplied
-    if (userId && userId !== 'default' && userId !== 'default_user') {
+    if (userId) {
       const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
       const userProfileCandidates = [
         path.join(homedir, '.agent-user-profiles', safeUid, '.gemini', 'antigravity-cli', 'cache', 'antigravity-keyring-unavailable-oauth-token'),
@@ -969,16 +987,26 @@ export class CliAuthService {
     return newestText;
   }
 
+  private lastPersistedAgySignature = new Map<string, string>();
+
   public persistUserAntigravityProfile(userId: string, userEmail?: string): void {
-    if (!userId || userId === 'default' || userId === 'default_user') return;
+    const start = performance.now();
+    if (!userId) return;
     const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanEmail = userEmail ? userEmail.toLowerCase().trim() : undefined;
+    const validToken = this.findValidAntigravityTokenForEmail(cleanEmail, userId);
+
+    const sig = `${cleanEmail || ''}:${validToken ? validToken.substring(0, 32) : 'none'}`;
+    if (this.lastPersistedAgySignature.get(safeUserId) === sig) {
+      return;
+    }
+    this.lastPersistedAgySignature.set(safeUserId, sig);
+
     const userGeminiDir = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.gemini');
     const userAgyDir = path.join(userGeminiDir, 'antigravity-cli');
     const userCacheDir = path.join(userAgyDir, 'cache');
     try {
       fs.mkdirSync(userCacheDir, { recursive: true, mode: 0o700 });
-      const cleanEmail = userEmail ? userEmail.toLowerCase().trim() : undefined;
-      const validToken = this.findValidAntigravityTokenForEmail(cleanEmail, userId);
 
       if (validToken) {
         fs.writeFileSync(path.join(userCacheDir, 'antigravity-keyring-unavailable-oauth-token'), validToken, { mode: 0o600 });
@@ -1029,8 +1057,143 @@ export class CliAuthService {
         fs.writeFileSync(path.join(userGeminiDir, 'user_info.json'), JSON.stringify({ email: emailToSave }, null, 2), { mode: 0o600 });
       }
       logger.info(`Persisted Antigravity credentials to user profile: ${safeUserId}`, { email: emailToSave, hasToken: Boolean(validToken) });
+      timingLogger.logTiming('Auth', 'persistUserAntigravityProfile', Math.round(performance.now() - start), {
+        userId: safeUserId,
+        hasToken: Boolean(validToken),
+      });
     } catch (err) {
       logger.warn('Failed to persist Antigravity credentials to user profile', { error: String(err) });
+    }
+  }
+
+  public extractEmailFromCodexAuth(authContent: string): string | null {
+    try {
+      const parsed = JSON.parse(authContent);
+      if (parsed.email) return parsed.email.toLowerCase().trim();
+      if (parsed.tokens?.id_token) {
+        const parts = parsed.tokens.id_token.split('.');
+        if (parts.length > 1) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+          if (payload?.email) return payload.email.toLowerCase().trim();
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  public findValidCodexAuthForEmail(targetEmail?: string, userId?: string): { authContent: string; email?: string } | null {
+    const cleanEmail = targetEmail ? targetEmail.toLowerCase().trim() : undefined;
+    const homedir = os.homedir();
+    const candidates: Array<{ path: string; mtime: number }> = [];
+
+    // 1. User profile directory if userId supplied
+    if (userId) {
+      const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const p = path.join(homedir, '.agent-user-profiles', safeUid, '.codex', 'auth.json');
+      if (fs.existsSync(p)) {
+        try {
+          const st = fs.statSync(p);
+          if (st.size > 20) candidates.push({ path: p, mtime: st.mtimeMs });
+        } catch {}
+      }
+      const pAuth = path.join(homedir, '.agent-codex-auth', safeUid, 'auth.json');
+      if (fs.existsSync(pAuth)) {
+        try {
+          const st = fs.statSync(pAuth);
+          if (st.size > 20) candidates.push({ path: pAuth, mtime: st.mtimeMs });
+        } catch {}
+      }
+    }
+
+    // 2. Candidate host paths
+    const hostCandidates = [
+      path.join(homedir, '.codex', 'auth.json'),
+      path.join(homedir, '.config', 'codex', 'auth.json'),
+    ];
+    for (const p of hostCandidates) {
+      if (fs.existsSync(p)) {
+        try {
+          const st = fs.statSync(p);
+          if (st.size > 20) candidates.push({ path: p, mtime: st.mtimeMs });
+        } catch {}
+      }
+    }
+
+    // Sort newest mtime first so freshest token takes precedence
+    candidates.sort((a, b) => b.mtime - a.mtime);
+
+    for (const cand of candidates) {
+      try {
+        const content = fs.readFileSync(cand.path, 'utf8');
+        const parsed = JSON.parse(content);
+        if (!parsed.tokens && !parsed.OPENAI_API_KEY && !parsed.auth_mode) {
+          continue;
+        }
+
+        const email = this.extractEmailFromCodexAuth(content);
+        // Multi-tenant isolation: If a target email is expected, ensure this credential matches
+        if (cleanEmail && email && email.toLowerCase() !== cleanEmail) {
+          continue;
+        }
+
+        return {
+          authContent: content,
+          email: email || cleanEmail,
+        };
+      } catch {}
+    }
+
+    return null;
+  }
+
+  private lastPersistedCodexSignature = new Map<string, string>();
+
+  public persistUserCodexProfile(userId: string, userEmail?: string): void {
+    const start = performance.now();
+    if (!userId) return;
+    const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanEmail = userEmail ? userEmail.toLowerCase().trim() : undefined;
+    const validAuth = this.findValidCodexAuthForEmail(cleanEmail, userId);
+
+    const sig = `${cleanEmail || ''}:${validAuth ? validAuth.authContent.length + ':' + validAuth.authContent.substring(0, 32) : 'none'}`;
+    if (this.lastPersistedCodexSignature.get(safeUserId) === sig) {
+      return;
+    }
+    this.lastPersistedCodexSignature.set(safeUserId, sig);
+
+    const userProfileCodexDir = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.codex');
+    const authJsonPath = path.join(userProfileCodexDir, 'auth.json');
+    try {
+      fs.mkdirSync(userProfileCodexDir, { recursive: true, mode: 0o700 });
+
+      if (validAuth) {
+        fs.writeFileSync(authJsonPath, validAuth.authContent, { mode: 0o600 });
+        const emailToSave = validAuth.email || cleanEmail;
+        this.linkUserCli(userId, 'codex', emailToSave);
+        logger.info(`Persisted Codex credentials to user profile: ${safeUserId}`, { email: emailToSave });
+      } else {
+        // Multi-tenant security guard: Purge mismatched or empty file
+        if (fs.existsSync(authJsonPath)) {
+          try {
+            const currentContent = fs.readFileSync(authJsonPath, 'utf8');
+            const currentEmail = this.extractEmailFromCodexAuth(currentContent);
+            if (cleanEmail && currentEmail && currentEmail.toLowerCase() !== cleanEmail) {
+              fs.unlinkSync(authJsonPath);
+              logger.warn('[Auth Profile] Purged mismatched Codex auth from user profile to prevent leak', {
+                userId: safeUserId,
+                purgedEmail: currentEmail,
+                expectedEmail: cleanEmail,
+              });
+            }
+          } catch {}
+        }
+      }
+      timingLogger.logTiming('Auth', 'persistUserCodexProfile', Math.round(performance.now() - start), {
+        userId: safeUserId,
+        hasAuth: Boolean(validAuth),
+      });
+    } catch (err) {
+      logger.warn('Failed to persist Codex credentials to user profile', { error: String(err) });
     }
   }
 
@@ -1129,27 +1292,30 @@ export class CliAuthService {
    * Initiates Antigravity CLI Google OAuth authentication flow.
    * Spawns agy in headless mode, extracts the PKCE authorization URL, and holds process open for code.
    */
-  public async startAntigravityCliLogin(force: boolean = false): Promise<{ authUrl: string; sessionId: string }> {
+  public async startAntigravityCliLogin(userId?: string, force: boolean = false): Promise<{ authUrl: string; sessionId: string }> {
+    const sessionKey = userId || 'global';
+    const existing = this.activeAntigravityLogins.get(sessionKey);
+
     if (
       !force &&
-      this.activeAntigravityLogin &&
-      this.activeAntigravityLogin.authUrl &&
-      this.activeAntigravityLogin.process &&
-      !this.activeAntigravityLogin.process.killed &&
-      Date.now() - this.activeAntigravityLogin.startedAt < 900000
+      existing &&
+      existing.authUrl &&
+      existing.process &&
+      !existing.process.killed &&
+      Date.now() - existing.startedAt < 900000
     ) {
       return {
-        authUrl: this.activeAntigravityLogin.authUrl,
-        sessionId: String(this.activeAntigravityLogin.startedAt),
+        authUrl: existing.authUrl,
+        sessionId: String(existing.startedAt),
       };
     }
 
-    if (this.activeAntigravityLogin) {
-      clearTimeout(this.activeAntigravityLogin.timeoutId);
+    if (existing) {
+      clearTimeout(existing.timeoutId);
       try {
-        this.activeAntigravityLogin.process.kill('SIGTERM');
+        existing.process.kill('SIGTERM');
       } catch {}
-      this.activeAntigravityLogin = null;
+      this.activeAntigravityLogins.delete(sessionKey);
     }
 
     this.stashHostAntigravityTokens();
@@ -1163,6 +1329,7 @@ export class CliAuthService {
       logger.info('[Antigravity Auth] Spawning agy process in headless mode via native PTY', {
         spawnCmd: ptySpawn.cmd,
         spawnArgs: ptySpawn.args,
+        sessionKey,
       });
 
       const proc = spawn(ptySpawn.cmd, ptySpawn.args, {
@@ -1178,9 +1345,10 @@ export class CliAuthService {
       }, 10000);
 
       const sessionExpiryTimer = setTimeout(() => {
-        if (this.activeAntigravityLogin?.process === proc) {
+        const cur = this.activeAntigravityLogins.get(sessionKey);
+        if (cur?.process === proc) {
           try { proc.kill('SIGTERM'); } catch {}
-          this.activeAntigravityLogin = null;
+          this.activeAntigravityLogins.delete(sessionKey);
         }
       }, 900000); // 15 minutes to allow user to complete browser OAuth
 
@@ -1193,14 +1361,15 @@ export class CliAuthService {
           resolved = true;
           clearTimeout(timeoutId);
           const authUrl = urlMatch[0];
-          this.activeAntigravityLogin = {
+          const startedAt = Date.now();
+          this.activeAntigravityLogins.set(sessionKey, {
             process: proc,
             authUrl,
-            startedAt: Date.now(),
+            startedAt,
             timeoutId: sessionExpiryTimer,
-          };
-          logger.info('Captured Antigravity CLI OAuth authorization URL', { authUrl });
-          resolve({ authUrl, sessionId: String(Date.now()) });
+          });
+          logger.info('Captured Antigravity CLI OAuth authorization URL', { authUrl, sessionKey });
+          resolve({ authUrl, sessionId: String(startedAt) });
         }
       };
 
@@ -1210,11 +1379,12 @@ export class CliAuthService {
       proc.on('close', (code) => {
         clearTimeout(timeoutId);
         clearTimeout(sessionExpiryTimer);
-        if (this.activeAntigravityLogin?.process === proc) {
-          this.activeAntigravityLogin = null;
+        const cur = this.activeAntigravityLogins.get(sessionKey);
+        if (cur?.process === proc) {
+          this.activeAntigravityLogins.delete(sessionKey);
         }
         if (code === 0) {
-          logger.info('Antigravity CLI login process completed successfully');
+          logger.info('Antigravity CLI login process completed successfully', { sessionKey });
           this.syncAntigravityCredentials();
         } else if (!resolved) {
           reject(new AppError(`Antigravity CLI login process exited with code ${code}: ${buf}`, 500, 'CLI_LOGIN_ERROR'));
@@ -1277,12 +1447,18 @@ export class CliAuthService {
     }
 
     // 3. Ensure active CLI login process is alive
-    if (!this.activeAntigravityLogin || !this.activeAntigravityLogin.process.stdin?.writable) {
-      logger.warn('[Antigravity Auth] No active Antigravity CLI process waiting on stdin. Login session may have exceeded the 60s timeout.');
+    const sessionKey = userId || 'global';
+    let activeLogin = this.activeAntigravityLogins.get(sessionKey);
+    if (!activeLogin && sessionKey !== 'global') {
+      activeLogin = this.activeAntigravityLogins.get('global');
+    }
+
+    if (!activeLogin || !activeLogin.process.stdin?.writable) {
+      logger.warn('[Antigravity Auth] No active Antigravity CLI process waiting on stdin', { sessionKey });
       this.syncAntigravityCredentials();
-      const alreadyLinked = this.isAntigravityLinked();
+      const alreadyLinked = userId ? this.isAntigravityLinked(userId) : this.isAntigravityLinked();
       if (alreadyLinked) {
-        logger.info('[Antigravity Auth] Existing valid credentials found on disk');
+        logger.info('[Antigravity Auth] Existing valid credentials found on disk for user', { userId });
         return { success: true };
       }
       return {
@@ -1292,23 +1468,28 @@ export class CliAuthService {
       };
     }
 
-    const proc = this.activeAntigravityLogin.process;
-    logger.info('[Antigravity Auth] Writing authorization code to agy process stdin', { pid: proc.pid });
+    const proc = activeLogin.process;
+    logger.info('[Antigravity Auth] Writing authorization code to agy process stdin', { pid: proc.pid, sessionKey });
 
     return new Promise((resolve) => {
       let finished = false;
       const finish = (ok: boolean, errReason?: string, errMsg?: string) => {
         if (!finished) {
           finished = true;
+          this.activeAntigravityLogins.delete(sessionKey);
+          if (sessionKey !== 'global') {
+            this.activeAntigravityLogins.delete('global');
+          }
           this.syncAntigravityCredentials();
-          const linked = this.isAntigravityLinked();
+          const linked = userId ? this.isAntigravityLinked(userId) : this.isAntigravityLinked();
           logger.info('[Antigravity Auth] Code submission resolution', {
             linked,
             ok,
             errReason,
+            sessionKey,
           });
           if (linked || ok) {
-            if (userId && userId !== 'default' && userId !== 'default_user') {
+            if (userId) {
               this.persistUserAntigravityProfile(userId, userEmail);
             }
             resolve({ success: true });
@@ -1324,10 +1505,11 @@ export class CliAuthService {
 
       const checkInterval = setInterval(() => {
         this.syncAntigravityCredentials();
-        if (this.isAntigravityLinked()) {
+        const linked = userId ? this.isAntigravityLinked(userId) : this.isAntigravityLinked();
+        if (linked) {
           clearInterval(checkInterval);
           clearTimeout(timer);
-          logger.info('[Antigravity Auth] Successful credential creation detected on disk via polling');
+          logger.info('[Antigravity Auth] Successful credential creation detected on disk via polling', { sessionKey });
           finish(true);
         }
       }, 500);
@@ -1352,9 +1534,10 @@ export class CliAuthService {
       proc.once('close', (exitCode) => {
         clearInterval(checkInterval);
         clearTimeout(timer);
-        logger.info('[Antigravity Auth] agy process closed', { exitCode, lastErrorMessage });
+        this.activeAntigravityLogins.delete(sessionKey);
+        logger.info('[Antigravity Auth] agy process closed', { exitCode, lastErrorMessage, sessionKey });
         this.syncAntigravityCredentials();
-        const linked = this.isAntigravityLinked();
+        const linked = userId ? this.isAntigravityLinked(userId) : this.isAntigravityLinked();
         if (linked || exitCode === 0) {
           finish(true);
         } else {
@@ -1365,8 +1548,8 @@ export class CliAuthService {
       const timer = setTimeout(() => {
         clearInterval(checkInterval);
         this.syncAntigravityCredentials();
-        const linked = this.isAntigravityLinked();
-        logger.warn('[Antigravity Auth] Timed out waiting 30s for agy process after code submission', { linked });
+        const linked = userId ? this.isAntigravityLinked(userId) : this.isAntigravityLinked();
+        logger.warn('[Antigravity Auth] Timed out waiting 30s for agy process after code submission', { linked, sessionKey });
         finish(linked, 'SUBMIT_TIMEOUT', 'Timed out waiting for Antigravity CLI to complete authorization.');
       }, 30000);
 
@@ -1378,7 +1561,8 @@ export class CliAuthService {
         clearTimeout(timer);
         logger.error('[Antigravity Auth] Failed to write code to agy stdin', err);
         this.syncAntigravityCredentials();
-        finish(this.isAntigravityLinked(), 'STDIN_WRITE_ERROR', 'Failed to communicate with Antigravity CLI process.');
+        const linked = userId ? this.isAntigravityLinked(userId) : this.isAntigravityLinked();
+        finish(linked, 'STDIN_WRITE_ERROR', 'Failed to communicate with Antigravity CLI process.');
       }
     });
   }
@@ -1452,13 +1636,22 @@ export class CliAuthService {
   /**
    * Unlinks Gemini / Antigravity CLI credentials.
    */
-  public unlinkGemini(): void {
-    if (this.activeAntigravityLogin) {
-      clearTimeout(this.activeAntigravityLogin.timeoutId);
+  public unlinkGemini(userId?: string): void {
+    const sessionKey = userId || 'global';
+    const active = this.activeAntigravityLogins.get(sessionKey);
+    if (active) {
+      clearTimeout(active.timeoutId);
       try {
-        this.activeAntigravityLogin.process.kill('SIGTERM');
+        active.process.kill('SIGTERM');
       } catch {}
-      this.activeAntigravityLogin = null;
+      this.activeAntigravityLogins.delete(sessionKey);
+    }
+    if (sessionKey === 'global') {
+      for (const [k, login] of this.activeAntigravityLogins.entries()) {
+        clearTimeout(login.timeoutId);
+        try { login.process.kill('SIGTERM'); } catch {}
+        this.activeAntigravityLogins.delete(k);
+      }
     }
 
     const homedir = os.homedir();
@@ -1605,6 +1798,10 @@ export class CliAuthService {
 
     if (antigravityLinked && effectiveUserId) {
       this.persistUserAntigravityProfile(effectiveUserId, email);
+    }
+    if (codexLinked && effectiveUserId) {
+      const codexUserEmail = codexEmail || userRecord?.codex?.email || email;
+      this.persistUserCodexProfile(effectiveUserId, codexUserEmail);
     }
 
     const agyStatus = {
@@ -1906,48 +2103,13 @@ export class CliAuthService {
   }
 
   public getCodexAuthInfo(userId?: string): { linked: boolean; email?: string; mtime?: number } {
-    const candidateFiles: string[] = [];
-
-    if (userId && userId !== 'default' && userId !== 'default_user') {
-      const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
-      candidateFiles.push(
-        path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.codex', 'auth.json'),
-        path.join(os.homedir(), '.agent-codex-auth', safeUserId, 'auth.json'),
-        path.join(os.homedir(), '.agent-codex-auth', safeUserId, '.codex', 'auth.json')
-      );
+    const valid = this.findValidCodexAuthForEmail(undefined, userId);
+    if (valid) {
+      return {
+        linked: true,
+        email: valid.email || 'ChatGPT Account',
+      };
     }
-
-    candidateFiles.push(path.join(os.homedir(), '.codex', 'auth.json'));
-
-    for (const authJsonPath of candidateFiles) {
-      if (fs.existsSync(authJsonPath)) {
-        try {
-          const stats = fs.statSync(authJsonPath);
-          if (stats.size > 20) {
-            const raw = fs.readFileSync(authJsonPath, 'utf8');
-            const parsed = JSON.parse(raw);
-            let email = parsed.email;
-            if (!email && parsed.tokens?.id_token) {
-              try {
-                const parts = parsed.tokens.id_token.split('.');
-                if (parts.length > 1) {
-                  const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-                  if (payload.email) email = payload.email;
-                }
-              } catch {}
-            }
-            if (parsed.tokens || parsed.OPENAI_API_KEY || parsed.auth_mode) {
-              return {
-                linked: true,
-                email: email || (parsed.tokens ? 'ChatGPT Account' : undefined),
-                mtime: stats.mtimeMs,
-              };
-            }
-          }
-        } catch {}
-      }
-    }
-
     return { linked: false };
   }
 
@@ -2117,7 +2279,7 @@ export class CliAuthService {
           const resolvedEmail = userDetectedEmail || info.email || 'ChatGPT Account';
           logger.info('[Codex Auth] Codex CLI login process completed successfully for user', { loginUserId, resolvedEmail });
 
-          if (loginUserId && loginUserId !== 'default' && loginUserId !== 'default_user') {
+          if (loginUserId) {
             const userProfileCodexDir = path.join(os.homedir(), '.agent-user-profiles', safeUserId, '.codex');
             try {
               if (!fs.existsSync(userProfileCodexDir)) {

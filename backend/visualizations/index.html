@@ -93,6 +93,54 @@
       color: #0b0f19;
       font-weight: 600;
     }
+    .dropdown-container {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #1e293b;
+      padding: 0.2rem 0.5rem;
+      border-radius: 0.5rem;
+      border: 1px solid #334155;
+    }
+    .dropdown-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .dropdown-select {
+      background: #0f172a;
+      color: #38bdf8;
+      border: 1px solid #334155;
+      border-radius: 0.375rem;
+      padding: 0.35rem 2rem 0.35rem 0.75rem;
+      font-size: 0.825rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      outline: none;
+      appearance: none;
+      background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2338bdf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+      background-repeat: no-repeat;
+      background-position: right 0.6rem center;
+      background-size: 14px;
+      transition: all 0.2s ease;
+    }
+    .dropdown-select:hover {
+      border-color: #38bdf8;
+      background-color: #1e293b;
+    }
+    .dropdown-select:focus {
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25);
+    }
+    .dropdown-select option {
+      background: #0f172a;
+      color: #f8fafc;
+      font-weight: 500;
+      padding: 0.5rem;
+    }
     .action-btn {
       padding: 0.35rem 0.65rem;
       font-size: 0.8rem;
@@ -267,12 +315,19 @@
     </div>
 
     <div class="controls">
-      <!-- DIAGRAM SELECTOR -->
-      <div class="segmented-group">
-        <button id="tabCodebase" class="seg-btn active" onclick="switchTab('codebase')">Master Class Diagram</button>
-        <button id="tabArch" class="seg-btn" onclick="switchTab('arch')">System Architecture</button>
-        <button id="tabFlow" class="seg-btn" onclick="switchTab('flow')">User Flow</button>
-        <button id="tabCodex" class="seg-btn" onclick="switchTab('codex')">Codex Auth Flow</button>
+      <!-- DIAGRAM SELECTOR DROPDOWN -->
+      <div class="dropdown-container">
+        <label for="diagramSelect" class="dropdown-label">Diagram</label>
+        <select id="diagramSelect" class="dropdown-select" onchange="switchTab(this.value)">
+          <option value="codebase">Master Class Diagram</option>
+          <option value="arch">System Architecture</option>
+          <option value="flow">User Flow</option>
+          <option value="codex">Codex Auth Flow</option>
+          <option value="sequence">Single-Call Prompt Sequence</option>
+          <option value="hexagonal">Feature-Sliced Hexagonal Architecture</option>
+          <option value="sandbox">Cloud Sandbox Provisioning Sequence</option>
+          <option value="codex-models">Codex Model Retrieval Sequence</option>
+        </select>
       </div>
 
       <!-- VIEW MODE -->
@@ -399,10 +454,110 @@
         </div>
       </div>
     </div>
+
+    <!-- SINGLE-CALL PROMPT SEQUENCE CARD -->
+    <div id="sequence-card" class="diagram-card">
+      <div class="diagram-header">
+        <div>
+          <h2>Single-Call Consolidated Agent Sequence (4-Phase Defense)</h2>
+          <p>Consolidated prompt execution: 4-Phase defense pipeline, microVM CLI execution, SSE token streaming, and piggybacked terminal state.</p>
+        </div>
+        <div class="hint-chip">
+          Scroll wheel to zoom &bull; Click and drag to pan
+        </div>
+      </div>
+
+      <div class="canvas-viewport" id="viewport-sequence">
+        <div class="pan-container" id="container-sequence">
+          <img src="single-call-sequence.svg" alt="Single-Call Prompt Sequence Diagram" id="img-sequence">
+        </div>
+        <div class="viewport-overlay-controls">
+          <button class="icon-btn" onclick="zoom('sequence', -0.15)" title="Zoom Out">&minus;</button>
+          <span class="zoom-badge" id="zoom-sequence-badge">100%</span>
+          <button class="icon-btn" onclick="zoom('sequence', 0.15)" title="Zoom In">&plus;</button>
+          <button class="icon-btn" onclick="resetZoom('sequence')" title="Reset Zoom">&#8635;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- FEATURE-SLICED HEXAGONAL ARCHITECTURE CARD -->
+    <div id="hexagonal-card" class="diagram-card">
+      <div class="diagram-header">
+        <div>
+          <h2>Feature-Sliced Hexagonal Architecture (Ports & Adapters)</h2>
+          <p>Multi-provider CLI switching, E2B Linux microVM infrastructure adapter, 4-phase defense gateway, and streaming pipelines.</p>
+        </div>
+        <div class="hint-chip">
+          Scroll wheel to zoom &bull; Click and drag to pan
+        </div>
+      </div>
+
+      <div class="canvas-viewport" id="viewport-hexagonal">
+        <div class="pan-container" id="container-hexagonal">
+          <img src="hexagonal-architecture.svg" alt="Feature-Sliced Hexagonal Architecture Diagram" id="img-hexagonal">
+        </div>
+        <div class="viewport-overlay-controls">
+          <button class="icon-btn" onclick="zoom('hexagonal', -0.15)" title="Zoom Out">&minus;</button>
+          <span class="zoom-badge" id="zoom-hexagonal-badge">100%</span>
+          <button class="icon-btn" onclick="zoom('hexagonal', 0.15)" title="Zoom In">&plus;</button>
+          <button class="icon-btn" onclick="resetZoom('hexagonal')" title="Reset Zoom">&#8635;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CLOUD SANDBOX PROVISIONING SEQUENCE CARD -->
+    <div id="sandbox-card" class="diagram-card">
+      <div class="diagram-header">
+        <div>
+          <h2>Cloud Sandbox MicroVM Provisioning Lifecycle (4-Phase Defense)</h2>
+          <p>End-to-end sandbox creation: 4-Phase defense & strict capacity guard, E2B microVM spin-up, Linux DAC boundary, credential hot-swap, and direct state hydration (zero secondary calls).</p>
+        </div>
+        <div class="hint-chip">
+          Scroll wheel to zoom &bull; Click and drag to pan
+        </div>
+      </div>
+
+      <div class="canvas-viewport" id="viewport-sandbox">
+        <div class="pan-container" id="container-sandbox">
+          <img src="sandbox-provision-sequence.svg" alt="Cloud Sandbox MicroVM Provisioning Sequence Diagram" id="img-sandbox">
+        </div>
+        <div class="viewport-overlay-controls">
+          <button class="icon-btn" onclick="zoom('sandbox', -0.15)" title="Zoom Out">&minus;</button>
+          <span class="zoom-badge" id="zoom-sandbox-badge">100%</span>
+          <button class="icon-btn" onclick="zoom('sandbox', 0.15)" title="Zoom In">&plus;</button>
+          <button class="icon-btn" onclick="resetZoom('sandbox')" title="Reset Zoom">&#8635;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CODEX MODEL RETRIEVAL SEQUENCE CARD -->
+    <div id="codex-models-card" class="diagram-card">
+      <div class="diagram-header">
+        <div>
+          <h2>Codex Model Retrieval Sequence (Live CLI Discovery & JIT Staging)</h2>
+          <p>End-to-end model discovery: Frontend deduplication, 4-phase defense gateway resolution, JIT credential staging into multi-tenant user profile, cloud microVM execution of 'codex debug models', reasoning effort mapping, and dynamic JSON catalogue parsing.</p>
+        </div>
+        <div class="hint-chip">
+          Scroll wheel to zoom &bull; Click and drag to pan
+        </div>
+      </div>
+
+      <div class="canvas-viewport" id="viewport-codex-models">
+        <div class="pan-container" id="container-codex-models">
+          <img src="codex-model-retrieval-sequence.svg" alt="Codex Model Retrieval Sequence Diagram" id="img-codex-models">
+        </div>
+        <div class="viewport-overlay-controls">
+          <button class="icon-btn" onclick="zoom('codex-models', -0.15)" title="Zoom Out">&minus;</button>
+          <span class="zoom-badge" id="zoom-codex-models-badge">100%</span>
+          <button class="icon-btn" onclick="zoom('codex-models', 0.15)" title="Zoom In">&plus;</button>
+          <button class="icon-btn" onclick="resetZoom('codex-models')" title="Reset Zoom">&#8635;</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <script>
-    const allTabIds = ['codebase', 'arch', 'flow', 'codex'];
+    const allTabIds = ['codebase', 'arch', 'flow', 'codex', 'sequence', 'hexagonal', 'sandbox', 'codex-models'];
     let activeTab = 'codebase';
     let currentMode = 'fit';
 
@@ -415,7 +570,11 @@
       codebase: 'codebase-class-diagram',
       arch: 'architecture-diagram',
       flow: 'user-flow-diagram',
-      codex: 'codex-auth-flow'
+      codex: 'codex-auth-flow',
+      sequence: 'single-call-sequence',
+      hexagonal: 'hexagonal-architecture',
+      sandbox: 'sandbox-provision-sequence',
+      'codex-models': 'codex-model-retrieval-sequence'
     };
 
     function updateTransform(id) {
@@ -450,15 +609,16 @@
 
     function switchTab(tab) {
       activeTab = tab;
+      const select = document.getElementById('diagramSelect');
+      if (select && select.value !== tab) {
+        select.value = tab;
+      }
       allTabIds.forEach(key => {
         const card = document.getElementById(key + '-card');
-        const tabBtn = document.getElementById('tab' + key.charAt(0).toUpperCase() + key.slice(1));
         if (key === tab) {
           if (card) card.classList.add('active');
-          if (tabBtn) tabBtn.classList.add('active');
         } else {
           if (card) card.classList.remove('active');
-          if (tabBtn) tabBtn.classList.remove('active');
         }
       });
 

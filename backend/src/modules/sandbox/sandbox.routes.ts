@@ -59,19 +59,17 @@ export async function sandboxRoutes(app: FastifyInstance): Promise<void> {
     preHandler: [readApiLimitHook],
   }, sandboxController.getFileContent.bind(sandboxController));
 
-  // User-scoped sandbox quota and usage discovery
-  app.get('/api/v1/sandbox/usage', {
+  // User-scoped cloud sandboxes listing and quota discovery
+  app.get('/api/v1/sandboxes', {
     schema: {
       tags: ['Sandbox'],
-      summary: 'Get user sandbox quota & usage',
+      summary: 'List user cloud sandbox microVMs & quota capacity',
       description: '⏱️ **Rate Limit**: `120 req / min` (Tier 5: Read APIs)\n🔒 **Auth**: Required (`Bearer <JWT>`)\n\nReturns active sandbox instances, assigned microVM IDs, and slot utilization for authenticated user.',
       security: [{ bearerAuth: [] }],
       querystring: {
         type: 'object',
-        properties: {
-          activeSessionIds: { type: 'string', description: 'Comma-separated list of active frontend session IDs' },
-        },
-        additionalProperties: false,
+        properties: {},
+        additionalProperties: true,
       },
     },
     preValidation: [requireAuth],
@@ -101,27 +99,6 @@ export async function sandboxRoutes(app: FastifyInstance): Promise<void> {
     preHandler: [mutationLimitHook],
   }, sandboxController.executeInSandbox.bind(sandboxController));
 
-  // Session microVM attachment
-  app.post('/api/v1/sandbox/attach', {
-    schema: {
-      tags: ['Sandbox'],
-      summary: 'Attach session to existing microVM',
-      description: '⏱️ **Rate Limit**: `60 req / min` (Tier 4: State Mutations)\n🔒 **Auth**: Required (`Bearer <JWT>`)\n\nBinds an active chat session to a running sandbox microVM owned by the user.',
-      security: [{ bearerAuth: [] }],
-      body: {
-        type: 'object',
-        properties: {
-          sessionId: { type: 'string', minLength: 1 },
-          sandboxId: { type: 'string', minLength: 1 },
-        },
-        required: ['sessionId', 'sandboxId'],
-        additionalProperties: false,
-      },
-    },
-    preValidation: [requireAuth],
-    preHandler: [mutationLimitHook],
-  }, sandboxController.attachSession.bind(sandboxController));
-
   // Expensive cloud microVM provisioning (calibrated to 5 req/min)
   app.post('/api/v1/sandbox/create', {
     schema: {
@@ -133,7 +110,6 @@ export async function sandboxRoutes(app: FastifyInstance): Promise<void> {
         type: 'object',
         properties: {
           sessionId: { type: 'string' },
-          replaceOldest: { type: 'boolean' },
         },
         additionalProperties: false,
       },
@@ -141,32 +117,6 @@ export async function sandboxRoutes(app: FastifyInstance): Promise<void> {
     preValidation: [requireAuth],
     preHandler: [sandboxProvisionLimitHook],
   }, sandboxController.createSandbox.bind(sandboxController));
-
-  // Session detachment
-  app.post('/api/v1/sandbox/detach', {
-    schema: {
-      tags: ['Sandbox'],
-      summary: 'Detach session from sandbox',
-      description: '⏱️ **Rate Limit**: `60 req / min` (Tier 4: State Mutations)\n🔒 **Auth**: Required (`Bearer <JWT>`)\n\nDetaches a session from a microVM while preserving the underlying cloud microVM for future turns.',
-      security: [{ bearerAuth: [] }],
-      body: {
-        type: 'object',
-        properties: {
-          sessionId: { type: 'string', minLength: 1 },
-        },
-        additionalProperties: false,
-      },
-      querystring: {
-        type: 'object',
-        properties: {
-          sessionId: { type: 'string', minLength: 1 },
-        },
-        additionalProperties: false,
-      },
-    },
-    preValidation: [requireAuth],
-    preHandler: [mutationLimitHook],
-  }, sandboxController.detachSession.bind(sandboxController));
 
   // Sandbox teardown / slot release
   app.delete('/api/v1/sandbox', {
@@ -178,19 +128,9 @@ export async function sandboxRoutes(app: FastifyInstance): Promise<void> {
       querystring: {
         type: 'object',
         properties: {
-          sandboxId: { type: 'string' },
-          sessionId: { type: 'string' },
-          clearAllSessions: { type: 'boolean' },
+          sandboxId: { type: 'string', description: 'ID of the microVM sandbox to destroy' },
         },
-        additionalProperties: false,
-      },
-      body: {
-        type: 'object',
-        properties: {
-          sandboxId: { type: 'string' },
-          sessionId: { type: 'string' },
-          clearAllSessions: { type: 'boolean' },
-        },
+        required: ['sandboxId'],
         additionalProperties: false,
       },
     },

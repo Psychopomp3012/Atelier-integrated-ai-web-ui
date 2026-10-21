@@ -118,7 +118,7 @@ export const Accordion: React.FC<AccordionProps> = ({
     ) {
       return (
         <span className={`material-symbols-outlined text-[16px] ${step.completed ? 'text-secondary' : 'text-primary animate-pulse'}`}>
-          psychology
+          settings
         </span>
       );
     }
@@ -151,7 +151,7 @@ export const Accordion: React.FC<AccordionProps> = ({
             </span>
           ) : (
             <span className="shrink-0 material-symbols-outlined text-[18px] text-secondary">
-              verified
+              check_circle
             </span>
           )}
           <span className="font-label-md text-label-md font-semibold text-on-surface truncate min-w-0">
@@ -273,7 +273,7 @@ export const Accordion: React.FC<AccordionProps> = ({
                         <div className="flex items-center justify-between px-2.5 py-1.5 bg-surface-container-high/70 dark:bg-surface-container-highest/70 text-[11px] font-mono text-on-surface-variant select-none border-b border-outline-variant/20">
                           <span className="flex items-center gap-1.5 font-medium">
                             <span className="material-symbols-outlined text-[14px] text-secondary">
-                              {step.command ? 'terminal' : 'psychology'}
+                              {step.command ? 'terminal' : 'settings'}
                             </span>
                             {step.command ? 'Terminal Output' : 'Reasoning & Execution Trace'}
                           </span>

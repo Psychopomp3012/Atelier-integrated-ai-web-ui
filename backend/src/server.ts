@@ -1,3 +1,8 @@
+import dns from 'node:dns';
+
+// Prioritize IPv4 over IPv6 to prevent ISP PMTU blackholing and 60s DEADLINE_EXCEEDED gRPC hangs on Google Cloud Firestore endpoints
+dns.setDefaultResultOrder('ipv4first');
+
 import { buildApp } from './app.js';
 import { envConfig } from './config/env.config.js';
 import { logger } from './utils/logger.util.js';

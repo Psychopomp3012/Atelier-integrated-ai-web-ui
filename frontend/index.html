@@ -2,7 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link id="app-favicon" rel="icon" type="image/svg+xml" href="/favicon-white.svg" />
+    <link rel="icon" type="image/svg+xml" href="/favicon-black.svg" media="(prefers-color-scheme: light)" />
+    <link rel="icon" type="image/svg+xml" href="/favicon-white.svg" media="(prefers-color-scheme: dark)" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Atelier - Cloud Agent Workspace</title>
     <!-- Google Fonts & Material Symbols -->
@@ -18,6 +20,10 @@
           document.documentElement.classList.add('dark');
         } else {
           document.documentElement.classList.remove('dark');
+        }
+        var fav = document.getElementById('app-favicon');
+        if (fav) {
+          fav.setAttribute('href', isDark ? '/favicon-white.svg' : '/favicon-black.svg');
         }
       })();
     </script>

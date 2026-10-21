@@ -7,6 +7,8 @@ import {
   isInspectorOpenAtom,
   currentSessionIdAtom,
   selectedSandboxIdAtom,
+  inspectorTargetFilePathAtom,
+  sandboxUsageAtom,
 } from '../state';
 
 export interface SandboxFileNode {
@@ -42,6 +44,7 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
   const atomSessionId = useAtomValue(currentSessionIdAtom);
   const atomSandboxId = useAtomValue(selectedSandboxIdAtom);
   const setIsAuthModalOpen = useSetAtom(isAuthModalOpenAtom);
+  const [targetFilePath, setTargetFilePath] = useAtom(inspectorTargetFilePathAtom);
 
   const isOpen = propIsOpen !== undefined ? propIsOpen : atomInspectorOpen;
   const onClose = propOnClose ?? (() => setAtomInspectorOpen(false));
@@ -65,37 +68,10 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
   const [activePreviewTab, setActivePreviewTab] = useState<'preview' | 'source'>('preview');
   const [zoomLevel, setZoomLevel] = useState<number>(100);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
-  interface SandboxItem {
-    sandboxId: string;
-    name: string;
-    sessionId?: string;
-    lastActiveAt: number;
-    createdAt: number;
-    attachedSessionCount: number;
-    attachedSessionIds: string[];
-  }
 
   const [copiedCode, setCopiedCode] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [quotaUsage, setQuotaUsage] = useState<{
-    used: number;
-    max: number;
-    sandboxes?: SandboxItem[];
-  } | null>(null);
-
-  const fetchUsage = useCallback(async () => {
-    if (!userId) {
-      setQuotaUsage({ used: 0, max: 3, sandboxes: [] });
-      return;
-    }
-    try {
-      const res = await apiFetch(`/api/v1/sandbox/usage?userId=${encodeURIComponent(userId)}`);
-      const data = await res.json();
-      if (data.success && data.data) {
-        setQuotaUsage(data.data);
-      }
-    } catch {}
-  }, [userId]);
+  const [quotaUsage, setQuotaUsage] = useAtom(sandboxUsageAtom);
 
   const currentSandbox = useMemo(() => {
     if (!userId || !quotaUsage?.sandboxes || quotaUsage.sandboxes.length === 0) return null;
@@ -103,12 +79,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       const found = quotaUsage.sandboxes.find((sb) => sb.sandboxId === effectiveSandboxId);
       if (found) return found;
     }
-    const cleanSession = (sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 32);
-    return (
-      quotaUsage.sandboxes.find((sb) => sb.attachedSessionIds?.includes(cleanSession)) ||
-      quotaUsage.sandboxes[0]
-    );
-  }, [userId, quotaUsage, sessionId, effectiveSandboxId]);
+    return quotaUsage.sandboxes[0];
+  }, [userId, quotaUsage, effectiveSandboxId]);
 
   const fetchFiles = useCallback(async (quiet = false) => {
     if (!userId) {
@@ -141,9 +113,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
-      fetchUsage();
     }
-  }, [userId, sessionId, effectiveSandboxId, currentSandbox?.sandboxId, fetchUsage]);
+  }, [userId, sessionId, effectiveSandboxId, currentSandbox?.sandboxId]);
 
   const [isStartingSandbox, setIsStartingSandbox] = useState(false);
 
@@ -158,11 +129,13 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       const res = await apiFetch('/api/v1/sandbox/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: activeSession, userId }),
+        body: JSON.stringify({ sessionId: activeSession }),
       });
       const data = await res.json();
       if (data.success) {
-        await fetchUsage();
+        if (data.data?.usage) {
+          setQuotaUsage(data.data.usage);
+        }
         await fetchFiles(true);
       }
     } catch (err) {
@@ -175,9 +148,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
   useEffect(() => {
     if (isOpen) {
       fetchFiles(true);
-      fetchUsage();
     }
-  }, [isOpen, refreshTrigger, fetchFiles, fetchUsage]);
+  }, [isOpen, refreshTrigger, fetchFiles]);
 
   const toggleFolder = (folderPath: string) => {
     setExpandedFolders((prev) => {
@@ -240,6 +212,40 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       setIsLoadingFile(false);
     }
   };
+
+  useEffect(() => {
+    if (!targetFilePath) return;
+
+    let clean = targetFilePath.trim();
+    if (clean.startsWith('file://')) {
+      clean = clean.replace(/^file:\/\//, '');
+    }
+    if (typeof window !== 'undefined' && clean.startsWith(window.location.origin)) {
+      clean = clean.slice(window.location.origin.length);
+    }
+    clean = clean.split('#')[0].split('?')[0];
+    clean = clean.replace(/^\/home\/user\/workspace\/?/, '');
+    clean = clean.replace(/^\/workspace\/?/, '');
+    clean = clean.replace(/^\.\//, '');
+    clean = clean.replace(/^\/+/, '');
+
+    const fileName = clean.split('/').pop() || clean || 'file';
+
+    const pathParts = clean.split('/');
+    if (pathParts.length > 1) {
+      const folderPath = pathParts.slice(0, -1).join('/');
+      setExpandedFolders((prev) => new Set([...prev, folderPath]));
+    }
+
+    setTargetFilePath(null);
+    setAtomInspectorOpen(true);
+
+    handleOpenFile({
+      path: clean,
+      name: fileName,
+      type: 'file',
+    });
+  }, [targetFilePath, setTargetFilePath, setAtomInspectorOpen, sessionId, effectiveSandboxId, currentSandbox?.sandboxId, userId]);
 
   const handleCopy = () => {
     if (!selectedFile) return;
@@ -410,7 +416,6 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
             <button
               type="button"
               onClick={() => {
-                fetchUsage();
                 fetchFiles(false);
               }}
               disabled={isLoading || isRefreshing}
@@ -471,8 +476,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
               </div>
               {currentSandbox ? (
                 <span className="text-[10px] text-outline flex items-center gap-1">
-                  <span className="material-symbols-outlined text-[11px] text-primary">link</span>
-                  <span>{currentSandbox.attachedSessionCount} chat{currentSandbox.attachedSessionCount > 1 ? 's' : ''} sharing workspace</span>
+                  <span className="material-symbols-outlined text-[11px] text-primary">cloud_done</span>
+                  <span>Active Cloud MicroVM</span>
                 </span>
               ) : (
                 <span className="text-[10px] text-outline">Offline • No VM started</span>
@@ -685,7 +690,6 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    fetchUsage();
                     fetchFiles(false);
                   }}
                   disabled={isLoading || isRefreshing}

@@ -16,10 +16,10 @@ Interactive API reference and runtime sandbox for Atelier Cloud Agent Workspace.
 Every endpoint enforces a sliding-window rate limiter keyed by \`user:<userId>\` (for authenticated callers) or \`ip:<ip>\` (for anonymous callers) to guarantee multi-tenant fairness:
 * **Tier 1: Cloud MicroVM Provisioning** (\`5 req / min\`): \`POST /api/v1/sandbox/create\` *(protects expensive cloud compute)*
 * **Tier 2: AI Execution & Prompts** (\`20 req / min\`): \`POST /api/v1/agent/prompt/stream\` *(protects agent loops)*
-* **Tier 3: Auth & Linking Sensitive** (\`20 req / min\`): \`POST /api/v1/auth/google\`, \`/auth/login\`, \`/auth/refresh\`, \`/auth/device/*\`, \`/auth/cli/*/code\`
-* **Tier 4: State Mutations & Commands** (\`60 req / min\`): \`POST/DELETE /api/v1/sessions\`, \`/sandbox/execute\`, \`/sandbox/attach\`, \`/agent/stop\`, etc.
-* **Tier 5: Read APIs & Status Polling** (\`120 req / min\`): \`GET /api/v1/sessions\`, \`/sandbox/files\`, \`/sandbox/usage\`, \`/quota/*\`, \`/auth/cli/status\`
-* **Tier 6: Public Endpoints & Diagnostics** (\`120 req / min\`): \`GET /api/v1/auth/config\`, \`/sandbox/logs\`, \`/rate-limit/status\`, \`/debug/logging\`
+* **Tier 3: Auth & Linking Sensitive** (\`20 req / min\`): \`POST /api/v1/auth/google\`, \`/auth/login\`, \`/auth/device/*\`, \`/auth/cli/*/code\`
+* **Tier 4: State Mutations & Commands** (\`60 req / min\`): \`POST/DELETE /api/v1/sessions\`, \`/sandbox/execute\`, \`/agent/stop\`, etc.
+* **Tier 5: Read APIs & Status Polling** (\`120 req / min\`): \`GET /api/v1/sessions\`, \`/sandbox/files\`, \`/sandboxes\`, \`/quota\`, \`/auth/cli/status\`
+* **Tier 6: Public Endpoints & Diagnostics** (\`120 req / min\`): \`GET /api/v1/auth/config\`, \`/sandbox/logs\`, \`/debug/logging\`
 
 ### 📡 Standard Rate Limit Headers
 Every response includes:
@@ -45,7 +45,6 @@ Every response includes:
         { name: 'Agent', description: 'AI prompt streaming (SSE), model discovery, and process abort control' },
         { name: 'Auth', description: 'Google OAuth, device authentication, and AI CLI subscription linking' },
         { name: 'Quota', description: 'Live subscription quota telemetry discovered from microVM CLIs' },
-        { name: 'RateLimit', description: 'Platform rate limit quota status and token bucket telemetry' },
       ],
       components: {
         securitySchemes: {

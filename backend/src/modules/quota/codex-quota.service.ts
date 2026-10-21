@@ -3,6 +3,7 @@ import { cliAuthService } from '../auth/cli-auth.service.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 import { logger } from '../../utils/logger.util.js';
+import { timingLogger } from '../../utils/timing.util.js';
 
 interface CliTelemetryPersistence {
   totalTurns: number;
@@ -53,7 +54,7 @@ export class CodexQuotaService {
       }
     }
     // Strict multi-tenant isolation: if a specific userId was passed, DO NOT fall back to another user's sandbox
-    if (userId && userId !== 'default' && userId !== 'default_user') {
+    if (userId) {
       return null;
     }
 
@@ -142,6 +143,7 @@ export class CodexQuotaService {
    * Executes strictly in cloud sandbox microVM without running codex on backend host.
    */
   private async queryLiveCodexQuota(userId?: string, sessionId?: string): Promise<{ rateLimits?: any; account?: any } | null> {
+    const start = performance.now();
     const activeSandboxId = this.resolveSandboxId(userId, sessionId);
     if (activeSandboxId) {
       try {
@@ -158,7 +160,12 @@ export class CodexQuotaService {
         if (cmdRes && cmdRes.stdout) {
           const parsed = JSON.parse(cmdRes.stdout.trim());
           if (parsed && (parsed.rateLimits || parsed.account)) {
-            logger.info('[Codex Quota] Resolved live OpenAI Codex quota data', {
+            logger.debug('[Codex Quota] Resolved live OpenAI Codex quota data', {
+              sandboxId: activeSandboxId,
+              userId,
+              planType: parsed.account?.planType || parsed.rateLimits?.planType,
+            });
+            timingLogger.logTiming('Quota', 'queryLiveCodexQuota (codex app-server)', Math.round(performance.now() - start), {
               sandboxId: activeSandboxId,
               userId,
               planType: parsed.account?.planType || parsed.rateLimits?.planType,
@@ -188,7 +195,7 @@ export class CodexQuotaService {
     const cacheKey = `${baseKey}:${activeSandboxId || 'none'}`;
     const cached = this.cachedQuotaLimitsMap.get(cacheKey);
     const now = Date.now();
-    if (cached && now - cached.timestamp < 10000) {
+    if (cached && now - cached.timestamp < 60000) {
       return cached.limits;
     }
 
@@ -300,6 +307,7 @@ export class CodexQuotaService {
    * Resolves authentic Codex CLI telemetry and quota scoped to the specific user.
    */
   public async getCodexQuota(userEmail?: string, sessionId?: string, userId?: string): Promise<CodexQuotaStats> {
+    const start = performance.now();
     const effectiveUserId = userId || (userEmail ? cliAuthService.getUserIdByEmail(userEmail) : undefined) || undefined;
     const inFlightKey = `${effectiveUserId || userId || userEmail || 'default'}:${sessionId || ''}`;
     const existing = this.inFlightQuotaMap.get(inFlightKey);
@@ -376,7 +384,7 @@ export class CodexQuotaService {
       const logSnapshot = `${isLinked}:${persistence.totalTurns}:${singleBucket?.remaining_fraction ?? 1}`;
       const lastLog = this.lastQuotaLogMap.get(logKey);
       const now = Date.now();
-      if (!lastLog || lastLog.snapshot !== logSnapshot || now - lastLog.timestamp > 15_000) {
+      if (!lastLog || lastLog.snapshot !== logSnapshot || now - lastLog.timestamp > 60_000) {
         this.lastQuotaLogMap.set(logKey, { snapshot: logSnapshot, timestamp: now });
         logger.info('[Codex Quota] Resolved user quota status', {
           userId,
@@ -391,6 +399,13 @@ export class CodexQuotaService {
           limitRemaining: singleBucket ? `${(singleBucket.remaining_fraction * 100).toFixed(2)}%` : 'N/A',
         });
       }
+
+      timingLogger.logTiming('Quota', 'getCodexQuota', Math.round(performance.now() - start), {
+        userId: effectiveUserId,
+        userEmail: email,
+        isLinked,
+        limitRemaining: singleBucket ? `${(singleBucket.remaining_fraction * 100).toFixed(2)}%` : 'N/A',
+      });
 
       return {
         linked: true,

@@ -8,23 +8,24 @@ import {
 } from '../../middleware/rate-limit.middleware.js';
 
 export async function agentRoutes(app: FastifyInstance): Promise<void> {
-  // Model discovery (optional auth to show personalized linked models)
+  // Model discovery (strictly authenticated, 4-phase defense pipeline)
   app.get('/api/v1/agent/models', {
     schema: {
       tags: ['Agent'],
       summary: 'List available AI models & reasoning effort levels',
-      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 5: Read APIs)\n🔓 **Auth**: Optional (`Bearer <JWT>`)\n\nDiscovers available LLM engines (Gemini, Claude, Codex) and reasoning effort variants live from CLI discovery.',
-      security: [{ bearerAuth: [] }, {}],
+      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 5: Read APIs)\n🔒 **Auth**: Required (`Bearer <JWT>`)\n\nDiscovers available LLM engines (Gemini, Claude, Codex) and reasoning effort variants live from CLI discovery.',
+      security: [{ bearerAuth: [] }],
       querystring: {
         type: 'object',
         properties: {
           sessionId: { type: 'string' },
+          userId: { type: 'string' },
+          force: { type: 'string' },
         },
         additionalProperties: false,
       },
     },
-    preValidation: [optionalAuth],
-    preHandler: [readApiLimitHook],
+    preValidation: [requireAuth, readApiLimitHook],
   }, agentController.getModels.bind(agentController));
 
   // AI prompt streaming execution (strictly authenticated, calibrated to 20 req/min)
@@ -46,8 +47,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         required: ['prompt', 'selectedModel'],
       },
     },
-    preValidation: [requireAuth],
-    preHandler: [agentPromptLimitHook],
+    preValidation: [requireAuth, agentPromptLimitHook],
   }, agentController.executePromptStream.bind(agentController));
 
   // User abort / cancel agent execution
@@ -66,7 +66,6 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         additionalProperties: false,
       },
     },
-    preValidation: [requireAuth],
-    preHandler: [mutationLimitHook],
+    preValidation: [requireAuth, mutationLimitHook],
   }, agentController.stopExecution.bind(agentController));
 }

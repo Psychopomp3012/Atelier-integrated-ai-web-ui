@@ -218,8 +218,65 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, class
         continue;
       }
 
+      // Markdown image ![alt](url)
+      const imageMatch = remaining.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
+      if (imageMatch) {
+        parts.push(
+          <img
+            key={`img-${keyIdx++}`}
+            src={imageMatch[2]}
+            alt={imageMatch[1] || 'image'}
+            className="my-2 max-w-full rounded-lg border border-outline-variant/30 shadow-sm inline-block"
+            loading="lazy"
+          />
+        );
+        remaining = remaining.slice(imageMatch[0].length);
+        continue;
+      }
+
+      // Markdown hyperlink [text](url)
+      const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
+      if (linkMatch) {
+        const linkText = linkMatch[1];
+        const rawHref = linkMatch[2].trim();
+        const isExternal =
+          /^(https?:\/\/|mailto:|tel:|ftp:\/\/)/i.test(rawHref) &&
+          (typeof window === 'undefined' ||
+            (!rawHref.startsWith(window.location.origin + '/home/user/workspace') &&
+             !rawHref.startsWith(window.location.origin + '/workspace')));
+
+        if (isExternal) {
+          parts.push(
+            <a
+              key={`link-${keyIdx++}`}
+              href={rawHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary underline hover:text-primary/80 transition-colors font-medium break-all"
+            >
+              {renderInline(linkText)}
+            </a>
+          );
+        } else {
+          // Internal sandbox workspace file or local document reference (non-clickable badge, no underlines, vertically aligned)
+          parts.push(
+            <span
+              key={`file-chip-${keyIdx++}`}
+              className="inline-flex items-center gap-1.5 font-mono text-xs sm:text-sm leading-none text-primary no-underline bg-primary/10 border border-primary/20 rounded px-1.5 py-0.5 align-middle select-text font-medium mx-0.5"
+            >
+              <span className="material-symbols-outlined text-[13px] leading-none text-tertiary shrink-0 select-none no-underline -translate-y-px">
+                description
+              </span>
+              <span className="no-underline leading-none">{renderInline(linkText)}</span>
+            </span>
+          );
+        }
+        remaining = remaining.slice(linkMatch[0].length);
+        continue;
+      }
+
       // Plain text up to next special char
-      const nextSpecial = remaining.search(/[`*_]/);
+      const nextSpecial = remaining.search(/[`*_!\[]/);
       if (nextSpecial === -1) {
         parts.push(remaining);
         break;
