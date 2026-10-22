@@ -55,7 +55,7 @@ Built strictly with Mermaid's native **`architecture-beta`** syntax matching the
 Built with Mermaid's **`flowchart TD`** visual decision engine featuring native FontAwesome iconography and condition branches:
 - **Session, Identity & Cleanup**:
   - OS theme auto-detection (`fa:fa-adjust`) and 7-day JWT auth check (`fa:fa-key`) with Google OAuth fallback.
-  - User sign-out (`fa:fa-sign-out-alt`) executes `performUserCleanup`, wiping session tokens, resetting volatile states, and cleanly clearing caches.
+  - User sign-out (`fa:fa-sign-out-alt`) dispatches `POST /api/v1/auth/logout`, invalidating user credential hashes in `SandboxService`, wiping session tokens, resetting volatile states, and cleanly clearing caches.
 - **Single-Flight 3D Cube Hydration Barrier (`z-[100]`)**:
   - Elevated modal stacking (`z-[100]`) and `authMeMountedRef` guard prevent race conditions, modal overlaps, or premature dismissal during initial load or account sign-in.
   - **Level-1 Parallel Cloud Hydration**: Linked CLI detection (`GET /api/v1/auth/cli/status`), active sandbox microVMs (`GET /api/v1/sandboxes`), and conversation history (`GET /api/v1/sessions`).
@@ -67,7 +67,7 @@ Built with Mermaid's **`flowchart TD`** visual decision engine featuring native 
 - **Sandbox-Coupled Model Discovery**:
   - **No VM Running**: Prompts user that a Sandbox VM is required (`fa:fa-rocket`) with one-click creation.
   - **VM Active but Detached**: Prompts user to select and attach an existing sandbox microVM (`fa:fa-link-slash`) to the current chat session.
-  - **VM Attached**: Automatically executes live CLI discovery inside the microVM (`agy models`, `codex debug models`, and live quota queries) strictly adhering to the zero-hardcode and zero-Firestore volatile limit rules.
+  - **VM Attached / Resumed**: Automatically invalidates cached credential hashes on reconnect/resume and triggers forced JIT credential synchronization (`syncCredentialsToSpecificSandbox` with `force=true`), ensuring `/home/agent-runner/.codex/auth.json` (chmod 600, `agent-runner` DAC) and `CODEX_HOME` environment are physically present before executing live CLI discovery inside the microVM (`agy models`, `codex debug models`, and live quota queries) strictly adhering to the zero-hardcode and zero-Firestore volatile limit rules.
   - **Dynamic Model Selection**: Renders discovered models with supported reasoning effort levels (`fa:fa-sliders`) and live quota gauges (5h rolling & weekly window for Antigravity, rolling limit for Codex).
 - **Multi-Sandbox Pooling & Sharing**: Sandbox decision branch (`fa:fa-cubes`):
   - **Manage / Delete**: Custom Red Delete Modal (`fa:fa-trash-alt`) prompting quota slot release and workspace cleanup in Firestore (`fa:fa-minus-circle`).

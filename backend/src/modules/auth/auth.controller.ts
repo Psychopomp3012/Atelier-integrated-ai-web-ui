@@ -35,7 +35,8 @@ export class AuthController {
     const session = await authService.loginWithGoogle(parseResult.data);
     logger.info('[Auth] Google login resolved session', { userId: session.user.id, email: session.user.email });
     if (session.user?.id) {
-      sandboxService.syncCredentialsToUserSandboxes(session.user.id).catch(() => {});
+      sandboxService.invalidateUserCredentialHash(session.user.id);
+      sandboxService.syncCredentialsToUserSandboxes(session.user.id, true).catch(() => {});
     }
     return reply.status(200).send(createSuccessResponse(session));
   }
@@ -43,7 +44,8 @@ export class AuthController {
   public async loginCli(_req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const session = await authService.loginWithCliAccount();
     if (session.user?.id) {
-      sandboxService.syncCredentialsToUserSandboxes(session.user.id).catch(() => {});
+      sandboxService.invalidateUserCredentialHash(session.user.id);
+      sandboxService.syncCredentialsToUserSandboxes(session.user.id, true).catch(() => {});
     }
     return reply.status(200).send(createSuccessResponse(session));
   }
@@ -156,8 +158,12 @@ export class AuthController {
   }
 
   public async logout(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const token = req.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null);
+    const token = (req as any).token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null);
     if (token) {
+      const session = await authService.getSession(token);
+      if (session?.user?.id) {
+        sandboxService.invalidateUserCredentialHash(session.user.id);
+      }
       await authService.logout(token);
     }
     return reply.status(200).send(createSuccessResponse({ loggedOut: true }));

@@ -23,26 +23,50 @@ export const UserMenu: React.FC<UserMenuProps> = ({
   const onOpenAuthModal = propOnOpenAuthModal ?? (() => setIsAuthModalOpen(true));
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const mobileModalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+    if (!isOpen) return;
+
+    const handleClickOutside = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node;
+      if (
+        menuRef.current?.contains(target) ||
+        mobileModalRef.current?.contains(target) ||
+        (target as HTMLElement)?.closest?.('[role="dialog"]')
+      ) {
+        return;
+      }
+      setIsOpen(false);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
         setIsOpen(false);
       }
     };
+
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+    document.addEventListener('touchstart', handleClickOutside);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen]);
 
   if (!user) {
     return (
       <button
         onClick={onOpenAuthModal}
-        className="h-[34px] inline-flex items-center gap-1.5 px-3 rounded-lg bg-primary text-on-primary hover:bg-primary-fixed-dim font-label-md text-xs font-semibold transition-all shadow-xs cursor-pointer whitespace-nowrap shrink-0"
+        className="h-[34px] w-[34px] sm:w-auto p-0 sm:px-3 inline-flex items-center justify-center sm:gap-1.5 rounded-lg bg-primary text-on-primary hover:bg-primary-fixed-dim font-label-md text-xs font-semibold transition-all shadow-xs cursor-pointer whitespace-nowrap shrink-0"
+        title="Sign in with Google"
+        aria-label="Sign in with Google"
       >
-        <span className="material-symbols-outlined text-[16px] leading-none">login</span>
+        <span className="material-symbols-outlined text-[18px] sm:text-[16px] leading-none">login</span>
         <span className="hidden sm:inline leading-none">Sign in with Google</span>
-        <span className="sm:hidden leading-none">Sign In</span>
       </button>
     );
   }
@@ -102,8 +126,8 @@ export const UserMenu: React.FC<UserMenuProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  setIsOpen(false);
                   onLogout();
+                  setIsOpen(false);
                 }}
                 className="w-full flex items-center gap-2 px-space-sm py-1.5 rounded-lg hover:bg-error-container/20 text-error font-label-md text-label-md transition-colors text-left cursor-pointer"
               >
@@ -116,6 +140,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({
           {/* Mobile Modal via React Portal */}
           {createPortal(
             <div
+              ref={mobileModalRef}
               className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs sm:hidden animate-fade-in"
               onClick={(e) => {
                 if (e.target === e.currentTarget) setIsOpen(false);
@@ -166,8 +191,8 @@ export const UserMenu: React.FC<UserMenuProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setIsOpen(false);
                       onLogout();
+                      setIsOpen(false);
                     }}
                     className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-error-container/10 hover:bg-error-container/20 border border-error/30 text-error font-label-md text-xs font-semibold transition-all text-left cursor-pointer shadow-xs active:scale-[0.99]"
                   >

@@ -273,6 +273,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
           this.addLog('INFO', `Resuming paused E2B sandbox ${sandboxId.substring(0, 8)}...`);
           const resumed = await Sandbox.connect(sandboxId, { apiKey: key });
           this.activeSandboxes.set(sandboxId, resumed);
+          this.invalidateSandboxCredentialHash(sandboxId);
           this.addLog('READY', `E2B sandbox resumed with full workspace preserved.`);
           return resumed;
         }
@@ -463,6 +464,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
         });
         await this.getSandboxInstance(sandboxId);
       }
+      this.invalidateSandboxCredentialHash(sandboxId);
     }
 
     record.lastActiveAt = Date.now();
@@ -520,10 +522,10 @@ export class E2BSandboxProvider implements ISandboxProvider {
    * 1. 'agent-runner' (UID system): owns credentials in /home/agent-runner with 0700/0600.
    * 2. 'user' (developer): owns /home/user/workspace (rw), but CANNOT read /home/agent-runner.
    */
-  public async syncCredentialsToSandbox(sandbox: Sandbox, userId?: string): Promise<void> {
+  public async syncCredentialsToSandbox(sandbox: Sandbox, userId?: string, force = false): Promise<void> {
     const syncKey = `${sandbox.sandboxId}:${userId || 'default'}`;
     const inFlight = this.inFlightCredentialSyncs.get(syncKey);
-    if (inFlight) {
+    if (!force && inFlight) {
       return inFlight;
     }
 
@@ -703,7 +705,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
 
         // Content hash check: Avoid re-writing identical credentials to microVM if unchanged
         const contentHash = filesToSync.map((f) => `${f.targetPath}:${f.content}`).join('|') + '||' + cleanupCommands.join(';');
-        if (this.lastSyncedCredentialsHash.get(syncKey) === contentHash) {
+        if (!force && this.lastSyncedCredentialsHash.get(syncKey) === contentHash) {
           return; // Credentials have not changed, skip redundant write & logging
         }
         this.lastSyncedCredentialsHash.set(syncKey, contentHash);
@@ -738,7 +740,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
     }
   }
 
-  public async syncCredentialsToUserSandboxes(userId?: string): Promise<void> {
+  public async syncCredentialsToUserSandboxes(userId?: string, force = false): Promise<void> {
     if (!userId) return;
     const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const targets: Sandbox[] = [];
@@ -750,7 +752,44 @@ export class E2BSandboxProvider implements ISandboxProvider {
         } catch {}
       }
     }
-    await Promise.all(targets.map((sb) => this.syncCredentialsToSandbox(sb, userId).catch(() => {})));
+    await Promise.all(targets.map((sb) => this.syncCredentialsToSandbox(sb, userId, force).catch(() => {})));
+  }
+
+  public async syncCredentialsToSpecificSandbox(sandboxId: string, userId?: string, force = false): Promise<void> {
+    if (!sandboxId) return;
+    try {
+      const inst = await this.getSandboxInstance(sandboxId);
+      if (inst) {
+        await this.syncCredentialsToSandbox(inst, userId, force);
+      }
+    } catch (err) {
+      logger.warn('[Sandbox Sync] Failed to sync credentials to specific sandbox', { sandboxId, userId, error: String(err) });
+    }
+  }
+
+  public invalidateSandboxCredentialHash(sandboxId?: string): void {
+    if (!sandboxId) {
+      this.lastSyncedCredentialsHash.clear();
+      return;
+    }
+    for (const key of this.lastSyncedCredentialsHash.keys()) {
+      if (key.startsWith(`${sandboxId}:`)) {
+        this.lastSyncedCredentialsHash.delete(key);
+      }
+    }
+  }
+
+  public invalidateUserCredentialHash(userId?: string): void {
+    if (!userId) {
+      this.lastSyncedCredentialsHash.clear();
+      return;
+    }
+    const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    for (const key of this.lastSyncedCredentialsHash.keys()) {
+      if (key.endsWith(`:${userId}`) || key.endsWith(`:${safeUid}`)) {
+        this.lastSyncedCredentialsHash.delete(key);
+      }
+    }
   }
 
   /**
@@ -1752,6 +1791,7 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       this.initializedSandboxes.delete(targetSandboxId);
       this.activeExecutions.delete(targetSandboxId);
       this.maintenancePromises.delete(targetSandboxId);
+      this.invalidateSandboxCredentialHash(targetSandboxId);
 
       this.addLog('READY', `E2B microVM ${targetSandboxId.substring(0, 8)} destroyed.`);
     } catch (err) {
@@ -1759,6 +1799,7 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
       this.sandboxRecords.delete(targetSandboxId);
       this.activeExecutions.delete(targetSandboxId);
       this.maintenancePromises.delete(targetSandboxId);
+      this.invalidateSandboxCredentialHash(targetSandboxId);
       logger.warn('Failed to kill E2B sandbox', { targetSandboxId, error: err });
     }
     this.renumberSandboxes();

@@ -197,7 +197,10 @@ export class AgentService {
       if (userEmail) {
         cliAuthService.persistUserAntigravityProfile(userId, userEmail);
       }
-      await sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      if (sandboxId) {
+        await sandboxService.syncCredentialsToSpecificSandbox(sandboxId, userId, true).catch(() => {});
+      }
+      await sandboxService.syncCredentialsToUserSandboxes(userId, true).catch(() => {});
     }
 
     let stdout = '';
@@ -405,7 +408,10 @@ export class AgentService {
       if (userEmail) {
         cliAuthService.persistUserCodexProfile(userId, userEmail);
       }
-      await sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      if (sandboxId) {
+        await sandboxService.syncCredentialsToSpecificSandbox(sandboxId, userId, true).catch(() => {});
+      }
+      await sandboxService.syncCredentialsToUserSandboxes(userId, true).catch(() => {});
     }
 
     const result: DynamicModelOption[] = [];
@@ -422,7 +428,7 @@ export class AgentService {
       // Only execute `codex debug models` if auth.json exists and is non-empty.
       // If auth.json is absent, exit immediately so the CLI never emits its built-in offline dummy catalogue.
       const cmdRes = await sandboxService.executeInSandbox({
-        command: `sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" bash -c 'test -s /home/agent-runner/.codex/auth.json && codex debug models'`,
+        command: `sudo -u agent-runner -H env HOME=/home/agent-runner CODEX_HOME=/home/agent-runner/.codex PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" bash -c 'test -s /home/agent-runner/.codex/auth.json && codex debug models'`,
         code: '',
         language: 'bash',
         sandboxId,
@@ -501,6 +507,9 @@ export class AgentService {
         }
 
         if (result.length > 0) {
+          if (userId) {
+            codexQuotaService.invalidateUserQuota(userId);
+          }
           return result;
         }
       } catch (err) {

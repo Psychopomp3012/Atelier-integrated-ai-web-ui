@@ -149,7 +149,7 @@ export class CodexQuotaService {
       try {
         const script = `node -e 'const { spawn } = require("child_process"); const proc = spawn("codex", ["app-server", "--stdio"]); let buffer = ""; let rateLimits = null; let account = null; const timer = setTimeout(() => { try { proc.kill(); } catch {} process.stdout.write(JSON.stringify({ rateLimits, account })); process.exit(0); }, 4000); proc.stdout.on("data", (chunk) => { buffer += chunk.toString(); const lines = buffer.split("\\n"); buffer = lines.pop() || ""; for (const line of lines) { const trimmed = line.trim(); if (!trimmed) continue; try { const json = JSON.parse(trimmed); if (json.id === 2 && json.result?.rateLimits) rateLimits = json.result.rateLimits; if (json.id === 3 && json.result?.account) account = json.result.account; if (rateLimits && account) { clearTimeout(timer); try { proc.kill(); } catch {} process.stdout.write(JSON.stringify({ rateLimits, account })); process.exit(0); } } catch {} } }); proc.on("error", () => { clearTimeout(timer); process.exit(0); }); proc.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: { name: "atelier-ui", title: "Atelier", version: "1.0.0" }, capabilities: null } }) + "\\n"); setTimeout(() => { try { proc.stdin.write(JSON.stringify({ id: 2, method: "account/rateLimits/read", params: {} }) + "\\n"); proc.stdin.write(JSON.stringify({ id: 3, method: "account/read", params: {} }) + "\\n"); } catch {} }, 200);'`;
         const cmdRes = await sandboxService.executeInSandbox({
-          command: `sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" ${script}`,
+          command: `sudo -u agent-runner -H env HOME=/home/agent-runner CODEX_HOME=/home/agent-runner/.codex PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" ${script}`,
           code: '',
           language: 'bash',
           sandboxId: activeSandboxId,
@@ -287,7 +287,9 @@ export class CodexQuotaService {
           groups,
           fetchedAt: new Date().toISOString(),
         };
-        this.cachedQuotaLimitsMap.set(cacheKey, { limits, timestamp: Date.now() });
+        // If groups are empty (e.g. sandbox credentials still syncing or daemon booting), only cache for 3s instead of 60s
+        const ttlOffset = groups.length > 0 ? 0 : 57000;
+        this.cachedQuotaLimitsMap.set(cacheKey, { limits, timestamp: Date.now() - ttlOffset });
         return limits;
       } catch (err) {
         logger.warn('[Codex Quota] Failed to construct live Codex quota limits', { error: String(err) });

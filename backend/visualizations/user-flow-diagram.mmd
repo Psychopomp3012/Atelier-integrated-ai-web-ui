@@ -69,25 +69,29 @@ flowchart TD
         Z[fa:fa-stream Stream SSE Tokens & Steps] --> AB([fa:fa-desktop Cloud Inspector Explorer])
 
         F --> SignOutAction[fa:fa-sign-out-alt User Signs Out]
-        SignOutAction --> Cleanup["fa:fa-broom performUserCleanup: Invalidate Tokens, Caches & State"]
+        SignOutAction --> LogoutReq["fa:fa-sign-out-alt POST /api/v1/auth/logout"]
+        LogoutReq --> Cleanup["fa:fa-broom performUserCleanup: Invalidate Tokens, Caches & State"]
         Cleanup --> D
     end
 
     subgraph Cloud["☁️ Backend Orchestrator & E2B MicroVM"]
         KDR --> K
 
-        KA --> RunCliLive
+        KA --> ForcedSync
         KN --> L{fa:fa-server Sandbox Active?}
         L -->|No / New| M[fa:fa-cloud Launch Firecracker VM]
         M --> N[fa:fa-microchip Allocate 1GB Swap]
         N --> O[fa:fa-lock Set agent-runner DAC Boundary]
         O --> P["fa:fa-download Pre-Install CLIs: agy/codex/claude"]
         P --> Q[fa:fa-key Pre-Seed Linked Credentials]
-        L -->|Yes / Reconnect| R[fa:fa-play Resume MicroVM]
-        Q --> RunCliLive[fa:fa-terminal Execute Live CLI Discovery inside VM]
-        R --> RunCliLive
-
-        QueryVM --> RunCliLive
+        L -->|Yes / Reconnect| R[fa:fa-play Resume / Reactivate MicroVM]
+        R --> RHash["fa:fa-arrows-rotate Invalidate Sandbox Credential Hash"]
+        LogoutReq -.-> InvalidateUserHash["fa:fa-ban Invalidate User Credential Hash"]
+        
+        Q --> ForcedSync
+        RHash --> ForcedSync
+        QueryVM --> ForcedSync["fa:fa-key Forced JIT Credential Sync: Write auth.json & Set CODEX_HOME"]
+        ForcedSync --> RunCliLive[fa:fa-terminal Execute Live CLI Discovery inside VM]
         RunCliLive --> CLIModels["fa:fa-search Live CLI Discovery: agy models / codex debug models"]
         RunCliLive --> CLIQuota["fa:fa-tachometer-alt Live Telemetry Quota: 5h/Weekly & Rolling Limits"]
         CLIModels --> ZeroHardcode[fa:fa-shield-alt Zero-Hardcode & Zero-Firestore Volatile Rule]

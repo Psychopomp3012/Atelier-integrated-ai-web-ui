@@ -197,10 +197,24 @@ export class SandboxService {
     }
   }
 
-  public async syncCredentialsToUserSandboxes(userId?: string): Promise<void> {
+  public async syncCredentialsToUserSandboxes(userId?: string, force = false): Promise<void> {
     if (this.e2bProvider.syncCredentialsToUserSandboxes) {
-      await this.e2bProvider.syncCredentialsToUserSandboxes(userId).catch(() => {});
+      await this.e2bProvider.syncCredentialsToUserSandboxes(userId, force).catch(() => {});
     }
+  }
+
+  public async syncCredentialsToSpecificSandbox(sandboxId: string, userId?: string, force = false): Promise<void> {
+    if (this.e2bProvider.syncCredentialsToSpecificSandbox) {
+      await this.e2bProvider.syncCredentialsToSpecificSandbox(sandboxId, userId, force).catch(() => {});
+    }
+  }
+
+  public invalidateSandboxCredentialHash(sandboxId?: string): void {
+    this.e2bProvider.invalidateSandboxCredentialHash?.(sandboxId);
+  }
+
+  public invalidateUserCredentialHash(userId?: string): void {
+    this.e2bProvider.invalidateUserCredentialHash?.(userId);
   }
 
   public async purgeUserCredentialsFromSandboxes(userId?: string, cli?: 'antigravity' | 'gemini' | 'claude' | 'codex'): Promise<void> {

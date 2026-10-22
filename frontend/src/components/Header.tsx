@@ -430,30 +430,11 @@ export const Header: React.FC<HeaderProps> = ({
     return 'Active';
   }, [isAntigravity, fraction5h, fractionWeekly, relevantGroup]);
 
-  // Ultra-compact single indicator strictly for mobile screens (e.g. "100%")
-  const mobileQuotaBadgeText = useMemo(() => {
-    if (isAnyLimitExhausted) return '0%';
+  const codexFraction =
+    relevantGroup?.buckets?.[0]?.remaining_fraction ??
+    tokenUsage?.codexQuota?.quotaLimits?.groups?.[0]?.buckets?.[0]?.remaining_fraction;
+  const codexPctText = codexFraction !== undefined ? `${Math.round(codexFraction * 100)}%` : null;
 
-    if (isAntigravity) {
-      if (fraction5h !== undefined) {
-        return `${Math.round(fraction5h * 100)}%`;
-      }
-      if (fractionWeekly !== undefined) {
-        return `${Math.round(fractionWeekly * 100)}%`;
-      }
-    }
-
-    const singleFraction =
-      relevantGroup?.buckets?.[0]?.remaining_fraction ??
-      fraction5h ??
-      fractionWeekly;
-
-    if (singleFraction !== undefined) {
-      return `${Math.round(singleFraction * 100)}%`;
-    }
-
-    return 'OK';
-  }, [isAnyLimitExhausted, isAntigravity, fraction5h, fractionWeekly, relevantGroup]);
 
   const formatResetCountdown = (isoDate?: string, remainingFraction?: number): string => {
     if (remainingFraction !== undefined && remainingFraction >= 1.0) {
@@ -875,7 +856,7 @@ export const Header: React.FC<HeaderProps> = ({
   );
 
   return (
-    <header className={`fixed top-0 left-0 right-0 lg:left-[260px] ${isInspectorOpen ? 'xl:right-[380px]' : 'xl:right-0'} h-14 bg-background/90 backdrop-blur-md border-b border-outline-variant/30 pl-2 sm:pl-2.5 lg:pl-gutter-desktop pr-3 sm:pr-4 md:pr-gutter-desktop flex items-center justify-between z-40 transition-all duration-300`}>
+    <header className={`fixed top-0 left-0 right-0 lg:left-[260px] ${isInspectorOpen ? 'xl:right-[380px]' : 'xl:right-0'} h-14 bg-background/90 backdrop-blur-md border-b border-outline-variant/30 pl-2 sm:pl-2.5 lg:pl-gutter-desktop pr-2 sm:pr-4 md:pr-gutter-desktop flex items-center justify-between z-40 transition-all duration-300`}>
       <div className="flex items-center shrink-0">
         {/* Mobile Hamburger Toggle for Left Sidebar */}
         <button
@@ -897,7 +878,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={() => {
               setShowSandboxDropdown(!showSandboxDropdown);
             }}
-            className="h-[34px] inline-flex items-center gap-1 sm:gap-1.5 bg-surface-container-low hover:bg-surface-container px-2 sm:px-2.5 rounded-lg border border-outline-variant/30 hover:border-outline-variant/60 font-code-sm text-code-sm text-on-surface transition-all cursor-pointer shadow-xs max-w-[150px] xs:max-w-[190px] sm:max-w-none"
+            className="h-[34px] inline-flex items-center gap-1 sm:gap-1.5 bg-surface-container-low hover:bg-surface-container px-2 sm:px-2.5 rounded-lg border border-outline-variant/30 hover:border-outline-variant/60 font-code-sm text-code-sm text-on-surface transition-all cursor-pointer shadow-xs shrink-0"
             title={
               activeSandbox
                 ? `Cloud Sandbox: ${activeSandbox.name} (Active)`
@@ -919,12 +900,12 @@ export const Header: React.FC<HeaderProps> = ({
             <span className={`material-symbols-outlined text-[15px] leading-none shrink-0 ${activeSandbox ? 'text-primary' : 'text-outline'}`}>
               {activeSandbox ? 'deployed_code' : 'cloud_off'}
             </span>
-            <span className={`font-medium text-xs truncate leading-none max-w-[55px] xs:max-w-[85px] sm:max-w-[105px] lg:max-w-[140px] ${activeSandbox ? 'text-on-surface' : 'text-on-surface-variant'}`}>
+            <span className={`hidden sm:inline font-medium text-xs truncate leading-none max-w-[105px] lg:max-w-[140px] ${activeSandbox ? 'text-on-surface' : 'text-on-surface-variant'}`}>
               {activeSandbox ? activeSandbox.name : user ? 'No Sandbox' : 'Sandbox'}
             </span>
             {user && sandboxUsage && (
               <span
-                className={`text-[9px] sm:text-[10px] px-1 sm:px-1.5 py-0.5 rounded font-mono font-medium leading-none shrink-0 ${activeSandbox
+                className={`hidden sm:inline text-[9px] sm:text-[10px] px-1 sm:px-1.5 py-0.5 rounded font-mono font-medium leading-none shrink-0 ${activeSandbox
                   ? sandboxUsage.used >= sandboxUsage.max
                     ? 'bg-amber-500/20 text-amber-400'
                     : 'bg-secondary/10 text-secondary'
@@ -1442,13 +1423,12 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => setShowLimitsPopover(!showLimitsPopover)}
-              className="h-[34px] inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 rounded-lg border border-dashed border-outline-variant/40 bg-surface-container-low text-outline hover:text-on-surface hover:border-outline-variant/80 font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 shadow-xs"
+              className="h-[34px] w-[34px] sm:w-auto p-0 sm:px-2.5 inline-flex items-center justify-center sm:gap-1.5 rounded-lg border border-dashed border-outline-variant/40 bg-surface-container-low text-outline hover:text-on-surface hover:border-outline-variant/80 font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 shadow-xs"
               title="No model selected. Click to view status or select a model below to activate live quota telemetry."
             >
-              <span className="material-symbols-outlined text-[14px] leading-none text-outline shrink-0">speed</span>
+              <span className="material-symbols-outlined text-[15px] leading-none text-outline shrink-0">speed</span>
               <span className="text-[11px] font-mono text-outline whitespace-nowrap hidden lg:inline leading-none">Telemetry: Standby</span>
               <span className="text-[11px] font-mono text-outline whitespace-nowrap hidden sm:inline lg:hidden leading-none">Standby</span>
-              <span className="text-[10px] font-mono text-outline whitespace-nowrap sm:hidden leading-none">Standby</span>
               <span className="material-symbols-outlined text-[13px] leading-none text-outline shrink-0 hidden sm:inline">
                 {showLimitsPopover ? 'expand_less' : 'expand_more'}
               </span>
@@ -1457,7 +1437,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => setShowLimitsPopover(!showLimitsPopover)}
-              className={`h-[34px] inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 rounded-lg border font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 shadow-xs ${!isModelLinked
+              className={`h-[34px] ${isCodex && isModelLinked && codexPctText ? 'px-2 gap-1.5 w-auto' : 'w-[34px] sm:w-auto p-0 sm:px-2.5 sm:gap-1.5'} inline-flex items-center justify-center rounded-lg border font-code-sm text-code-sm transition-all cursor-pointer whitespace-nowrap shrink-0 shadow-xs ${!isModelLinked
                 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/15'
                 : isAnyLimitExhausted
                   ? 'bg-rose-500/10 text-rose-300 border-rose-500/30 hover:bg-rose-500/15'
@@ -1476,22 +1456,23 @@ export const Header: React.FC<HeaderProps> = ({
             >
               {!isModelLinked ? (
                 <>
-                  <span className="material-symbols-outlined text-[14px] leading-none text-amber-400 shrink-0">
+                  <span className="material-symbols-outlined text-[16px] leading-none text-amber-400 shrink-0">
                     lock
                   </span>
                   <span className="text-amber-400 font-medium whitespace-nowrap hidden sm:inline leading-none">
                     {`${providerLabel} Not Linked`}
                   </span>
-                  <span className="text-amber-400 font-medium whitespace-nowrap sm:hidden text-[10px] leading-none">
-                    Unlinked
-                  </span>
                 </>
               ) : (
                 <>
                   {providerIcon}
+                  {isCodex && codexPctText && (
+                    <span className="sm:hidden font-mono text-xs font-semibold leading-none text-on-surface">
+                      {codexPctText}
+                    </span>
+                  )}
                   <span className="whitespace-nowrap hidden lg:inline leading-none">{`${providerLabel}: ${quotaBadgeText}`}</span>
                   <span className="whitespace-nowrap hidden sm:inline lg:hidden font-mono text-xs leading-none">{quotaBadgeText}</span>
-                  <span className="whitespace-nowrap sm:hidden font-mono text-[10px] font-semibold leading-none">{mobileQuotaBadgeText}</span>
                 </>
               )}
               <span className="material-symbols-outlined text-[13px] leading-none text-outline shrink-0 hidden sm:inline">
@@ -1511,7 +1492,7 @@ export const Header: React.FC<HeaderProps> = ({
               {/* Mobile Modal via React Portal */}
               {createPortal(
                 <div
-                  className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/75 backdrop-blur-xs sm:hidden animate-fade-in"
+                  className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-xs sm:hidden animate-fade-in"
                   onClick={(e) => {
                     if (e.target === e.currentTarget) setShowLimitsPopover(false);
                   }}
@@ -1521,12 +1502,9 @@ export const Header: React.FC<HeaderProps> = ({
                     role="dialog"
                     aria-modal="true"
                     aria-labelledby="cli-telemetry-title"
-                    className="w-full max-w-md bg-surface-container border border-outline-variant/30 rounded-t-3xl sm:rounded-2xl shadow-2xl p-4 animate-in slide-in-from-bottom duration-150 max-h-[85vh] flex flex-col"
+                    className="w-full max-w-sm sm:max-w-md bg-surface-container border border-outline-variant/30 rounded-2xl shadow-2xl p-4 animate-in fade-in zoom-in-95 duration-150 max-h-[85vh] flex flex-col"
                     onClick={(e) => e.stopPropagation()}
                   >
-                    {/* Pull Bar Handle for mobile */}
-                    <div className="w-10 h-1 bg-outline-variant/50 rounded-full mx-auto mb-2 shrink-0 sm:hidden" />
-
                     <div className="overflow-y-auto custom-scrollbar flex-1 pr-0.5">
                       {renderLimitsContent(true)}
                     </div>
@@ -1553,7 +1531,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Cloud Inspector Toggle (Desktop & Mobile) */}
         <button
           onClick={onToggleInspector}
-          className={`h-[34px] inline-flex items-center gap-1.5 px-2.5 rounded-lg font-code-sm text-code-sm border cursor-pointer shrink-0 transition-all active:scale-95 shadow-xs ${isInspectorOpen
+          className={`h-[34px] w-[34px] sm:w-auto p-0 sm:px-2.5 inline-flex items-center justify-center sm:gap-1.5 rounded-lg font-code-sm text-code-sm border cursor-pointer shrink-0 transition-all active:scale-95 shadow-xs ${isInspectorOpen
             ? 'bg-primary/15 text-primary border-primary/35'
             : 'bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-on-surface border-outline-variant/30'
             }`}
@@ -1566,7 +1544,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="hidden sm:block h-5 w-px bg-outline-variant/30 self-center shrink-0" />
 
         {/* User Account & Dual Platform Login */}
-        <div className="mr-2 sm:mr-3 md:mr-3.5 shrink-0 flex items-center">
+        <div className="mr-0 sm:mr-3 md:mr-3.5 shrink-0 flex items-center">
           <UserMenu
             user={user}
             onOpenAuthModal={onOpenAuthModal}

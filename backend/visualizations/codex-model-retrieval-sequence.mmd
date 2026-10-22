@@ -77,8 +77,9 @@ sequenceDiagram
             else codex.linked === true (Linked)
                 AS->>AS: JIT Refresh: persistUserCodexProfile(userId, email)
                 Note over AS: Evaluates findValidCodexAuthForEmail, checks token freshness & stages ~/.agent-user-profiles/{userId}/.codex/auth.json
-                AS->>SS: syncCredentialsToUserSandboxes(userId)
-                SS->>VM: Write verified /home/agent-runner/.codex/auth.json (chmod 600)
+                AS->>SS: syncCredentialsToSpecificSandbox(sandboxId, userId, force=true)
+                Note over SS: Bypasses lastSyncedCredentialsHash (force=true) on discovery/reconnect
+                SS->>VM: Write verified /home/agent-runner/.codex/auth.json (chmod 600, agent-runner DAC)
             end
         end
     end
@@ -88,7 +89,7 @@ sequenceDiagram
     %% -----------------------------------------------------------
     rect rgb(25, 40, 35)
         Note over AS,OAI: 5. Live CLI Discovery in MicroVM Sandbox
-        AS->>SS: executeInSandbox({ command: "sudo -u agent-runner -H env HOME=... bash -c 'test -s /home/agent-runner/.codex/auth.json && codex debug models'" })
+        AS->>SS: executeInSandbox({ command: "sudo -u agent-runner -H env HOME=/home/agent-runner CODEX_HOME=/home/agent-runner/.codex bash -c 'test -s /home/agent-runner/.codex/auth.json && codex debug models'" })
         SS->>VM: Dispatches command over E2B encrypted control channel
         VM->>VM: Shell test: verifies /home/agent-runner/.codex/auth.json exists & non-empty
         alt auth.json missing or size == 0
