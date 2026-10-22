@@ -1,5 +1,7 @@
 import type {
   ChatSession,
+  ChatSessionDetails,
+  SaveSessionInput,
   SessionPaginationQuery,
   PaginatedMessagesResponse,
 } from './session.types.js';
@@ -17,7 +19,7 @@ export class SessionService {
     userId: string,
     sessionId: string,
     query?: SessionPaginationQuery
-  ): Promise<ChatSession | null> {
+  ): Promise<ChatSessionDetails | null> {
     return firestoreBackendService.getSessionById(userId, sessionId, query);
   }
 
@@ -29,7 +31,7 @@ export class SessionService {
     return firestoreBackendService.getSessionMessages(userId, sessionId, query);
   }
 
-  public async saveUserSession(userId: string, session: ChatSession): Promise<ChatSession> {
+  public async saveUserSession(userId: string, session: SaveSessionInput): Promise<ChatSessionDetails> {
     return firestoreBackendService.saveSession(userId, session);
   }
 

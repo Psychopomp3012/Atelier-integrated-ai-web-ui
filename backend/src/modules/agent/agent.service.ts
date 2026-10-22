@@ -179,7 +179,8 @@ export class AgentService {
   private async discoverAntigravityModels(
     sandboxId?: string | null,
     userId?: string,
-    sessionId?: string
+    sessionId?: string,
+    force = false
   ): Promise<DynamicModelOption[]> {
     if (!sandboxId) return [];
 
@@ -198,9 +199,10 @@ export class AgentService {
         cliAuthService.persistUserAntigravityProfile(userId, userEmail);
       }
       if (sandboxId) {
-        await sandboxService.syncCredentialsToSpecificSandbox(sandboxId, userId, true).catch(() => {});
+        await sandboxService.syncCredentialsToSpecificSandbox(sandboxId, userId, force).catch(() => {});
+      } else {
+        await sandboxService.syncCredentialsToUserSandboxes(userId, force).catch(() => {});
       }
-      await sandboxService.syncCredentialsToUserSandboxes(userId, true).catch(() => {});
     }
 
     let stdout = '';
@@ -391,7 +393,8 @@ export class AgentService {
   private async discoverCodexModels(
     sandboxId?: string | null,
     userId?: string,
-    sessionId?: string
+    sessionId?: string,
+    force = false
   ): Promise<DynamicModelOption[]> {
     if (!sandboxId) return [];
 
@@ -409,9 +412,10 @@ export class AgentService {
         cliAuthService.persistUserCodexProfile(userId, userEmail);
       }
       if (sandboxId) {
-        await sandboxService.syncCredentialsToSpecificSandbox(sandboxId, userId, true).catch(() => {});
+        await sandboxService.syncCredentialsToSpecificSandbox(sandboxId, userId, force).catch(() => {});
+      } else {
+        await sandboxService.syncCredentialsToUserSandboxes(userId, force).catch(() => {});
       }
-      await sandboxService.syncCredentialsToUserSandboxes(userId, true).catch(() => {});
     }
 
     const result: DynamicModelOption[] = [];
@@ -523,13 +527,14 @@ export class AgentService {
   private async fetchDynamicModelsFromCli(
     sandboxId?: string | null,
     userId?: string,
-    sessionId?: string
+    sessionId?: string,
+    force = false
   ): Promise<DynamicModelOption[]> {
     if (!sandboxId) return [];
 
     const [agyRes, codexRes] = await Promise.allSettled([
-      this.discoverAntigravityModels(sandboxId, userId, sessionId),
-      this.discoverCodexModels(sandboxId, userId, sessionId),
+      this.discoverAntigravityModels(sandboxId, userId, sessionId, force),
+      this.discoverCodexModels(sandboxId, userId, sessionId, force),
     ]);
 
     const agyModels = agyRes.status === 'fulfilled' ? agyRes.value : [];
@@ -545,64 +550,21 @@ export class AgentService {
     return combined;
   }
 
-  public async getAvailableModels(userId?: string, sessionId?: string, force = false): Promise<DynamicModelOption[]> {
+  public async getAvailableModels(userId?: string): Promise<DynamicModelOption[]> {
     const start = performance.now();
-    const sandboxId = this.resolveSandboxId(userId, sessionId);
+    const sandboxId = this.resolveSandboxId(userId);
     if (!sandboxId) {
       return [];
     }
 
-    if (force) {
-      this.sandboxModelsCache.delete(sandboxId);
-      logger.info('[Model Discovery] Force refresh requested: invalidated cache for sandbox', { sandboxId, userId });
-    }
-
-    const now = Date.now();
-    const cached = this.sandboxModelsCache.get(sandboxId);
-    if (!force && cached && now - cached.timestamp < (cached.ttl || 300_000) && cached.models.length > 0) {
-      timingLogger.logTiming('Model Discovery', 'getAvailableModels', Math.round(performance.now() - start), {
-        sandboxId,
-        userId,
-        cached: true,
-        count: cached.models.length,
-      });
-      return cached.models;
-    }
-
-    const existingPromise = this.inFlightModelDiscovery.get(sandboxId);
-    if (!force && existingPromise) {
-      return existingPromise;
-    }
-
-    const discoveryPromise = (async () => {
-      try {
-        const models = await this.fetchDynamicModelsFromCli(sandboxId, userId, sessionId);
-        if (models.length > 0) {
-          const cliStatus = userId ? await cliAuthService.getCliStatus(userId).catch(() => null) : null;
-          const hasCodexModels = models.some((m) => m.provider === 'codex');
-          const isCodexLinked = Boolean(cliStatus?.codex?.linked);
-          const hasAgyModels = models.some((m) => m.hostedBy === 'antigravity');
-          const isAgyLinked = Boolean(cliStatus?.antigravity?.linked || cliStatus?.gemini?.linked);
-
-          // If user has a linked CLI but 0 models were discovered for it (transient VM sync), cache for only 5s so subsequent refresh can retry immediately
-          const missingLinkedModels = (isCodexLinked && !hasCodexModels) || (isAgyLinked && !hasAgyModels);
-          const ttl = missingLinkedModels ? 5_000 : 300_000;
-          this.sandboxModelsCache.set(sandboxId, { models, timestamp: Date.now(), ttl });
-        }
-        timingLogger.logTiming('Model Discovery', 'getAvailableModels', Math.round(performance.now() - start), {
-          sandboxId,
-          userId,
-          cached: false,
-          count: models.length,
-        });
-        return models;
-      } finally {
-        this.inFlightModelDiscovery.delete(sandboxId);
-      }
-    })();
-
-    this.inFlightModelDiscovery.set(sandboxId, discoveryPromise);
-    return discoveryPromise;
+    // Direct live discovery every time - no caching
+    const models = await this.fetchDynamicModelsFromCli(sandboxId, userId, undefined, true);
+    timingLogger.logTiming('Model Discovery', 'getAvailableModels', Math.round(performance.now() - start), {
+      sandboxId,
+      userId,
+      count: models.length,
+    });
+    return models;
   }
 
   public invalidateSandboxModels(sandboxId?: string): void {
@@ -1274,7 +1236,6 @@ export class AgentService {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           messages: [userMessage],
-          model: modelUsed,
           truncateAfterMessageId: input.truncateAfterMessageId,
         }).catch((err) => {
           logger.warn('Failed upfront save of user message to Firestore', { sessionId, error: String(err) });
@@ -1396,7 +1357,6 @@ export class AgentService {
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
             messages: [userMessage, sessionAssistantMsg],
-            model: modelUsed,
           });
           logger.info('[PERSISTENCE] Successfully saved complete turn to Firestore for session', {
             sessionId,

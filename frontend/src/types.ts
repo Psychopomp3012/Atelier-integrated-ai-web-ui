@@ -354,11 +354,13 @@ export interface PaginationMeta {
 export interface ChatSession {
   id: string;
   title: string;
+  messageCount: number;
   createdAt: string;
   updatedAt: string;
-  messages: ChatMessage[];
-  model: ModelType;
-  messageCount?: number;
+}
+
+export interface ChatSessionDetails extends ChatSession {
+  messages?: ChatMessage[];
   pagination?: PaginationMeta;
   overwriteMessages?: boolean;
   truncateAfterMessageId?: string;

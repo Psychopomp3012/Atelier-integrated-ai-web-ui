@@ -54,25 +54,19 @@ export interface PaginationMeta {
 export interface ChatSession {
   id: string;
   title: string;
+  messageCount: number;
   createdAt: string;
   updatedAt: string;
-  messages: ChatMessage[];
-  model: string;
-  messageCount?: number;
+}
+
+export interface ChatSessionDetails extends ChatSession {
+  messages?: ChatMessage[];
   pagination?: PaginationMeta;
   overwriteMessages?: boolean;
   truncateAfterMessageId?: string;
 }
 
-export interface SessionSummary {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  model: string;
-  messageCount: number;
-  lastMessagePreview?: string;
-}
+export type SessionSummary = ChatSession;
 
 export interface SessionPaginationQuery {
   limit?: number;
@@ -86,4 +80,6 @@ export interface PaginatedMessagesResponse {
   pagination: PaginationMeta;
 }
 
-export type SaveSessionInput = ChatSession;
+export type SaveSessionInput = Omit<ChatSessionDetails, 'messageCount'> & {
+  messageCount?: number;
+};

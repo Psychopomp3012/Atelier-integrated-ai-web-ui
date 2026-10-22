@@ -1,5 +1,5 @@
 import { apiFetch } from '../utils/api.util';
-import type { ChatSession, PaginatedMessagesResponse } from '../types';
+import type { ChatSession, ChatSessionDetails, PaginatedMessagesResponse } from '../types';
 
 export const sessionSyncService = {
   /**
@@ -56,13 +56,20 @@ export const sessionSyncService = {
     };
   },
 
-  normalizeSession(session: ChatSession): ChatSession {
+  normalizeSession(session: any): ChatSessionDetails {
     if (!session) return session;
     return {
-      ...session,
+      id: session.id,
+      title: session.title,
+      messageCount: typeof session.messageCount === 'number' ? session.messageCount : (Array.isArray(session.messages) ? session.messages.length : 0),
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
       messages: Array.isArray(session.messages)
-        ? session.messages.map((m) => this.normalizeMessage(m))
+        ? session.messages.map((m: any) => this.normalizeMessage(m))
         : [],
+      ...(session.pagination ? { pagination: session.pagination } : {}),
+      ...(session.overwriteMessages !== undefined ? { overwriteMessages: session.overwriteMessages } : {}),
+      ...(session.truncateAfterMessageId ? { truncateAfterMessageId: session.truncateAfterMessageId } : {}),
     };
   },
 
@@ -70,7 +77,7 @@ export const sessionSyncService = {
    * Helper to keep local storage lightweight by trimming cached message arrays
    * to the most recent 25 messages per session, preventing browser QuotaExceededError.
    */
-  sanitizeForLocalStorage(sessions: ChatSession[]): ChatSession[] {
+  sanitizeForLocalStorage(sessions: ChatSessionDetails[]): ChatSessionDetails[] {
     return sessions.map((sess) => ({
       ...sess,
       messages: Array.isArray(sess.messages)
@@ -145,34 +152,15 @@ export const sessionSyncService = {
   },
 
   /**
-   * Synchronously reads existing cached sessions for this user from LocalStorage.
-   * Enables 0ms instantaneous UI hydration on login before network requests start.
-   * Scoped strictly by userId to avoid cross-user session leaks, and filters out tombstones.
+   * In Pure Cloud SSOT architecture, sessions are kept in-memory only.
    */
-  getLocalSessions(userId?: string): ChatSession[] {
-    try {
-      if (!userId) return [];
-      const storageKey = `harness_chat_sessions_${userId}`;
-      const raw = localStorage.getItem(storageKey);
-      if (raw) {
-        const list = JSON.parse(raw);
-        if (Array.isArray(list)) {
-          const tombstones = this.getTombstones(userId);
-          const filtered = list.filter((s) => s && s.id && !tombstones.has(s.id));
-          if (filtered.length !== list.length) {
-            localStorage.setItem(storageKey, JSON.stringify(this.sanitizeForLocalStorage(filtered)));
-          }
-          return filtered.map((s) => this.normalizeSession(s));
-        }
-      }
-    } catch {}
+  getLocalSessions(_userId?: string): ChatSession[] {
     return [];
   },
 
   /**
-   * Loads chat sessions from the secure Fastify backend API with JWT authentication.
-   * Hydrates immediately with local cache and updates seamlessly when backend responds.
-   * Reconciles local and cloud state using cloud authority and tombstones to prevent resurrecting deleted sessions.
+   * Loads chat sessions directly from the secure Fastify backend API (Cloud Firestore SSOT).
+   * In-memory state only - no localStorage caching.
    */
   async loadAndReconcileSessions(
     userId: string,
@@ -180,15 +168,6 @@ export const sessionSyncService = {
   ): Promise<ChatSession[]> {
     if (!userId) return [];
 
-    const tombstones = this.getTombstones(userId);
-
-    // 1. Instant local read for zero-delay hydration (excluding tombstones)
-    const localSessions = this.getLocalSessions(userId);
-    if (localSessions.length > 0 && onProgress) {
-      onProgress(localSessions);
-    }
-
-    // 2. Fetch authenticated user sessions from backend API with 5s timeout
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
@@ -201,76 +180,23 @@ export const sessionSyncService = {
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.data)) {
-          const backendSessions: ChatSession[] = data.data;
-
-          // Build map using backend sessions as cloud authority
-          const map = new Map<string, ChatSession>();
-          const backendSessionIds = new Set<string>();
-
-          // Index local sessions for local message cache preservation
-          const localMap = new Map<string, ChatSession>();
-          for (const s of localSessions) {
-            if (s && s.id) localMap.set(s.id, s);
-          }
-
-          for (const s of backendSessions) {
-            if (s && s.id) {
-              // If marked deleted locally, ignore cloud record
-              if (tombstones.has(s.id)) continue;
-
-              backendSessionIds.add(s.id);
-              const existing = localMap.get(s.id);
-              if (!existing) {
-                map.set(s.id, s);
-              } else {
-                map.set(s.id, {
-                  ...s,
-                  messages: existing.messages && existing.messages.length > 0 ? existing.messages : s.messages,
-                  messageCount: s.messageCount ?? existing.messageCount ?? existing.messages?.length ?? 0,
-                });
-              }
-            }
-          }
-
-          // Check local sessions: only retain fresh unsaved drafts created < 60s ago
-          const now = Date.now();
-          for (const s of localSessions) {
-            if (!s || !s.id) continue;
-            if (backendSessionIds.has(s.id) || tombstones.has(s.id)) continue;
-
-            const createdAtMs = s.createdAt ? new Date(s.createdAt).getTime() : 0;
-            const isFreshLocalDraft = createdAtMs > 0 && (now - createdAtMs) < 60000;
-
-            if (isFreshLocalDraft) {
-              map.set(s.id, s);
-            } else {
-              // Absent from cloud and older than 60s -> deleted remotely on another device/tab
-              this.addTombstone(s.id, userId);
-            }
-          }
-
-          const merged = Array.from(map.values()).sort(
+          const backendSessions: ChatSession[] = data.data.map((s: any) => this.normalizeSession(s));
+          const sorted = backendSessions.sort(
             (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
           );
 
-          // Update local memory cache with capped message slices for lean storage, scoped to this user
-          try {
-            const sanitized = this.sanitizeForLocalStorage(merged);
-            localStorage.setItem(`harness_chat_sessions_${userId}`, JSON.stringify(sanitized));
-          } catch {}
-
           if (onProgress) {
-            onProgress(merged);
+            onProgress(sorted);
           }
 
-          return merged;
+          return sorted;
         }
       }
     } catch (err) {
       console.warn('[SessionSync] Backend sessions fetch error:', err);
     }
 
-    return localSessions;
+    return [];
   },
 
   /**
@@ -280,7 +206,7 @@ export const sessionSyncService = {
   async getSession(
     sessionId: string,
     options?: { limit?: number; beforeId?: string; all?: boolean }
-  ): Promise<ChatSession | null> {
+  ): Promise<ChatSessionDetails | null> {
     if (!sessionId) return null;
     try {
       const limit = options?.limit ?? 25;
@@ -344,56 +270,19 @@ export const sessionSyncService = {
 
   /**
    * Persists a chat session to the Fastify Backend API with JWT authentication.
-   * Backend automatically performs server-side message merging so earlier un-fetched messages are preserved.
+   * Backend automatically performs server-side message merging into Firestore.
    */
-  async saveSession(session: ChatSession, userId?: string): Promise<void> {
+  async saveSession(session: ChatSessionDetails, _userId?: string): Promise<void> {
     if (!session || !session.id) return;
 
-    // 1. Immediately update LocalStorage scoped to this user
-    if (userId) {
-      this.removeTombstone(session.id, userId);
-      try {
-        const storageKey = `harness_chat_sessions_${userId}`;
-        const raw = localStorage.getItem(storageKey);
-        const list: ChatSession[] = raw ? JSON.parse(raw) : [];
-        const idx = list.findIndex((s) => s.id === session.id);
-        if (idx >= 0) {
-          list[idx] = session;
-        } else {
-          list.unshift(session);
-        }
-        const sanitized = this.sanitizeForLocalStorage(list);
-        localStorage.setItem(storageKey, JSON.stringify(sanitized));
-      } catch {}
-    }
-
-    // 2. Persist to Cloud Backend API (backend persists to Firestore with server-side message merging)
     try {
       const token = localStorage.getItem('auth_token');
       if (token) {
-        const res = await apiFetch('/api/v1/sessions', {
+        await apiFetch('/api/v1/sessions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(session),
         });
-        if (res.ok && userId) {
-          const json = await res.json().catch(() => null);
-          const savedData = (json?.data || json) as ChatSession | undefined;
-          if (savedData?.messageCount) {
-            try {
-              const storageKey = `harness_chat_sessions_${userId}`;
-              const raw = localStorage.getItem(storageKey);
-              if (raw) {
-                const list: ChatSession[] = JSON.parse(raw);
-                const sIdx = list.findIndex((s) => s.id === session.id);
-                if (sIdx >= 0 && (list[sIdx].messageCount ?? 0) < savedData.messageCount) {
-                  list[sIdx].messageCount = savedData.messageCount;
-                  localStorage.setItem(storageKey, JSON.stringify(list));
-                }
-              }
-            } catch {}
-          }
-        }
       }
     } catch (err) {
       console.warn('[SessionSync] Cloud backend session save failed:', err);
@@ -401,26 +290,10 @@ export const sessionSyncService = {
   },
 
   /**
-   * Deletes a chat session via the Fastify Backend API.
-   * Records a persistent tombstone to prevent resurrection from stale device caches.
+   * Deletes a chat session via the Fastify Backend API (Cloud Firestore SSOT).
    */
-  async deleteSession(sessionId: string, userId?: string): Promise<void> {
-    // 1. Record tombstone and remove from LocalStorage scoped to this user
-    if (userId) {
-      this.addTombstone(sessionId, userId);
-      try {
-        const storageKey = `harness_chat_sessions_${userId}`;
-        const raw = localStorage.getItem(storageKey);
-        if (raw) {
-          const list: ChatSession[] = JSON.parse(raw);
-          const filtered = list.filter((s) => s.id !== sessionId);
-          const sanitized = this.sanitizeForLocalStorage(filtered);
-          localStorage.setItem(storageKey, JSON.stringify(sanitized));
-        }
-      } catch {}
-    }
-
-    // 2. Remove from Cloud Backend (backend removes from Firestore)
+  async deleteSession(sessionId: string, _userId?: string): Promise<void> {
+    if (!sessionId) return;
     try {
       const token = localStorage.getItem('auth_token');
       if (token) {

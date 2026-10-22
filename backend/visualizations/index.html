@@ -327,6 +327,8 @@
           <option value="hexagonal">Feature-Sliced Hexagonal Architecture</option>
           <option value="sandbox">Cloud Sandbox Provisioning Sequence</option>
           <option value="codex-models">Codex Model Retrieval Sequence</option>
+          <option value="page-reload">Page Reload & Hydration Sequence</option>
+          <option value="google-signin">Google Sign-In & Onboarding Sequence</option>
         </select>
       </div>
 
@@ -554,10 +556,60 @@
         </div>
       </div>
     </div>
+
+    <!-- PAGE RELOAD SEQUENCE CARD -->
+    <div id="page-reload-card" class="diagram-card">
+      <div class="diagram-header">
+        <div>
+          <h2>Page Reload & Workspace Hydration Sequence</h2>
+          <p>End-to-end lifecycle on browser refresh: 0ms LocalStorage read, Fastify JWT verification (/auth/me), parallel Level-1 hydration (CLI status, sandboxes, sessions), Level-2 hydration (messages, live CLI models discovery, quota telemetry), model selection reconciliation, and 3D cube dismissal.</p>
+        </div>
+        <div class="hint-chip">
+          Scroll wheel to zoom &bull; Click and drag to pan
+        </div>
+      </div>
+
+      <div class="canvas-viewport" id="viewport-page-reload">
+        <div class="pan-container" id="container-page-reload">
+          <img src="page-reload-sequence.svg" alt="Page Reload Sequence Diagram" id="img-page-reload">
+        </div>
+        <div class="viewport-overlay-controls">
+          <button class="icon-btn" onclick="zoom('page-reload', -0.15)" title="Zoom Out">&minus;</button>
+          <span class="zoom-badge" id="zoom-page-reload-badge">100%</span>
+          <button class="icon-btn" onclick="zoom('page-reload', 0.15)" title="Zoom In">&plus;</button>
+          <button class="icon-btn" onclick="resetZoom('page-reload')" title="Reset Zoom">&#8635;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- GOOGLE SIGN-IN SEQUENCE CARD -->
+    <div id="google-signin-card" class="diagram-card">
+      <div class="diagram-header">
+        <div>
+          <h2>Google Sign-In & Onboarding Hydration Sequence</h2>
+          <p>End-to-end login lifecycle: Firebase Client SDK popup, Fastify Google token exchange (/auth/google), Firestore user profile sync, 7-day HMAC-SHA256 JWT issuance, Pure Cloud SSOT workspace hydration, JIT microVM credential injection, CLI model discovery, and best-model auto-selection.</p>
+        </div>
+        <div class="hint-chip">
+          Scroll wheel to zoom &bull; Click and drag to pan
+        </div>
+      </div>
+
+      <div class="canvas-viewport" id="viewport-google-signin">
+        <div class="pan-container" id="container-google-signin">
+          <img src="google-signin-sequence.svg" alt="Google Sign-In Sequence Diagram" id="img-google-signin">
+        </div>
+        <div class="viewport-overlay-controls">
+          <button class="icon-btn" onclick="zoom('google-signin', -0.15)" title="Zoom Out">&minus;</button>
+          <span class="zoom-badge" id="zoom-google-signin-badge">100%</span>
+          <button class="icon-btn" onclick="zoom('google-signin', 0.15)" title="Zoom In">&plus;</button>
+          <button class="icon-btn" onclick="resetZoom('google-signin')" title="Reset Zoom">&#8635;</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <script>
-    const allTabIds = ['codebase', 'arch', 'flow', 'codex', 'sequence', 'hexagonal', 'sandbox', 'codex-models'];
+    const allTabIds = ['codebase', 'arch', 'flow', 'codex', 'sequence', 'hexagonal', 'sandbox', 'codex-models', 'page-reload', 'google-signin'];
     let activeTab = 'codebase';
     let currentMode = 'fit';
 
@@ -574,7 +626,9 @@
       sequence: 'single-call-sequence',
       hexagonal: 'hexagonal-architecture',
       sandbox: 'sandbox-provision-sequence',
-      'codex-models': 'codex-model-retrieval-sequence'
+      'codex-models': 'codex-model-retrieval-sequence',
+      'page-reload': 'page-reload-sequence',
+      'google-signin': 'google-signin-sequence'
     };
 
     function updateTransform(id) {

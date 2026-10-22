@@ -5,7 +5,7 @@ Problem Statement:
 Instructions(for me):
 1. Avoid Coding???
 2. Figure out, if i can't code what is in my hand? => Prompts Engineering?
-3. Sequenc/class diagrams
+3. Sequences/class diagrams
 
 Architecture:
 Frontend(React + TS + Tailwind(v3))

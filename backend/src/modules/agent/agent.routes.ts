@@ -17,11 +17,6 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       security: [{ bearerAuth: [] }],
       querystring: {
         type: 'object',
-        properties: {
-          sessionId: { type: 'string' },
-          userId: { type: 'string' },
-          force: { type: 'string' },
-        },
         additionalProperties: false,
       },
     },

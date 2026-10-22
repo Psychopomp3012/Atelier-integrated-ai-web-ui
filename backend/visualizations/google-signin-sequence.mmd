@@ -1,0 +1,103 @@
+sequenceDiagram
+    autonumber
+    actor User as User (Browser)
+    participant Modal as Auth Modal (UI)
+    participant FB as Firebase Client SDK
+    participant Google as Google Identity Services
+    participant GW as Fastify API Gateway
+    participant DB as Google Cloud Firestore
+    participant VM as Cloud MicroVM (E2B Sandbox)
+
+    %% -----------------------------------------------------------
+    %% 1. USER INITIATION & GOOGLE OAUTH POPUP
+    %% -----------------------------------------------------------
+    rect rgb(24, 24, 37)
+        Note over User,Google: 1. User Initiation & Google OAuth Popup
+        User->>Modal: Clicks "Sign in with Google"
+        Modal->>FB: signInWithPopup(auth, googleAuthProvider)
+        FB->>Google: Open Google OAuth Consent Window (Popup)
+        Google-->>User: Present Google Account Chooser & Permissions
+        User->>Google: Selects Google Account (e.g., diwakar.sachin3012@gmail.com)
+        Google-->>FB: Return Google OAuth Authorization & Credentials
+        FB-->>Modal: UserCredential { user, idToken (Firebase JWT) }
+    end
+
+    %% -----------------------------------------------------------
+    %% 2. BACKEND AUTHENTICATION & SESSION ISSUANCE
+    %% -----------------------------------------------------------
+    rect rgb(35, 30, 50)
+        Note over Modal,GW: 2. Backend Authentication & Fastify JWT Issuance
+        Modal->>Modal: setIsPageLoading(true)<br/>Message: "Authenticating with Atelier Cloud"<br/>Submessage: "Signing in with Google & verifying session..."
+        Modal->>GW: POST /api/v1/auth/google { idToken }
+        GW->>GW: Firebase Admin SDK: auth.verifyIdToken(idToken)<br/>Extract uid, email, name, picture
+        GW->>DB: Query & Upsert users/{uid} document:<br/>• Persist Google Profile (email, name, picture)<br/>• Read/merge linked CLI records (gemini, codex, claude)
+        DB-->>GW: User record saved & linked status confirmed
+        GW->>GW: authService.createSession(user):<br/>Sign HMAC-SHA256 JWT Token (7-day validity, userId, email)
+        GW-->>Modal: 200 OK { success: true, data: { token: "eyJhbGci...", user: UserProfile } }
+    end
+
+    %% -----------------------------------------------------------
+    %% 3. CLIENT SESSION INGESTION & UI STATE UPDATE
+    %% -----------------------------------------------------------
+    rect rgb(20, 32, 45)
+        Note over Modal,User: 3. Session Persistence & Modal Dismissal
+        Modal->>Modal: localStorage.setItem('auth_token', token)<br/>currentUserRef.current = normalizedUser<br/>setCurrentUser(normalizedUser)
+        Modal->>Modal: Close Auth Modal (isOpen = false)<br/>showToast("Welcome back, सचिन")
+    end
+
+    %% -----------------------------------------------------------
+    %% 4. PURE CLOUD SSOT WORKSPACE HYDRATION
+    %% -----------------------------------------------------------
+    rect rgb(25, 40, 35)
+        Note over Modal,VM: 4. Workspace Hydration & MicroVM Credential Sync
+        Modal->>Modal: Trigger hydrateUserWorkspace(user)<br/>Message: "Configuring Atelier Workspace"<br/>Invalidate in-memory CLI & Model caches
+        
+        par Parallel Level-1 Cloud Hydration
+            Modal->>GW: GET /api/v1/auth/cli/status
+            GW->>DB: Read users/{userId} (gemini, codex, claude)
+            DB-->>GW: Return CLI linkage details
+            GW-->>Modal: 200 OK { antigravity: { linked: false }, codex: { linked: true } }
+        and Fetch Active Sandboxes
+            Modal->>GW: GET /api/v1/sandboxes?userId=usr_...
+            GW->>DB: Query sandboxes for userId
+            DB-->>GW: Return active sandbox list
+            GW-->>Modal: 200 OK { used: 1, max: 3, sandboxes: [ { sandboxId: "iqrfk...", status: "running" } ] }
+        and Sync Chat History
+            Modal->>GW: GET /api/v1/sessions
+            GW->>DB: Query sessions for userId
+            DB-->>GW: Return session list
+            GW-->>Modal: 200 OK { data: [ { id: "sess_179...", title: "..." } ] }
+        end
+
+        par Parallel Level-2 Target Hydration (force: true)
+            Modal->>GW: GET /api/v1/sessions/sess_179...?limit=25
+            GW->>DB: Fetch latest session messages
+            DB-->>GW: Return 25 messages
+            GW-->>Modal: 200 OK { messages: [...] }
+        and Forced Fresh Model Discovery & MicroVM Sync
+            Modal->>GW: GET /api/v1/agent/models?sessionId=...&userId=...&force=true
+            GW->>GW: Invalidate sandboxModelsCache for sandboxId
+            GW->>VM: Forced JIT Sync (force=true):<br/>Write /home/agent-runner/.codex/auth.json (chmod 600)<br/>Write /home/agent-runner/.gemini/oauth_creds.json
+            VM-->>GW: Credentials written & verified in microVM
+            GW->>VM: Execute: CODEX_HOME=... codex debug models
+            VM-->>GW: Model catalogue JSON output
+            GW->>GW: Invalidate user quota cache (fresh models available)
+            GW->>GW: Cache models in sandboxModelsCache (TTL 300s)
+            GW-->>Modal: 200 OK { data: [ "gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna" ] }
+        and Query Fresh Quota
+            Modal->>GW: GET /api/v1/quota?userEmail=...&sessionId=...
+            GW->>VM: Query live quota: codex app-server --stdio
+            VM-->>GW: Live rate limits (99% remaining, reset time)
+            GW-->>Modal: 200 OK { codex: { limitRemaining: "99.00%" } }
+        end
+    end
+
+    %% -----------------------------------------------------------
+    %% 5. AUTO-LINKING & WORKSPACE ACTIVATION
+    %% -----------------------------------------------------------
+    rect rgb(30, 24, 40)
+        Note over Modal,User: 5. Model Selection & Full Workspace Activation
+        Modal->>Modal: getBestLinkedModelId(freshModels, cliStatus, user, ...)<br/>Auto-selects active linked model: "gpt-6-luna"<br/>handleSelectModel("gpt-6-luna")
+        Modal->>Modal: initialLoadCompletedRef.current = true<br/>setIsPageLoading(false)<br/>workspaceHydrationPromiseRef.current = null
+        Modal-->>User: Loading Screen Dismissed (Workspace Active with Selected Model & 99% Quota Badge)
+    end

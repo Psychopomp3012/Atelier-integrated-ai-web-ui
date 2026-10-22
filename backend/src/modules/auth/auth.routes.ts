@@ -55,18 +55,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     schema: {
       tags: ['Auth'],
       summary: 'Get subscription link status for all AI CLIs',
-      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 5: Read APIs)\n🔓 **Auth**: Optional (`Bearer <JWT>`)\n\nInspects linked status for Google Antigravity, OpenAI Codex, and Anthropic Claude.',
-      security: [{ bearerAuth: [] }, {}],
+      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 5: Read APIs)\n🔒 **Auth**: Required (`Bearer <JWT>`)\n\nInspects linked status for Google Antigravity, OpenAI Codex, and Anthropic Claude.',
+      security: [{ bearerAuth: [] }],
       querystring: {
         type: 'object',
-        properties: {
-          token: { type: 'string' },
-        },
+        properties: {},
         additionalProperties: false,
       },
     },
-    preValidation: [optionalAuth],
-    preHandler: [readApiLimitHook],
+    preValidation: [requireAuth, readApiLimitHook],
   }, cliAuthController.getStatus.bind(cliAuthController));
 
   // Google Antigravity & Gemini CLI linking

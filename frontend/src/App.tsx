@@ -37,9 +37,10 @@ import { signOutFirebase } from './services/firebaseAuth.service';
 import { sessionSyncService } from './services/sessionSync.service';
 import { fetchCliStatus, closeGeminiCliLoginPopup, invalidateCliStatusCache, type CliStatus } from './services/cliAuth.service';
 import { apiFetch, isTokenExpired } from './utils/api.util';
-import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSession, StepItem, ModelOption, GeminiQuotaStats, CodexQuotaStats } from './types';
+import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSession, ChatSessionDetails, StepItem, ModelOption, GeminiQuotaStats, CodexQuotaStats } from './types';
 import { NONE_MODEL, getModelDisplayInfo, getMinimumEffortModelId } from './types';
 import { fetchAvailableModels, invalidateModelsCache } from './services/models.service';
+import { preferencesService } from './services/preferences.service';
 import { computeSessionTokens } from './utils/tokenMetrics.util';
 import { checkModelQuotaExhausted } from './utils/quota.util';
 
@@ -220,15 +221,13 @@ export const App: React.FC = () => {
   const [isAuthModalOpen, setIsAuthModalOpen] = useAtom(isAuthModalOpenAtom);
   const [isSyncingSessions, setIsSyncingSessions] = useState(false);
 
-  // Persist current session ID to localStorage whenever it changes, strictly scoped per user
+  // Persist current session ID to unified user preferences whenever it changes
   useEffect(() => {
     try {
       if (currentUser?.id) {
-        if (currentSessionId) {
-          localStorage.setItem(`harness_current_session_id_${currentUser.id}`, currentSessionId);
-        } else {
-          localStorage.removeItem(`harness_current_session_id_${currentUser.id}`);
-        }
+        preferencesService.updatePreferences(currentUser.id, {
+          activeSessionId: currentSessionId || null,
+        });
       }
     } catch {}
   }, [currentUser?.id, currentSessionId]);
@@ -300,10 +299,10 @@ export const App: React.FC = () => {
           localStorage.setItem(`harness_cli_status_${currentUserRef.current.id}`, JSON.stringify(status));
         }
       } catch {}
-      fetchQuota(currentSessionId || undefined, force, currentUserRef.current?.email);
+      fetchQuota(force, currentUserRef.current?.email);
       return status;
     }).catch(() => null);
-  }, [currentSessionId]);
+  }, []);
 
   useEffect(() => {
     if (!currentUser?.id) {
@@ -448,7 +447,7 @@ export const App: React.FC = () => {
 
         const isLinked = cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked || cliStatusRef.current?.codex?.linked;
         if (isLinked) {
-          fetchQuota(currentSessionId || undefined);
+          fetchQuota(false);
         }
       }
     }, 60000);
@@ -456,7 +455,7 @@ export const App: React.FC = () => {
     return () => {
       clearInterval(interval);
     };
-  }, [currentUser?.id, currentSessionId, fetchSandboxUsage]);
+  }, [currentUser?.id, fetchSandboxUsage]);
 
   // If the saved sandbox was destroyed or terminated, clean up stale selection
   useEffect(() => {
@@ -527,20 +526,11 @@ export const App: React.FC = () => {
   const handleSelectModel = useCallback((modelId: ModelType) => {
     setSelectedModel(modelId);
     try {
-      if (!modelId || modelId === 'none') {
-        localStorage.removeItem('model_preference');
-        localStorage.removeItem('selected_model_preference');
-      } else {
-        localStorage.setItem('selected_model_preference', modelId);
-        const display = getModelDisplayInfo(modelId, availableModelsRef.current);
-        const preferenceData = {
-          provider: display.parentModel.hostedBy || display.provider,
-          model: display.baseName,
-          effort: display.effortLabel || 'default',
-          modelId,
-        };
-        localStorage.setItem('model_preference', JSON.stringify(preferenceData));
-      }
+      const display = getModelDisplayInfo(modelId, availableModelsRef.current);
+      preferencesService.updatePreferences(currentUserRef.current?.id, {
+        selectedModelId: modelId && modelId !== 'none' ? modelId : undefined,
+        selectedEffort: display.effortLabel || 'default',
+      });
     } catch {}
   }, [setSelectedModel]);
 
@@ -563,7 +553,7 @@ export const App: React.FC = () => {
       setAvailableModels([]);
       return;
     }
-    fetchAvailableModels(force, currentSessionId || undefined, userId)
+    fetchAvailableModels()
       .then((models) => {
         if (models && models.length > 0) {
           setAvailableModels(models);
@@ -669,7 +659,6 @@ export const App: React.FC = () => {
   const authMeMountedRef = useRef<boolean>(false);
 
   const fetchQuota = async (
-    sessId?: string,
     force = false,
     emailOverride?: string,
     cliStatusOverride?: CliStatus | null,
@@ -715,9 +704,7 @@ export const App: React.FC = () => {
       try {
         lastQuotaFetchRef.current = Date.now();
         const emailParam = `?userEmail=${encodeURIComponent(email)}`;
-        const activeId = sessId || currentSessionId;
-        const sessionParam = activeId ? `&sessionId=${encodeURIComponent(activeId)}` : '';
-        const res = await apiFetch(`/api/v1/quota${emailParam}${sessionParam}`);
+        const res = await apiFetch(`/api/v1/quota${emailParam}`);
         if (res.ok) {
           const json = await res.json();
           if (json.data) {
@@ -752,11 +739,6 @@ export const App: React.FC = () => {
     if (!uid) {
       setIsSyncingSessions(false);
       return null;
-    }
-    // Instant hydration from local cache if available
-    const cached = sessionSyncService.getLocalSessions(uid);
-    if (cached.length > 0) {
-      setSessions(cached);
     }
     setIsSyncingSessions(true);
     try {
@@ -795,12 +777,13 @@ export const App: React.FC = () => {
    * 5. quota fetch (GET /api/v1/quota) & models discovery (GET /api/v1/agent/models)
    */
   const hydrateUserWorkspace = useCallback(
-    async (user: UserProfile, options?: { forceFreshCli?: boolean }) => {
+    async (user: UserProfile) => {
       // If hydration is already in progress, await the single in-flight promise
       if (workspaceHydrationPromiseRef.current) {
         return workspaceHydrationPromiseRef.current;
       }
-      if (lastHydratedUserIdRef.current === user.id && initialLoadCompletedRef.current && !options?.forceFreshCli) {
+      if (lastHydratedUserIdRef.current === user.id && initialLoadCompletedRef.current) {
+        setIsPageLoading(false);
         return Promise.resolve();
       }
 
@@ -812,12 +795,15 @@ export const App: React.FC = () => {
         setLoadingMessage('Configuring Atelier Workspace');
         setLoadingSubMessage('Connecting to cloud microVMs, detecting linked CLIs & chats...');
 
+        const safetyTimer = setTimeout(() => {
+          setIsPageLoading(false);
+          initialLoadCompletedRef.current = true;
+        }, 6000);
+
         try {
-          if (options?.forceFreshCli) {
-            invalidateCliStatusCache();
-            invalidateModelsCache();
-            cliStatusFetchedRef.current = false;
-          }
+          invalidateCliStatusCache();
+          invalidateModelsCache();
+          cliStatusFetchedRef.current = false;
 
           // -------------------------------------------------------------------
           // Phase 1 (Parallel Level-1 Cloud Hydration):
@@ -853,7 +839,8 @@ export const App: React.FC = () => {
           const sessionsList = mergedSessions ?? [];
           let targetSessionId: string | null = null;
           if (sessionsList.length > 0) {
-            const activeId = localStorage.getItem(`harness_current_session_id_${user.id}`);
+            const savedPrefs = preferencesService.getPreferences(user.id);
+            const activeId = savedPrefs.activeSessionId;
             const matched = activeId ? sessionsList.find((s) => s.id === activeId) : sessionsList[0];
             if (matched) {
               targetSessionId = matched.id;
@@ -881,8 +868,8 @@ export const App: React.FC = () => {
             targetSessionId
               ? sessionSyncService.getSession(targetSessionId, { limit: 25 }).catch(() => null)
               : Promise.resolve(null),
-            fetchQuota(targetSessionId || undefined, true, user.email, freshCliStatus, hasSandbox).catch(() => null),
-            fetchAvailableModels(true, targetSessionId || undefined, user.id).catch(() => []),
+            fetchQuota(true, user.email, freshCliStatus, hasSandbox).catch(() => null),
+            fetchAvailableModels().catch(() => []),
           ]);
 
           // Guard: if user changed during phase 3
@@ -924,10 +911,10 @@ export const App: React.FC = () => {
             handleSelectModel(bestLinkedId);
           } else {
             setSelectedModel('none');
-            try {
-              localStorage.removeItem('model_preference');
-              localStorage.removeItem('selected_model_preference');
-            } catch {}
+            preferencesService.updatePreferences(user.id, {
+              selectedModelId: undefined,
+              selectedEffort: undefined,
+            });
           }
 
           initialLoadCompletedRef.current = true;
@@ -940,6 +927,7 @@ export const App: React.FC = () => {
         } catch (err) {
           console.error('[App] Workspace hydration encountered an error:', err);
         } finally {
+          clearTimeout(safetyTimer);
           setIsPageLoading(false);
           workspaceHydrationPromiseRef.current = null;
         }
@@ -966,25 +954,18 @@ export const App: React.FC = () => {
     ]
   );
 
+  // Reset quotas when user logs out
   useEffect(() => {
     if (!currentUser?.id) {
       setGeminiQuota(null);
       setCodexQuota(null);
-    } else {
-      if (!initialLoadCompletedRef.current) return;
-      fetchQuota(currentSessionId || undefined);
     }
-  }, [currentUser?.id, currentSessionId]);
-
-  useEffect(() => {
-    if (!currentUser?.id || !initialLoadCompletedRef.current) return;
-    fetchQuota(currentSessionId || undefined);
-  }, [currentUser?.id, selectedModelOption?.id, selectedModelOption?.hostedBy, selectedModelOption?.provider]);
+  }, [currentUser?.id]);
 
   const handleRefreshQuota = useCallback(() => {
     if (!currentUserRef.current?.email) return;
-    fetchQuota(currentSessionId || undefined, true);
-  }, [currentSessionId]);
+    fetchQuota(true);
+  }, []);
 
   const prevActiveSandboxIdRef = useRef<string | null>(null);
 
@@ -1013,8 +994,8 @@ export const App: React.FC = () => {
 
   const handleCliStatusChange = useCallback((newStatus: CliStatus) => {
     setCliStatus(newStatus);
-    fetchQuota(currentSessionId || undefined);
-  }, [currentSessionId]);
+    fetchQuota(true);
+  }, []);
 
 
   const showToast = (msg: string) => {
@@ -1061,7 +1042,9 @@ export const App: React.FC = () => {
   const handleToggleTheme = () => {
     const nextMode = !isDarkMode;
     setIsDarkMode(nextMode);
-    localStorage.setItem('theme_preference', nextMode ? 'dark' : 'light');
+    preferencesService.updatePreferences(currentUserRef.current?.id, {
+      theme: nextMode ? 'dark' : 'light',
+    });
     const faviconEl = (document.getElementById('app-favicon') || document.querySelector('link[rel="icon"]')) as HTMLLinkElement | null;
     if (faviconEl) {
       faviconEl.href = nextMode ? '/favicon-white.svg' : '/favicon-black.svg';
@@ -1075,27 +1058,23 @@ export const App: React.FC = () => {
     }
   };
 
-
-
-  // Keep provider-model-effort preference in sync with localStorage
+  // Keep provider-model-effort preference in sync with unified user preferences
   useEffect(() => {
     try {
       if (selectedModel && selectedModel !== 'none') {
-        localStorage.setItem('selected_model_preference', selectedModel);
         const display = getModelDisplayInfo(selectedModel, availableModels);
-        const preferenceData = {
-          provider: display.parentModel.hostedBy || display.provider,
-          model: display.baseName,
-          effort: display.effortLabel || 'default',
-          modelId: selectedModel,
-        };
-        localStorage.setItem('model_preference', JSON.stringify(preferenceData));
+        preferencesService.updatePreferences(currentUser?.id, {
+          selectedModelId: selectedModel,
+          selectedEffort: display.effortLabel || 'default',
+        });
       } else if (selectedModel === 'none') {
-        localStorage.removeItem('model_preference');
-        localStorage.removeItem('selected_model_preference');
+        preferencesService.updatePreferences(currentUser?.id, {
+          selectedModelId: undefined,
+          selectedEffort: undefined,
+        });
       }
     } catch {}
-  }, [selectedModel, availableModels]);
+  }, [selectedModel, availableModels, currentUser?.id]);
 
   // Comprehensive user and session cleanup routine
   const performUserCleanup = useCallback(() => {
@@ -1111,6 +1090,7 @@ export const App: React.FC = () => {
     closeGeminiCliLoginPopup();
     // 1. Invalidate authentication tokens & caches
     localStorage.removeItem('auth_token');
+    preferencesService.clearUserPreferences(prevUserId);
     sessionSyncService.clearLocalCache(prevUserId);
     currentUserRef.current = null;
     setCurrentUser(null);
@@ -1237,7 +1217,7 @@ export const App: React.FC = () => {
           if (user) {
             currentUserRef.current = user;
             setCurrentUser(user);
-            await hydrateUserWorkspace(user, { forceFreshCli: true });
+            await hydrateUserWorkspace(user);
           } else {
             performUserCleanup();
             setIsPageLoading(false);
@@ -1279,19 +1259,13 @@ export const App: React.FC = () => {
       return;
     }
 
-    // 0ms instant hydration: immediately display local sessions before network calls, scoped to user
-    const cached = sessionSyncService.getLocalSessions(currentUser.id);
-    if (cached.length > 0 && sessions.length === 0) {
-      setSessions(cached);
-    }
-
     // Guard: Prevent re-running initial wipe and sync if this user has already been hydrated
     if (lastHydratedUserIdRef.current === currentUser.id && initialLoadCompletedRef.current) {
       return;
     }
 
     hydrateUserWorkspace(currentUser);
-  }, [currentUser?.id, hydrateUserWorkspace, sessions.length]);
+  }, [currentUser?.id, hydrateUserWorkspace]);
 
   const handleSelectSession = (sessionId: string) => {
     const session = sessions.find((s) => s.id === sessionId);
@@ -1317,6 +1291,9 @@ export const App: React.FC = () => {
       sessionSyncService.getSession(session.id, { limit: 25 }).then((data) => {
         if (data && data.id === session.id) {
           setMessages(data.messages || []);
+          setSessions((prev) =>
+            prev.map((s) => (s.id === session.id ? { ...s, messages: data.messages || [] } : s))
+          );
           if (data.pagination) {
             setHasMoreEarlierMessages(data.pagination.hasMore);
             setRemainingMessageCount(data.pagination.remaining);
@@ -1473,7 +1450,7 @@ export const App: React.FC = () => {
 
       // Hydrate all 5 cloud resources in single-flight pipeline
       // 3D cube waits for CLI detection, sandboxes, chats, active message, and quota
-      await hydrateUserWorkspace(normalizedUser, { forceFreshCli: true });
+      await hydrateUserWorkspace(normalizedUser);
 
       showToast(`Welcome back, ${loggedInUser.name}!`);
     } catch (err: unknown) {
@@ -1619,12 +1596,11 @@ export const App: React.FC = () => {
       const idx = prev.findIndex((s) => s.id === activeSessionId);
       if (idx >= 0) {
         const updated = [...prev];
-        const targetSession: ChatSession = {
+        const targetSession: ChatSessionDetails = {
           ...updated[idx],
           updatedAt: new Date().toISOString(),
           messages: truncatedHistory,
           messageCount: hasMoreEarlierMessages ? remainingMessageCount + truncatedHistory.length : truncatedHistory.length,
-          model: selectedModel,
           overwriteMessages: !hasMoreEarlierMessages,
           truncateAfterMessageId: msgId,
         };
@@ -1709,8 +1685,8 @@ export const App: React.FC = () => {
     // Immediately register or update the session in local state & cache so it appears in the sidebar
     setSessions((prev) => {
       const idx = prev.findIndex((s) => s.id === activeSessionId);
-      let updated: ChatSession[];
-      let targetSession: ChatSession;
+      let updated: ChatSessionDetails[];
+      let targetSession: ChatSessionDetails;
       if (idx >= 0) {
         updated = [...prev];
         targetSession = {
@@ -1721,7 +1697,6 @@ export const App: React.FC = () => {
             updated[idx]?.messageCount ?? 0,
             hasMoreEarlierMessages ? remainingMessageCount + newMessages.length : newMessages.length
           ),
-          model: selectedModel,
           overwriteMessages: isTruncated || !hasMoreEarlierMessages,
           truncateAfterMessageId: truncateAfterId,
         };
@@ -1734,7 +1709,6 @@ export const App: React.FC = () => {
           updatedAt: new Date().toISOString(),
           messages: newMessages,
           messageCount: hasMoreEarlierMessages ? remainingMessageCount + newMessages.length : newMessages.length,
-          model: selectedModel,
           overwriteMessages: isTruncated || !hasMoreEarlierMessages,
           truncateAfterMessageId: truncateAfterId,
         };
@@ -1762,8 +1736,8 @@ export const App: React.FC = () => {
 
       setSessions((prev) => {
         const idx = prev.findIndex((s) => s.id === activeSessionId);
-        let updated: ChatSession[];
-        let targetSession: ChatSession;
+        let updated: ChatSessionDetails[];
+        let targetSession: ChatSessionDetails;
         if (idx >= 0) {
           updated = [...prev];
           targetSession = {
@@ -1774,7 +1748,6 @@ export const App: React.FC = () => {
               updated[idx]?.messageCount ?? 0,
               hasMoreEarlierMessages ? remainingMessageCount + msgs.length : msgs.length
             ),
-            model: selectedModel,
             overwriteMessages: isTruncated || !hasMoreEarlierMessages,
             truncateAfterMessageId: truncateAfterId,
           };
@@ -1787,7 +1760,6 @@ export const App: React.FC = () => {
             updatedAt: new Date().toISOString(),
             messages: msgs,
             messageCount: hasMoreEarlierMessages ? remainingMessageCount + msgs.length : msgs.length,
-            model: selectedModel,
             overwriteMessages: isTruncated || !hasMoreEarlierMessages,
             truncateAfterMessageId: truncateAfterId,
           };
@@ -2129,6 +2101,7 @@ export const App: React.FC = () => {
       }
       setIsLoading(false);
       setStreamingMessageId(null);
+      fetchQuota(true);
     }
   };
 

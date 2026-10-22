@@ -230,6 +230,38 @@ Detailed end-to-end lifecycle when dynamic Codex models are queried from cloud m
 
 ---
 
+## 13. Page Reload & Workspace Hydration Sequence (`sequenceDiagram`)
+
+Detailed end-to-end lifecycle when an authenticated user refreshes or reloads the browser:
+- **Phase 1: Zero-Delay Preferences Hydration**: Instant synchronous read of user preferences from `localStorage` (`atelier_prefs_usr_...`) applying theme and loading state before network calls commence. Chat sessions live purely in-memory backed by Cloud Firestore SSOT.
+- **Phase 2: Authentication Verification**: Dispatches `GET /api/v1/auth/me` with Bearer JWT. Fastify verifies signature, returns normalized `UserProfile`, and dispatches `hydrateUserWorkspace(user)`.
+- **Phase 3: Level-1 Parallel Cloud Hydration**: Concurrent execution via `Promise.all`:
+  - `GET /api/v1/auth/cli/status`: Reads Firestore user record for linked CLI credentials.
+  - `GET /api/v1/sandboxes?userId=...`: Queries active microVM sandboxes.
+  - `GET /api/v1/sessions`: Fetches cloud chat history directly from Firestore (Pure Cloud SSOT).
+- **Phase 4: Level-2 Parallel Target Hydration**: Resolves active session from preferences and concurrently fetches:
+  - `GET /api/v1/sessions/:id?limit=25`: Fetches last 25 chat messages.
+  - `GET /api/v1/agent/models`: Resolves dynamic models from `sandboxModelsCache` or microVM.
+  - `GET /api/v1/quota`: Queries account-level quota telemetry directly.
+- **Phase 5: Model Selection & Loading Screen Dismissal**: Evaluates `getBestLinkedModelId`, sets `selectedModel`, enforces minimum 750ms presentation delay, and dismisses the 3D rotating isometric cube.
+
+![Page Reload Sequence](page-reload-sequence.png)
+
+---
+
+## 14. Google Sign-In & Onboarding Hydration Sequence (`sequenceDiagram`)
+
+Detailed end-to-end lifecycle when a user clicks "Sign in with Google" in the `AuthModal`:
+- **Phase 1: Google OAuth Popup**: Client triggers Firebase `signInWithPopup(auth, googleAuthProvider)`. User selects Google account and receives a verified Firebase `idToken`.
+- **Phase 2: Backend Authentication & JWT Issuance**: Dispatches `POST /api/v1/auth/google` with `{ idToken }`. Fastify Gateway verifies token via Firebase Admin SDK, syncs Firestore `users/{uid}`, signs a 7-day HMAC-SHA256 JWT, and returns `{ token, user }`.
+- **Phase 3: Session Persistence**: Client stores JWT in `localStorage('auth_token')`, closes `AuthModal`, updates `currentUserAtom`, and displays welcome toast.
+- **Phase 4: Cloud Workspace Hydration**: Dispatches `hydrateUserWorkspace(user)`. Runs Level-1 and Level-2 parallel hydration: Gateway JIT-syncs credentials (`.codex/auth.json`, `.gemini/oauth_creds.json`) to the microVM, runs CLI model discovery, invalidates quota cache, and returns fresh models.
+- **Phase 5: Auto-Linking & UI Activation**: `getBestLinkedModelId` automatically locks onto the user's linked provider (e.g. `GPT-6-Luna` with 99% quota telemetry chip), and unblocks the workspace.
+
+![Google Sign-In Sequence](google-signin-sequence.png)
+
+---
+
 ## 🛠️ Regenerating Visualizations
 
 The diagrams can be regenerated at any time using the pre-configured `mmdc` CLI tool and local puppeteer configuration:
@@ -251,6 +283,10 @@ mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i
 mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/sandbox-provision-sequence.mmd -o visualizations/sandbox-provision-sequence.png -s 2
 mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/codex-model-retrieval-sequence.mmd -o visualizations/codex-model-retrieval-sequence.svg
 mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/codex-model-retrieval-sequence.mmd -o visualizations/codex-model-retrieval-sequence.png -s 2
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/page-reload-sequence.mmd -o visualizations/page-reload-sequence.svg
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/page-reload-sequence.mmd -o visualizations/page-reload-sequence.png -s 2
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/google-signin-sequence.mmd -o visualizations/google-signin-sequence.svg
+mmdc -p visualizations/puppeteer-config.json -t redux-dark-color -b "#121217" -i visualizations/google-signin-sequence.mmd -o visualizations/google-signin-sequence.png -s 2
 ```
 
 

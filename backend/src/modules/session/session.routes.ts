@@ -18,8 +18,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         additionalProperties: false,
       },
     },
-    preValidation: [requireAuth],
-    preHandler: [readApiLimitHook],
+    preValidation: [requireAuth, readApiLimitHook],
   }, sessionController.getSessions.bind(sessionController));
 
   app.post('/api/v1/sessions', {
@@ -47,8 +46,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         required: ['id', 'title'],
       },
     },
-    preValidation: [requireAuth],
-    preHandler: [mutationLimitHook],
+    preValidation: [requireAuth, mutationLimitHook],
   }, sessionController.saveSession.bind(sessionController));
 
   app.get('/api/v1/sessions/:id', {
@@ -74,8 +72,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         additionalProperties: false,
       },
     },
-    preValidation: [requireAuth],
-    preHandler: [readApiLimitHook],
+    preValidation: [requireAuth, readApiLimitHook],
   }, sessionController.getSession.bind(sessionController));
 
   app.get('/api/v1/sessions/:id/messages', {
@@ -101,8 +98,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         additionalProperties: false,
       },
     },
-    preValidation: [requireAuth],
-    preHandler: [readApiLimitHook],
+    preValidation: [requireAuth, readApiLimitHook],
   }, sessionController.getSessionMessages.bind(sessionController));
 
   app.delete('/api/v1/sessions/:id', {
@@ -119,7 +115,6 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         required: ['id'],
       },
     },
-    preValidation: [requireAuth],
-    preHandler: [mutationLimitHook],
+    preValidation: [requireAuth, mutationLimitHook],
   }, sessionController.deleteSession.bind(sessionController));
 }

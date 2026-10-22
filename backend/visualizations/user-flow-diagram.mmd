@@ -18,7 +18,7 @@
 }}%%
 flowchart TD
     subgraph Client["🖥️ User & Client Browser (React 19)"]
-        A([fa:fa-globe Open Atelier Web App]) --> B[fa:fa-adjust Auto-Detect OS Theme]
+        A([fa:fa-globe Open Atelier Web App]) --> B["fa:fa-sliders Hydrate Unified Store: atelier_prefs_usr_..."]
         B --> C{fa:fa-key Valid 7-Day JWT?}
         C -->|No / Expired| D[fa:fa-google Google OAuth Login]
         D --> EModal["fa:fa-times Close AuthModal & Activate 3D Cube (z-100)"]
@@ -29,14 +29,14 @@ flowchart TD
         subgraph Hydration["🌊 Single-Flight Cloud Hydration Pipeline"]
             Cube --> Hydrate1["1. Linked CLI Detection: GET /api/v1/auth/cli/status"]
             Cube --> Hydrate2["2. Sandboxes Created: GET /api/v1/sandboxes"]
-            Cube --> Hydrate3["3. Sidebar Chats Fetch: GET /api/v1/sessions"]
+            Cube --> Hydrate3["3. Sidebar Chats (Pure Metadata: id, title, count): GET /api/v1/sessions"]
 
-            Hydrate1 & Hydrate2 & Hydrate3 --> TargetRes["🎯 Target Session Resolution"]
+            Hydrate1 & Hydrate2 & Hydrate3 --> TargetRes["🎯 Target Session via preferencesService"]
             TargetRes --> Hydrate4["4. Active Messages: GET /api/v1/sessions/:id"]
             TargetRes --> Hydrate5["5. Quota & Models: GET /api/v1/quota & models"]
 
             Hydrate4 & Hydrate5 --> ModelReconcile{"🔗 Any Linked CLI?"}
-            ModelReconcile -->|Yes| SetBestLinked["Auto-select Best Linked Model"]
+            ModelReconcile -->|Yes| SetBestLinked["Auto-select Best Linked Model & Save Prefs"]
             ModelReconcile -->|None| SetNoneModel["Set 'none' (No Model Selected)"]
 
             SetBestLinked & SetNoneModel --> MinWindow["⏱️ Min Presentation Threshold: 750ms Window"]

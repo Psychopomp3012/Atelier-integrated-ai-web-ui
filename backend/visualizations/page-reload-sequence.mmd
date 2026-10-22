@@ -1,0 +1,122 @@
+sequenceDiagram
+    autonumber
+    actor User as User (Browser)
+    participant FE as Frontend UI (React + Jotai)
+    participant Prefs as preferencesService (Unified Store)
+    participant LS as LocalStorage (Browser Cache)
+    participant GW as Fastify API Gateway (Ports & Adapters)
+    participant DB as Google Cloud Firestore
+    participant VM as Cloud MicroVM (E2B Sandbox)
+
+    %% -----------------------------------------------------------
+    %% 1. PAGE REFRESH TRIGGER & 0ms UNIFIED PREFERENCES READ
+    %% -----------------------------------------------------------
+    rect rgb(24, 24, 37)
+        Note over User,LS: 1. Page Refresh & Unified 2-Store Hydration
+        User->>FE: Hits F5 / Reloads Page
+        FE->>FE: Initialize Atoms (isPageLoadingAtom = true -> 3D Rotating Cube)
+        FE->>LS: Read Store 1 (Auth Token): localStorage.getItem('auth_token')
+        LS-->>FE: Return raw JWT string (instant 1-instruction read)
+        FE->>Prefs: Read Store 2 (Preferences): preferencesService.getPreferences(userId)
+        Prefs->>LS: Read atelier_prefs_${userId} (Single JSON.parse)
+        LS-->>Prefs: Return { theme, selectedModelId, selectedEffort, activeSessionId }
+        Prefs-->>FE: Unified Preferences Object (0ms Instant Synchronous Hydration)
+        FE->>FE: Instant Local Render:<br/>• Immediate Dark/Light theme DOM class applied<br/>• Show 3D Rotating Cube Loader<br/>• Set message: "Initializing Atelier Workspace"
+    end
+
+    %% -----------------------------------------------------------
+    %% 2. AUTHENTICATION & JWT VERIFICATION
+    %% -----------------------------------------------------------
+    rect rgb(35, 30, 50)
+        Note over FE,GW: 2. Authentication Verification
+        alt No Token or Token Expired
+            FE->>FE: performUserCleanup()<br/>setIsPageLoading(false)<br/>initialLoadCompletedRef = true
+            FE-->>User: Render Unauthenticated Landing (Sign In Button, 0ms)
+        else Valid Token Present in LocalStorage
+            FE->>GW: GET /api/v1/auth/me (Authorization: Bearer <token>)
+            GW->>GW: preValidation: [requireAuth]<br/>Verify HMAC-SHA256 JWT signature & expiry
+            GW-->>FE: 200 OK { success: true, data: UserProfile }
+            FE->>FE: currentUserRef.current = user<br/>setCurrentUser(user)<br/>Trigger hydrateUserWorkspace(user)
+        end
+    end
+
+    %% -----------------------------------------------------------
+    %% 3. LEVEL-1 PARALLEL CLOUD HYDRATION
+    %% -----------------------------------------------------------
+    rect rgb(20, 32, 45)
+        Note over FE,DB: 3. Level-1 Parallel Cloud Hydration
+        FE->>FE: Update Cube Submessage:<br/>"Detecting linked AI providers, sandboxes & chats..."
+        par Fetch Linked CLI Status
+            FE->>GW: GET /api/v1/auth/cli/status [Authorization: Bearer <token>]
+            GW->>GW: 4-Phase Defense: requireAuth + readApiLimitHook (Tier 5: 120/min)
+            GW->>DB: Read users/{userId} (gemini, codex, claude linkage)
+            DB-->>GW: Return CLI credentials & linked status
+            GW-->>FE: 200 OK { antigravity: { linked: false }, codex: { linked: true } }
+            FE->>FE: setCliStatus(data)
+        and Fetch User MicroVM Sandboxes
+            FE->>GW: GET /api/v1/sandboxes?userId=usr_...
+            GW->>DB: Query sandboxes where userId == req.userId
+            DB-->>GW: Return sandboxes array
+            GW-->>FE: 200 OK { used: 1, max: 3, sandboxes: [ { sandboxId: "iqrfk...", status: "running" } ] }
+            FE->>FE: Update sandboxUsage atom (Green Cloud Status Dot)
+        and Reconcile Chat Sessions
+            FE->>GW: GET /api/v1/sessions
+            GW->>DB: Query sessions where userId == req.userId (limit 50, ordered by updatedAt desc)
+            DB-->>GW: Return sessions list (Pure metadata: id, title, messageCount, timestamps)
+            GW-->>FE: 200 OK { data: [ { id: "sess_...", title: "...", messageCount: 18 } ] }
+            FE->>FE: Reconcile Cloud Sessions with Local Tombstones<br/>Update sessions atom (Lightweight metadata)
+        end
+    end
+
+    %% -----------------------------------------------------------
+    %% 4. TARGET SESSION RESOLUTION & LEVEL-2 PARALLEL HYDRATION
+    %% -----------------------------------------------------------
+    rect rgb(25, 40, 35)
+        Note over FE,VM: 4. Target Session Resolution & Level-2 Hydration
+        FE->>Prefs: preferencesService.getPreferences(user.id).activeSessionId
+        Prefs-->>FE: Returns active targetSessionId ("sess_179...") (0ms)
+        FE->>FE: setCurrentSessionId(targetSessionId)<br/>Update Cube Submessage: "Retrieving active session messages, quotas & models..."
+        
+        par Load Active Session Messages
+            FE->>GW: GET /api/v1/sessions/sess_179...?limit=25
+            GW->>DB: Query messages subcollection for session
+            DB-->>GW: Return latest 25 messages
+            GW-->>FE: 200 OK { messages: [...], pagination: { hasMore: false } }
+            FE->>FE: setMessages(sessionData.messages)
+        and Query Available Models (Live Discovery)
+            FE->>GW: GET /api/v1/agent/models
+            GW->>GW: 4-Phase Defense: requireAuth + readApiLimitHook (Tier 5: 120/min)
+            GW->>VM: JIT Credential Sync (auth.json)
+            GW->>VM: Execute: codex debug models / agy models
+            VM-->>GW: Raw CLI model catalogue output
+            GW->>GW: Parse & group reasoning effort variants
+            GW-->>FE: 200 OK { data: [ { id: "gpt-5.6-terra", ... } ] }
+            FE->>FE: setAvailableModels(freshModels)
+        and Query Quotas & Live Telemetry
+            FE->>GW: GET /api/v1/quota?userEmail=diwakar... (Account-Scoped)
+            GW->>GW: Check codexQuotaCache & geminiQuotaCache
+            alt Quota Cache Valid
+                GW-->>FE: 200 OK { codex: { limitRemaining: "99.00%" } } (150ms)
+            else Quota Cache Miss or Cold Start
+                GW->>VM: Execute: codex app-server --stdio (getAccountRateLimits)
+                VM-->>GW: Return remaining_fraction: 0.99
+                GW->>GW: Cache quota in codexQuotaCache (TTL 60s)
+                GW-->>FE: 200 OK { codex: { limitRemaining: "99.00%" } } (1800ms)
+            end
+            FE->>FE: Update codexQuota and geminiQuota atoms
+        end
+    end
+
+    %% -----------------------------------------------------------
+    %% 5. MODEL RECONCILIATION & LOADING SCREEN DISMISSAL
+    %% -----------------------------------------------------------
+    rect rgb(30, 24, 40)
+        Note over FE,User: 5. Model Selection Reconciliation & Unblocking UI
+        FE->>FE: getBestLinkedModelId(freshModels, cliStatus, user, geminiQ, codexQ)
+        FE->>FE: Matched best linked model: "gpt-6-luna"<br/>handleSelectModel("gpt-6-luna")
+        FE->>Prefs: preferencesService.updatePreferences(userId, { selectedModelId, selectedEffort })
+        Prefs->>LS: Atomic write to atelier_prefs_${userId} (<1KB, 0ms)
+        FE->>FE: initialLoadCompletedRef.current = true<br/>Enforce smooth window (min 750ms elapsed)
+        FE->>FE: finally block executes:<br/>clearTimeout(safetyTimer)<br/>setIsPageLoading(false)<br/>workspaceHydrationPromiseRef.current = null
+        FE-->>User: 3D Rotating Cube Dismissed (Full UI Unblocked & Interactive)
+    end

@@ -24,22 +24,12 @@ export class AgentController {
   }
 
   public async getModels(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const query = req.query as { userId?: string; sessionId?: string; force?: string };
     const userId = req.userId;
     if (!userId) {
       throw new AppError('Authentication required: Missing or invalid Authorization Bearer token', 401, 'UNAUTHORIZED');
     }
 
-    // Phase 4: Session ownership & IDOR defense check
-    if (query.sessionId) {
-      const isOwned = await firestoreBackendService.verifySessionOwnership(userId, query.sessionId);
-      if (!isOwned) {
-        throw new AppError('Access denied: You do not own this session', 403, 'FORBIDDEN');
-      }
-    }
-
-    const force = query?.force === 'true' || query?.force === '1';
-    const models = await agentService.getAvailableModels(userId, query?.sessionId, force);
+    const models = await agentService.getAvailableModels(userId);
     return reply.status(200).send(createSuccessResponse(models));
   }
 

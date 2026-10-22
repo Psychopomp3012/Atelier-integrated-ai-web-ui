@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { sessionService } from './session.service.js';
-import type { ChatSession } from './session.types.js';
+import type { ChatSession, ChatSessionDetails, SaveSessionInput } from './session.types.js';
 import { tokenUtil } from '../../utils/token.util.js';
 import { createSuccessResponse } from '../../utils/response.util.js';
 import { AppError } from '../../utils/error.util.js';
@@ -31,12 +31,12 @@ export class SessionController {
 
   public async saveSession(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const userId = this.getUserId(req);
-    const body = req.body as Partial<ChatSession>;
+    const body = req.body as Partial<SaveSessionInput>;
     if (!body || typeof body !== 'object') {
       throw new AppError('Session payload is required', 400, 'VALIDATION_ERROR');
     }
 
-    const saved = await sessionService.saveUserSession(userId, body as ChatSession);
+    const saved = await sessionService.saveUserSession(userId, body as SaveSessionInput);
     return reply.status(200).send(createSuccessResponse(saved));
   }
 

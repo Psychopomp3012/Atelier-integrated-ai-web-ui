@@ -15,6 +15,8 @@ import type {
   ChatMessage,
   StepItem,
   ChatSession,
+  ChatSessionDetails,
+  SaveSessionInput,
   PaginationMeta,
   SessionPaginationQuery,
   PaginatedMessagesResponse,
@@ -312,7 +314,7 @@ export class FirestoreBackendService {
 
   // --- Session Management ---
 
-  public async saveSession(userId: string, session: ChatSession): Promise<ChatSession> {
+  public async saveSession(userId: string, session: SaveSessionInput): Promise<ChatSessionDetails> {
     const start = performance.now();
     if (!session.id) {
       session.id = `sess_${Date.now()}`;
@@ -344,12 +346,11 @@ export class FirestoreBackendService {
       }
     );
 
-    const cleanSession: ChatSession = {
+    const cleanSession: ChatSessionDetails = {
       id: session.id,
       title: session.title || 'Untitled Session',
       createdAt: session.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      model: session.model || 'claude-3-7-sonnet',
       messages: mergedMessages,
       messageCount: mergedMessages.length,
     };
@@ -423,19 +424,19 @@ export class FirestoreBackendService {
           const sessions: ChatSession[] = [];
           snapshot.forEach((doc: QueryDocumentSnapshot) => {
             const data = doc.data();
-            const allMsgs = (Array.isArray(data.messages) ? data.messages : []).map((m: any) =>
-              this.normalizeMessage(m)
-            );
-            sessions.push({
+            const messageCount = typeof data.messageCount === 'number'
+              ? data.messageCount
+              : (Array.isArray(data.messages) ? data.messages.length : 0);
+
+            const sessionSummary: ChatSession = {
               id: data.id || doc.id,
               title: data.title || 'Untitled Session',
+              messageCount,
               createdAt: data.createdAt || new Date().toISOString(),
               updatedAt: data.updatedAt?.toDate?.()?.toISOString() || data.updatedAt || new Date().toISOString(),
-              model: data.model || 'claude-3-7-sonnet',
-              messageCount: allMsgs.length,
-              // Lightweight response: empty or 1 preview message to avoid bloated transfers
-              messages: options?.includeAllMessages ? allMsgs : allMsgs.slice(-1),
-            });
+            };
+
+            sessions.push(sessionSummary);
           });
           sessions.sort(
             (a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
@@ -472,8 +473,8 @@ export class FirestoreBackendService {
     userId: string,
     sessionId: string,
     query?: SessionPaginationQuery
-  ): Promise<ChatSession | null> {
-    let rawSession: ChatSession | null = null;
+  ): Promise<ChatSessionDetails | null> {
+    let rawSession: ChatSessionDetails | null = null;
 
     if (this.isAvailable && this.db) {
       try {
@@ -486,7 +487,7 @@ export class FirestoreBackendService {
             title: data.title || 'Untitled Session',
             createdAt: data.createdAt || new Date().toISOString(),
             updatedAt: data.updatedAt?.toDate?.()?.toISOString() || data.updatedAt || new Date().toISOString(),
-            model: data.model || 'claude-3-7-sonnet',
+            messageCount: typeof data.messageCount === 'number' ? data.messageCount : (Array.isArray(data.messages) ? data.messages.length : 0),
             messages: (Array.isArray(data.messages) ? data.messages : []).map((m: any) =>
               this.normalizeMessage(m)
             ),
@@ -509,7 +510,7 @@ export class FirestoreBackendService {
     return {
       ...rawSession,
       messages: paged.messages,
-      messageCount: rawSession.messages.length,
+      messageCount: rawSession.messages?.length ?? 0,
       pagination: paged.pagination,
     };
   }

@@ -19,7 +19,7 @@ sequenceDiagram
         alt Cache Valid & Not Forced
             FE-->>User: Return cached model list (instant UI render)
         else Cache Miss or force=true
-            FE->>GW: GET /api/v1/agent/models?sessionId=...&userId=...&force=...<br/>[Header: Authorization: Bearer <JWT>]
+            FE->>GW: GET /api/v1/agent/models<br/>[Header: Authorization: Bearer <JWT>]
         end
     end
 
