@@ -53,7 +53,16 @@ Built strictly with Mermaid's native **`architecture-beta`** syntax matching the
 ## 2. End-to-End User Flow Diagram (`flowchart TD`)
 
 Built with Mermaid's **`flowchart TD`** visual decision engine featuring native FontAwesome iconography and condition branches:
-- **Session & Identity**: OS theme auto-detection (`fa:fa-adjust`) and 7-day JWT auth check (`fa:fa-key`) with Google OAuth fallback.
+- **Session, Identity & Cleanup**:
+  - OS theme auto-detection (`fa:fa-adjust`) and 7-day JWT auth check (`fa:fa-key`) with Google OAuth fallback.
+  - User sign-out (`fa:fa-sign-out-alt`) executes `performUserCleanup`, wiping session tokens, resetting volatile states, and cleanly clearing caches.
+- **Single-Flight 3D Cube Hydration Barrier (`z-[100]`)**:
+  - Elevated modal stacking (`z-[100]`) and `authMeMountedRef` guard prevent race conditions, modal overlaps, or premature dismissal during initial load or account sign-in.
+  - **Level-1 Parallel Cloud Hydration**: Linked CLI detection (`GET /api/v1/auth/cli/status`), active sandbox microVMs (`GET /api/v1/sandboxes`), and conversation history (`GET /api/v1/sessions`).
+  - **Target Session Resolution**: Auto-restores the last active session or selects the primary chat.
+  - **Level-2 Target Hydration**: Active session messages (`GET /api/v1/sessions/:id`), live provider quotas (`GET /api/v1/quota`), and VM-discovered models (`GET /api/v1/agent/models`).
+  - **Model Reconciliation**: Intelligently selects the best linked AI model or defaults to `'none'`.
+  - **750ms Smooth Presentation Window**: Guaranteed minimum presentation threshold prevents flickering and sub-second visual pops.
 - **Subscription Linking Flow**: Zero-key account linking via provider OAuth (`fa:fa-shield`, `fa:fa-user-check`), unlocking AI providers in the model menu.
 - **Sandbox-Coupled Model Discovery**:
   - **No VM Running**: Prompts user that a Sandbox VM is required (`fa:fa-rocket`) with one-click creation.

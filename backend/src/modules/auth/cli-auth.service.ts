@@ -94,11 +94,6 @@ export class CliAuthService {
     }
   >();
 
-  private cachedCodexStatus: {
-    linked: boolean;
-    email?: string;
-    timestamp: number;
-  } | null = null;
 
   private getGeminiDir(): string {
     return path.join(os.homedir(), '.gemini');
@@ -2119,11 +2114,6 @@ export class CliAuthService {
 
   public async refreshCodexStatus(userId?: string): Promise<{ linked: boolean; email?: string }> {
     const info = this.getCodexAuthInfo(userId);
-    this.cachedCodexStatus = {
-      linked: info.linked,
-      email: info.email,
-      timestamp: Date.now(),
-    };
     return info;
   }
 
@@ -2398,7 +2388,6 @@ export class CliAuthService {
       }
     } catch {}
 
-    this.cachedCodexStatus = { linked: false, timestamp: Date.now() };
     return true;
   }
 }

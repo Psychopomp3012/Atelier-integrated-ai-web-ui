@@ -1,6 +1,4 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import {
   AgentMessage,
   AgentStep,
@@ -184,6 +182,24 @@ export class AgentService {
     sessionId?: string
   ): Promise<DynamicModelOption[]> {
     if (!sandboxId) return [];
+
+    // 1. Multi-tenant linkage guard: if user is known and Antigravity is not linked, return [] immediately
+    if (userId) {
+      const cliStatus = await cliAuthService.getCliStatus(userId).catch(() => null);
+      const isAntigravityLinked = Boolean(cliStatus?.antigravity?.linked || cliStatus?.gemini?.linked);
+      if (!isAntigravityLinked) {
+        logger.info('[Model Discovery] User does not have linked Antigravity account; skipping Antigravity model discovery', { userId });
+        return [];
+      }
+      // Proactively ensure Antigravity credentials are refreshed in user profile & sync'd to the sandbox microVM before querying
+      const userRec = cliAuthService.getUserCliRecord(userId);
+      const userEmail = cliStatus?.antigravity?.email || cliStatus?.gemini?.email || userRec?.email || userRec?.antigravity?.email || userRec?.gemini?.email;
+      if (userEmail) {
+        cliAuthService.persistUserAntigravityProfile(userId, userEmail);
+      }
+      await sandboxService.syncCredentialsToUserSandboxes(userId).catch(() => {});
+    }
+
     let stdout = '';
     try {
       logger.info('[Model Discovery] Querying Antigravity models from sandbox microVM', {
@@ -191,8 +207,10 @@ export class AgentService {
         userId,
         sessionId,
       });
+      // 2. Strict authentication guard in the microVM shell:
+      // Only execute `agy models` if Antigravity token or credentials exist and are non-empty.
       const cmdRes = await sandboxService.executeInSandbox({
-        command: 'sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" agy models',
+        command: `sudo -u agent-runner -H env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/bin:$PATH" bash -c '(test -s /home/agent-runner/.gemini/antigravity-cli/cache/antigravity-oauth-token || test -s /home/agent-runner/.gemini/oauth_creds.json || test -s /home/agent-runner/.gemini/antigravity-cli/antigravity-oauth-token || test -s /home/agent-runner/.gemini/google_accounts.json) && agy models'`,
         code: '',
         language: 'bash',
         sandboxId,
@@ -551,10 +569,15 @@ export class AgentService {
       try {
         const models = await this.fetchDynamicModelsFromCli(sandboxId, userId, sessionId);
         if (models.length > 0) {
+          const cliStatus = userId ? await cliAuthService.getCliStatus(userId).catch(() => null) : null;
           const hasCodexModels = models.some((m) => m.provider === 'codex');
-          const isCodexLinked = userId ? (await cliAuthService.getCliStatus(userId).catch(() => null))?.codex?.linked : false;
-          // If user has Codex linked, but 0 codex models were discovered (transient VM sync), cache for only 5s so subsequent refresh can retry immediately
-          const ttl = (isCodexLinked && !hasCodexModels) ? 5_000 : 300_000;
+          const isCodexLinked = Boolean(cliStatus?.codex?.linked);
+          const hasAgyModels = models.some((m) => m.hostedBy === 'antigravity');
+          const isAgyLinked = Boolean(cliStatus?.antigravity?.linked || cliStatus?.gemini?.linked);
+
+          // If user has a linked CLI but 0 models were discovered for it (transient VM sync), cache for only 5s so subsequent refresh can retry immediately
+          const missingLinkedModels = (isCodexLinked && !hasCodexModels) || (isAgyLinked && !hasAgyModels);
+          const ttl = missingLinkedModels ? 5_000 : 300_000;
           this.sandboxModelsCache.set(sandboxId, { models, timestamp: Date.now(), ttl });
         }
         timingLogger.logTiming('Model Discovery', 'getAvailableModels', Math.round(performance.now() - start), {
@@ -638,9 +661,7 @@ export class AgentService {
     prompt: string,
     modelUsed: ModelEngine,
     history: HistoryMessage[] = [],
-    customKey?: string,
     onToken?: (token: string) => void,
-    sandboxDir?: string,
     sessionId?: string,
     onStep?: (step: AgentStep) => void,
     userId?: string,
@@ -667,11 +688,6 @@ export class AgentService {
       }
     }
     const isSandboxActive = Boolean(activeSandboxId && sandboxService.hasActiveSandbox(activeSandboxId, userId));
-    const sandboxFiles = isSandboxActive && activeSandboxId ? await sandboxService.listFiles(sessionId || 'default', userId, activeSandboxId).catch(() => []) : [];
-    const fileListStr =
-      sandboxFiles.length > 0
-        ? sandboxFiles.map((f) => `- ${f.name} (${f.type === 'directory' ? 'directory' : `${f.size}B`})`).join('\n')
-        : '(workspace directory is empty)';
 
     // 1. Sandbox-Native CLI Execution inside the cloud microVM
     if (isSandboxActive) {
@@ -780,7 +796,6 @@ export class AgentService {
       (m) => m.id === modelUsed || m.effortOptions?.some((opt) => opt.modelId === modelUsed)
     );
 
-    let modelNote = '';
     if (!modelMeta && modelUsed !== 'none' && modelUsed !== 'auto') {
       // 1. Check if base model still exists (effort changed or prefix match)
       const matchedBase = available.find((m) => modelUsed.startsWith(m.id));
@@ -790,7 +805,6 @@ export class AgentService {
           requested: modelUsed,
           migratedTo: newModelId,
         });
-        modelNote = `(requested variant "${modelUsed}" updated to "${newModelId}")`;
         modelUsed = newModelId;
         modelMeta = matchedBase;
       } else {
@@ -816,7 +830,6 @@ export class AgentService {
             requested: modelUsed,
             fallback,
           });
-          modelNote = `(requested model "${modelUsed}" removed from provider; routed to active "${fallback}")`;
           modelUsed = fallback;
           modelMeta = providerModels[0];
         }
@@ -828,7 +841,6 @@ export class AgentService {
     // Resolve user session and linked subscriptions from token
     const authSession = token ? await authService.getSession(token) : null;
     const user = authSession?.user;
-    const userName = user?.name ? user.name.split(' ')[0] : 'there';
     const isGoogleAuth = Boolean(user && (user.primaryPlatform === 'google' || user.email));
     const linkedPlatforms = Array.isArray(user?.linkedPlatforms)
       ? user.linkedPlatforms
@@ -925,9 +937,6 @@ export class AgentService {
         ? input.messages
         : [{ role: 'user', content: input.prompt }];
 
-    // 2. Try live AI execution in isolated sandbox (via linked CLI or cloud endpoint)
-    const sandboxDir = sandboxService.getSandboxWorkspaceDir(sessionId);
-
     // Seed any user-attached files directly into the sandbox microVM if active
     if (input.files && input.files.length > 0 && isSandboxActive) {
       const targetSbId = activeSbId || sessionId;
@@ -961,9 +970,7 @@ export class AgentService {
       input.prompt,
       modelUsed,
       history,
-      input.apiKey,
       onToken,
-      sandboxDir,
       sessionId,
       handleStep,
       userId,

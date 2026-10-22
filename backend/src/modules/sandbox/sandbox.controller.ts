@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { SandboxExecuteInputSchema } from './sandbox.schema.js';

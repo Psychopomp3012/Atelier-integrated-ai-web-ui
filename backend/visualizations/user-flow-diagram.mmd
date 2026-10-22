@@ -20,9 +20,29 @@ flowchart TD
     subgraph Client["🖥️ User & Client Browser (React 19)"]
         A([fa:fa-globe Open Atelier Web App]) --> B[fa:fa-adjust Auto-Detect OS Theme]
         B --> C{fa:fa-key Valid 7-Day JWT?}
-        D[fa:fa-google Google OAuth Login] --> E[fa:fa-id-card Receive 7-Day JWT]
-        E --> F[fa:fa-th-large Load Chat Dashboard]
-        C -->|Yes / Active| F
+        C -->|No / Expired| D[fa:fa-google Google OAuth Login]
+        D --> EModal["fa:fa-times Close AuthModal & Activate 3D Cube (z-100)"]
+        EModal --> E["fa:fa-id-card Exchange Google Token for 7-Day JWT"]
+        E --> Cube["🧊 3D Rotating Cube (Single-Flight Hydration Barrier, z-100)"]
+        C -->|Yes / Active| Cube
+
+        subgraph Hydration["🌊 Single-Flight Cloud Hydration Pipeline"]
+            Cube --> Hydrate1["1. Linked CLI Detection: GET /api/v1/auth/cli/status"]
+            Cube --> Hydrate2["2. Sandboxes Created: GET /api/v1/sandboxes"]
+            Cube --> Hydrate3["3. Sidebar Chats Fetch: GET /api/v1/sessions"]
+
+            Hydrate1 & Hydrate2 & Hydrate3 --> TargetRes["🎯 Target Session Resolution"]
+            TargetRes --> Hydrate4["4. Active Messages: GET /api/v1/sessions/:id"]
+            TargetRes --> Hydrate5["5. Quota & Models: GET /api/v1/quota & models"]
+
+            Hydrate4 & Hydrate5 --> ModelReconcile{"🔗 Any Linked CLI?"}
+            ModelReconcile -->|Yes| SetBestLinked["Auto-select Best Linked Model"]
+            ModelReconcile -->|None| SetNoneModel["Set 'none' (No Model Selected)"]
+
+            SetBestLinked & SetNoneModel --> MinWindow["⏱️ Min Presentation Threshold: 750ms Window"]
+        end
+
+        MinWindow --> F[fa:fa-th-large Dismiss 3D Cube & Mount Workspace]
 
         F --> MP[fa:fa-layer-group Open Model & Provider Selector]
         MP --> G{fa:fa-link Provider Linked?}
@@ -47,10 +67,13 @@ flowchart TD
         MD[fa:fa-list-check Dynamic Models & Effort List] --> S[fa:fa-sliders Choose Model & Effort Level]
         S --> T[fa:fa-paper-plane Dispatch User Prompt]
         Z[fa:fa-stream Stream SSE Tokens & Steps] --> AB([fa:fa-desktop Cloud Inspector Explorer])
+
+        F --> SignOutAction[fa:fa-sign-out-alt User Signs Out]
+        SignOutAction --> Cleanup["fa:fa-broom performUserCleanup: Invalidate Tokens, Caches & State"]
+        Cleanup --> D
     end
 
     subgraph Cloud["☁️ Backend Orchestrator & E2B MicroVM"]
-        C -->|No / Expired| D
         KDR --> K
 
         KA --> RunCliLive
@@ -58,21 +81,21 @@ flowchart TD
         L -->|No / New| M[fa:fa-cloud Launch Firecracker VM]
         M --> N[fa:fa-microchip Allocate 1GB Swap]
         N --> O[fa:fa-lock Set agent-runner DAC Boundary]
-        O --> P[fa:fa-download Pre-Install CLIs: agy/codex/claude]
+        O --> P["fa:fa-download Pre-Install CLIs: agy/codex/claude"]
         P --> Q[fa:fa-key Pre-Seed Linked Credentials]
         L -->|Yes / Reconnect| R[fa:fa-play Resume MicroVM]
         Q --> RunCliLive[fa:fa-terminal Execute Live CLI Discovery inside VM]
         R --> RunCliLive
 
         QueryVM --> RunCliLive
-        RunCliLive --> CLIModels[fa:fa-search Live CLI Discovery: agy models / codex debug models]
-        RunCliLive --> CLIQuota[fa:fa-tachometer-alt Live Telemetry Quota: 5h/Weekly & Rolling Limits]
+        RunCliLive --> CLIModels["fa:fa-search Live CLI Discovery: agy models / codex debug models"]
+        RunCliLive --> CLIQuota["fa:fa-tachometer-alt Live Telemetry Quota: 5h/Weekly & Rolling Limits"]
         CLIModels --> ZeroHardcode[fa:fa-shield-alt Zero-Hardcode & Zero-Firestore Volatile Rule]
         CLIQuota --> ZeroHardcode
         ZeroHardcode --> MD
 
         T --> TH[fa:fa-database Fetch History from Firestore]
-        TH --> TC[fa:fa-compress-arrows-alt Context Compactor: One-Shot Prompt Stitching]
+        TH --> TC["fa:fa-compress-arrows-alt Context Compactor: One-Shot Prompt Stitching"]
         TC --> U{fa:fa-sync Linked Post-Boot?}
         U -->|Yes / Hot-Swap| V[fa:fa-bolt Dynamic Live Credential Injection]
         U -->|No / Pre-Warmed| W[fa:fa-check-circle Pre-Flight Credential Verification]

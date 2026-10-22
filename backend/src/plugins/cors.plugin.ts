@@ -1,10 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
-import { envConfig } from '../config/env.config.js';
 
 export async function registerCorsPlugin(app: FastifyInstance): Promise<void> {
   await app.register(cors, {
-    origin: (origin, cb) => {
+    origin: (_origin, cb) => {
       // Allow all origins dynamically (browser apps, Vercel frontend, local dev)
       cb(null, true);
     },

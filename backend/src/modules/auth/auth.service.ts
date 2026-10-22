@@ -1,6 +1,5 @@
 import { createHash } from 'crypto';
 import type {
-  AIPlatform,
   AuthSession,
   ConnectPlatformRequest,
   DeviceAuthInitiateResponse,

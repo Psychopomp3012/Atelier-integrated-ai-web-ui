@@ -35,11 +35,11 @@ import { MarkdownContent } from './components/MarkdownContent';
 import { LoadingScreen } from './components/LoadingScreen';
 import { signOutFirebase } from './services/firebaseAuth.service';
 import { sessionSyncService } from './services/sessionSync.service';
-import { fetchCliStatus, closeGeminiCliLoginPopup, type CliStatus } from './services/cliAuth.service';
+import { fetchCliStatus, closeGeminiCliLoginPopup, invalidateCliStatusCache, type CliStatus } from './services/cliAuth.service';
 import { apiFetch, isTokenExpired } from './utils/api.util';
 import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSession, StepItem, ModelOption, GeminiQuotaStats, CodexQuotaStats } from './types';
 import { NONE_MODEL, getModelDisplayInfo, getMinimumEffortModelId } from './types';
-import { fetchAvailableModels } from './services/models.service';
+import { fetchAvailableModels, invalidateModelsCache } from './services/models.service';
 import { computeSessionTokens } from './utils/tokenMetrics.util';
 import { checkModelQuotaExhausted } from './utils/quota.util';
 
@@ -393,25 +393,30 @@ export const App: React.FC = () => {
   const codexQuotaRef = useRef(codexQuota);
   codexQuotaRef.current = codexQuota;
 
-  const fetchSandboxUsage = useCallback(async () => {
-    if (isFetchingUsageRef.current) return;
+  const fetchSandboxUsage = useCallback(async (overrideUserId?: string) => {
+    if (isFetchingUsageRef.current) return sandboxUsageRef.current;
     try {
-      const u = currentUserRef.current;
-      if (!u?.id) {
-        setSandboxUsage({ used: 0, max: 3, sandboxes: [] });
+      const uid = overrideUserId || currentUserRef.current?.id;
+      if (!uid) {
+        const empty = { used: 0, max: 3, sandboxes: [] };
+        setSandboxUsage(empty);
         setSelectedSandboxId(null);
-        return;
+        return empty;
       }
       isFetchingUsageRef.current = true;
       const params = new URLSearchParams();
-      params.set('userId', u.id);
+      params.set('userId', uid);
       const url = `/api/v1/sandboxes?${params.toString()}`;
       const res = await apiFetch(url);
       const data = await res.json();
       if (data.success && data.data) {
         setSandboxUsage(data.data);
+        return data.data;
       }
-    } catch {} finally {
+      return sandboxUsageRef.current;
+    } catch {
+      return sandboxUsageRef.current;
+    } finally {
       isFetchingUsageRef.current = false;
     }
   }, []);
@@ -661,11 +666,19 @@ export const App: React.FC = () => {
   const inFlightQuotaPromiseRef = useRef<Promise<any> | null>(null);
   const authMeInFlightRef = useRef<Promise<any> | null>(null);
   const authMeCompletedRef = useRef<boolean>(false);
+  const authMeMountedRef = useRef<boolean>(false);
 
-  const fetchQuota = async (sessId?: string, force = false, emailOverride?: string) => {
+  const fetchQuota = async (
+    sessId?: string,
+    force = false,
+    emailOverride?: string,
+    cliStatusOverride?: CliStatus | null,
+    hasSandboxOverride?: boolean
+  ) => {
     // Guard 1: If neither Antigravity nor Codex CLI is linked, never fetch quota!
-    const isAntigravityLinked = cliStatusRef.current?.antigravity?.linked || cliStatusRef.current?.gemini?.linked;
-    const isCodexLinked = cliStatusRef.current?.codex?.linked;
+    const effectiveStatus = cliStatusOverride || cliStatusRef.current;
+    const isAntigravityLinked = effectiveStatus?.antigravity?.linked || effectiveStatus?.gemini?.linked;
+    const isCodexLinked = effectiveStatus?.codex?.linked;
 
     if (!isAntigravityLinked) setGeminiQuota(null);
     if (!isCodexLinked) setCodexQuota(null);
@@ -675,7 +688,10 @@ export const App: React.FC = () => {
     }
 
     // Guard 2: If user has no active sandbox, never fetch quota (quotas execute strictly inside microVMs)
-    const hasSandbox = activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0);
+    const hasSandbox =
+      hasSandboxOverride !== undefined
+        ? hasSandboxOverride
+        : (activeSandboxRef.current || (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0));
     if (!hasSandbox) {
       setGeminiQuota(null);
       setCodexQuota(null);
@@ -730,62 +746,224 @@ export const App: React.FC = () => {
     return inFlightQuotaPromiseRef.current;
   };
 
-  const waitForWorkspaceAndProvidersReady = useCallback(
-    async (userId: string, targetSessionId?: string | null, emailOverride?: string) => {
-      setLoadingSubMessage('Detecting linked AI providers & subscriptions...');
-      try {
-        const email = emailOverride || currentUserRef.current?.email || currentUser?.email;
+  // Sync and merge chat sessions across Cloud Backend, Firestore, and LocalStorage
+  const syncSessions = useCallback(async (userIdOverride?: string) => {
+    const uid = userIdOverride || currentUserRef.current?.id || currentUser?.id;
+    if (!uid) {
+      setIsSyncingSessions(false);
+      return null;
+    }
+    // Instant hydration from local cache if available
+    const cached = sessionSyncService.getLocalSessions(uid);
+    if (cached.length > 0) {
+      setSessions(cached);
+    }
+    setIsSyncingSessions(true);
+    try {
+      const merged = await sessionSyncService.loadAndReconcileSessions(
+        uid,
+        (interim) => {
+          if (currentUserRef.current?.id === uid) {
+            setSessions(interim);
+          }
+        }
+      );
+      // Guard: if user logged out while request was in-flight, discard!
+      if (!currentUserRef.current?.id || currentUserRef.current.id !== uid) {
+        return null;
+      }
+      setSessions(merged);
+      return merged;
+    } catch (err) {
+      console.error('Session reconciliation failed', err);
+      return null;
+    } finally {
+      setIsSyncingSessions(false);
+    }
+  }, [currentUser?.id]);
 
-        // 1. Fetch CLI status only if not already fetched during boot
-        let freshCliStatus = cliStatus;
-        if (!cliStatusFetchedRef.current) {
-          const status = await fetchCliStatus().catch(() => null);
-          if (status && currentUserRef.current?.id === userId) {
-            freshCliStatus = status;
-            setCliStatus(status);
+  // Single-flight promise reference prevents concurrent duplicate hydrations
+  const workspaceHydrationPromiseRef = useRef<Promise<void> | null>(null);
+
+  /**
+   * Unified single-flight workspace hydration pipeline.
+   * Ensures the 3D rotating isometric cube (LoadingScreen) waits until ALL 5 core resources complete:
+   * 1. linked cli detection fetch (GET /api/v1/auth/cli/status)
+   * 2. sandboxes created fetch (GET /api/v1/sandboxes)
+   * 3. sidebar chats fetch (GET /api/v1/sessions)
+   * 4. selected session message fetch (GET /api/v1/sessions/:id)
+   * 5. quota fetch (GET /api/v1/quota) & models discovery (GET /api/v1/agent/models)
+   */
+  const hydrateUserWorkspace = useCallback(
+    async (user: UserProfile, options?: { forceFreshCli?: boolean }) => {
+      // If hydration is already in progress, await the single in-flight promise
+      if (workspaceHydrationPromiseRef.current) {
+        return workspaceHydrationPromiseRef.current;
+      }
+      if (lastHydratedUserIdRef.current === user.id && initialLoadCompletedRef.current && !options?.forceFreshCli) {
+        return Promise.resolve();
+      }
+
+      lastHydratedUserIdRef.current = user.id;
+
+      const hydrationStartTime = Date.now();
+      const hydrationPromise = (async () => {
+        setIsPageLoading(true);
+        setLoadingMessage('Configuring Atelier Workspace');
+        setLoadingSubMessage('Connecting to cloud microVMs, detecting linked CLIs & chats...');
+
+        try {
+          if (options?.forceFreshCli) {
+            invalidateCliStatusCache();
+            invalidateModelsCache();
+            cliStatusFetchedRef.current = false;
+          }
+
+          // -------------------------------------------------------------------
+          // Phase 1 (Parallel Level-1 Cloud Hydration):
+          // 1. Linked CLI detection fetch (GET /api/v1/auth/cli/status)
+          // 2. Sandboxes created fetch (GET /api/v1/sandboxes)
+          // 3. Sidebar chats fetch (GET /api/v1/sessions)
+          // -------------------------------------------------------------------
+          setLoadingSubMessage('Detecting linked AI providers, sandboxes & chats...');
+          const [cliData, sandboxData, mergedSessions] = await Promise.all([
+            fetchCliStatus(true).catch(() => null),
+            fetchSandboxUsage(user.id).catch(() => null),
+            syncSessions(user.id).catch(() => null),
+          ]);
+
+          // Guard: if user signed out or changed while in-flight, terminate cleanly
+          if (!currentUserRef.current?.id || currentUserRef.current.id !== user.id) {
+            return;
+          }
+
+          let freshCliStatus = cliStatus;
+          if (cliData) {
+            freshCliStatus = cliData;
+            setCliStatus(cliData);
             cliStatusFetchedRef.current = true;
             try {
-              localStorage.setItem(`harness_cli_status_${userId}`, JSON.stringify(status));
+              localStorage.setItem(`harness_cli_status_${user.id}`, JSON.stringify(cliData));
             } catch {}
           }
-        }
 
-        // 2. Discover models, quota limits, and sandbox telemetry in parallel
-        setLoadingSubMessage('Connecting to cloud microVMs & discovering models...');
-        const [freshModels] = await Promise.all([
-          fetchAvailableModels(false, targetSessionId || undefined, userId).catch(() => []),
-          fetchQuota(targetSessionId || undefined, false, email).catch(() => null),
-          fetchSandboxUsage().catch(() => null),
-        ]);
+          // -------------------------------------------------------------------
+          // Phase 2 (Target Session Resolution):
+          // -------------------------------------------------------------------
+          const sessionsList = mergedSessions ?? [];
+          let targetSessionId: string | null = null;
+          if (sessionsList.length > 0) {
+            const activeId = localStorage.getItem(`harness_current_session_id_${user.id}`);
+            const matched = activeId ? sessionsList.find((s) => s.id === activeId) : sessionsList[0];
+            if (matched) {
+              targetSessionId = matched.id;
+              setCurrentSessionId(matched.id);
+            }
+          } else {
+            setCurrentSessionId(null);
+            setMessages([]);
+            setHasMoreEarlierMessages(false);
+            setRemainingMessageCount(0);
+          }
 
-        if (freshModels && freshModels.length > 0 && currentUserRef.current?.id === userId) {
-          setAvailableModels(freshModels);
-          const effectiveStatus = freshCliStatus || cliStatus;
-          const isCurrentlyLinked =
-            selectedModel !== 'none' &&
-            freshModels.some(
-              (m) =>
-                (m.id === selectedModel || m.effortOptions?.some((opt) => opt.modelId === selectedModel)) &&
-                isModelOptionLinked(m, effectiveStatus, currentUserRef.current)
-            );
-          if (!isCurrentlyLinked) {
-            const bestLinkedId = getBestLinkedModelId(
-              freshModels,
-              effectiveStatus,
-              currentUserRef.current,
-              null,
-              null
-            );
-            if (bestLinkedId) {
-              handleSelectModel(bestLinkedId);
+          // -------------------------------------------------------------------
+          // Phase 3 (Parallel Level-2 Target Hydration):
+          // 4. Selected session message fetch (GET /api/v1/sessions/:id)
+          // 5. Quota fetch (GET /api/v1/quota) & Model discovery (GET /api/v1/agent/models)
+          // -------------------------------------------------------------------
+          setLoadingSubMessage('Retrieving active session messages, quotas & models...');
+          const hasSandbox = Boolean(
+            (sandboxData?.sandboxes && sandboxData.sandboxes.length > 0) ||
+            (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0)
+          );
+
+          const [sessionData, quotaData, modelsData] = await Promise.all([
+            targetSessionId
+              ? sessionSyncService.getSession(targetSessionId, { limit: 25 }).catch(() => null)
+              : Promise.resolve(null),
+            fetchQuota(targetSessionId || undefined, true, user.email, freshCliStatus, hasSandbox).catch(() => null),
+            fetchAvailableModels(true, targetSessionId || undefined, user.id).catch(() => []),
+          ]);
+
+          // Guard: if user changed during phase 3
+          if (!currentUserRef.current?.id || currentUserRef.current.id !== user.id) {
+            return;
+          }
+
+          // Hydrate selected session messages
+          if (sessionData && targetSessionId) {
+            setMessages(sessionData.messages || []);
+            if (sessionData.pagination) {
+              setHasMoreEarlierMessages(sessionData.pagination.hasMore);
+              setRemainingMessageCount(sessionData.pagination.remaining);
+            } else {
+              setHasMoreEarlierMessages(false);
+              setRemainingMessageCount(0);
             }
           }
+
+          // Discovered models list
+          const freshModels = modelsData && modelsData.length > 0 ? modelsData : [];
+          if (freshModels.length > 0) {
+            setAvailableModels(freshModels);
+          }
+
+          // -------------------------------------------------------------------
+          // Phase 4 (Model Selection Reconciliation):
+          // -------------------------------------------------------------------
+          const effectiveStatus = freshCliStatus || cliStatus;
+          const bestLinkedId = getBestLinkedModelId(
+            freshModels,
+            effectiveStatus,
+            user,
+            quotaData?.gemini ?? geminiQuotaRef.current,
+            quotaData?.codex ?? codexQuotaRef.current
+          );
+
+          if (bestLinkedId) {
+            handleSelectModel(bestLinkedId);
+          } else {
+            setSelectedModel('none');
+            try {
+              localStorage.removeItem('model_preference');
+              localStorage.removeItem('selected_model_preference');
+            } catch {}
+          }
+
+          initialLoadCompletedRef.current = true;
+          // Ensure a smooth presentation window (minimum 750ms) so the 3D cube is visibly displayed
+          const elapsed = Date.now() - hydrationStartTime;
+          const MIN_LOADING_TIME = 750;
+          if (elapsed < MIN_LOADING_TIME) {
+            await new Promise((resolve) => setTimeout(resolve, MIN_LOADING_TIME - elapsed));
+          }
+        } catch (err) {
+          console.error('[App] Workspace hydration encountered an error:', err);
+        } finally {
+          setIsPageLoading(false);
+          workspaceHydrationPromiseRef.current = null;
         }
-      } catch (err) {
-        console.warn('Error waiting for providers and models ready', err);
-      }
+      })();
+
+      workspaceHydrationPromiseRef.current = hydrationPromise;
+      return hydrationPromise;
     },
-    [fetchSandboxUsage]
+    [
+      cliStatus,
+      fetchSandboxUsage,
+      syncSessions,
+      handleSelectModel,
+      setSelectedModel,
+      setCliStatus,
+      setMessages,
+      setAvailableModels,
+      setHasMoreEarlierMessages,
+      setRemainingMessageCount,
+      setCurrentSessionId,
+      setIsPageLoading,
+      setLoadingMessage,
+      setLoadingSubMessage,
+    ]
   );
 
   useEffect(() => {
@@ -925,11 +1103,16 @@ export const App: React.FC = () => {
     authMeInFlightRef.current = null;
     initialLoadCompletedRef.current = false;
     lastHydratedUserIdRef.current = null;
+    workspaceHydrationPromiseRef.current = null;
+    cliStatusFetchedRef.current = false;
+    invalidateCliStatusCache();
+    invalidateModelsCache();
     const prevUserId = currentUserRef.current?.id;
     closeGeminiCliLoginPopup();
     // 1. Invalidate authentication tokens & caches
     localStorage.removeItem('auth_token');
     sessionSyncService.clearLocalCache(prevUserId);
+    currentUserRef.current = null;
     setCurrentUser(null);
 
     // 2. Clear current session and message view
@@ -1018,13 +1201,14 @@ export const App: React.FC = () => {
 
   // Sync user profile on load using verified session token and auto-refresh weekly
   useEffect(() => {
+    if (authMeMountedRef.current) return;
+    authMeMountedRef.current = true;
+
     const token = localStorage.getItem('auth_token');
     if (!token || isTokenExpired(token)) {
       performUserCleanup();
-      setTimeout(() => {
-        setIsPageLoading(false);
-        initialLoadCompletedRef.current = true;
-      }, 350);
+      setIsPageLoading(false);
+      initialLoadCompletedRef.current = true;
       return;
     }
 
@@ -1037,104 +1221,51 @@ export const App: React.FC = () => {
 
     // Fallback safety timeout ensures loading screen never blocks the user indefinitely (e.g. slow network)
     const safetyTimeout = setTimeout(async () => {
-      if (!cliStatusFetchedRef.current && currentUserRef.current?.id) {
-        try {
-          const status = await fetchCliStatus(true);
-          if (status) {
-            setCliStatus(status);
-            cliStatusFetchedRef.current = true;
-          }
-        } catch {}
-      }
       setIsPageLoading(false);
       initialLoadCompletedRef.current = true;
-    }, 10000);
+    }, 12000);
 
-    authMeInFlightRef.current = Promise.all([
-      apiFetch('/api/v1/auth/me').then(async (res) => {
+    authMeInFlightRef.current = apiFetch('/api/v1/auth/me')
+      .then(async (res) => {
         if (!res.ok) throw new Error('Unauthenticated');
         return res.json();
-      }),
-      fetchCliStatus().catch(() => null),
-    ])
-      .then(async ([meData, cliData]) => {
+      })
+      .then(async (meData) => {
         authMeCompletedRef.current = true;
         if (meData.success && meData.data) {
           const user = normalizeUser(meData.data);
-          currentUserRef.current = user;
-          setCurrentUser(user);
-
-          if (cliData) {
-            setCliStatus(cliData);
-            cliStatusFetchedRef.current = true;
-            try {
-              if (user?.id) {
-                localStorage.setItem(`harness_cli_status_${user.id}`, JSON.stringify(cliData));
-              }
-            } catch {}
-          }
-
-          // Do NOT dismiss loading screen yet!
-          // We wait until sidebar sessions & active session messages are fetched.
-        } else {
-          performUserCleanup();
-          setTimeout(() => {
+          if (user) {
+            currentUserRef.current = user;
+            setCurrentUser(user);
+            await hydrateUserWorkspace(user, { forceFreshCli: true });
+          } else {
+            performUserCleanup();
             setIsPageLoading(false);
             initialLoadCompletedRef.current = true;
             clearTimeout(safetyTimeout);
-          }, 350);
+          }
+        } else {
+          performUserCleanup();
+          setIsPageLoading(false);
+          initialLoadCompletedRef.current = true;
+          clearTimeout(safetyTimeout);
         }
       })
       .catch(() => {
         performUserCleanup();
-        setTimeout(() => {
-          setIsPageLoading(false);
-          initialLoadCompletedRef.current = true;
-          clearTimeout(safetyTimeout);
-        }, 350);
+        setIsPageLoading(false);
+        initialLoadCompletedRef.current = true;
+        clearTimeout(safetyTimeout);
       })
       .finally(() => {
+        clearTimeout(safetyTimeout);
         authMeInFlightRef.current = null;
       });
 
     return () => clearTimeout(safetyTimeout);
-  }, [performUserCleanup]);
+  }, []);
 
-  // Sync and merge chat sessions across Cloud Backend, Firestore, and LocalStorage
-  const syncSessions = useCallback(async () => {
-    if (!currentUser?.id) {
-      setIsSyncingSessions(false);
-      return null;
-    }
-    // Instant hydration from local cache if available
-    const cached = sessionSyncService.getLocalSessions(currentUser.id);
-    if (cached.length > 0) {
-      setSessions(cached);
-    }
-    setIsSyncingSessions(true);
-    try {
-      const merged = await sessionSyncService.loadAndReconcileSessions(
-        currentUser.id,
-        (interim) => {
-          if (currentUserRef.current?.id === currentUser.id) {
-            setSessions(interim);
-          }
-        }
-      );
-      // Guard: if user logged out while request was in-flight, discard!
-      if (!currentUserRef.current?.id || currentUserRef.current.id !== currentUser.id) {
-        return null;
-      }
-      setSessions(merged);
-      return merged;
-    } catch (err) {
-      console.error('Session reconciliation failed', err);
-      return null;
-    } finally {
-      setIsSyncingSessions(false);
-    }
-  }, [currentUser?.id]);
-
+  // Synchronize and hydrate workspace when user logs in or switches account
   useEffect(() => {
     if (!currentUser?.id) {
       lastHydratedUserIdRef.current = null;
@@ -1148,142 +1279,19 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Guard: Prevent re-running initial wipe and sync if this user has already been hydrated
-    if (lastHydratedUserIdRef.current === currentUser.id) {
-      return;
-    }
-    lastHydratedUserIdRef.current = currentUser.id;
-
     // 0ms instant hydration: immediately display local sessions before network calls, scoped to user
     const cached = sessionSyncService.getLocalSessions(currentUser.id);
-    if (cached.length > 0) {
+    if (cached.length > 0 && sessions.length === 0) {
       setSessions(cached);
-      try {
-        const activeId = localStorage.getItem(`harness_current_session_id_${currentUser.id}`);
-        const matched = activeId ? cached.find((s) => s.id === activeId) : cached[0];
-        if (matched) {
-          if (!activeId) setCurrentSessionId(matched.id);
-          const localSlice = (matched.messages || []).slice(-25);
-          if (localSlice.length > 0) setMessages(localSlice);
-          const totalMsgs = matched.messageCount ?? matched.messages?.length ?? 0;
-          if (totalMsgs > localSlice.length) {
-            setHasMoreEarlierMessages(true);
-            setRemainingMessageCount(totalMsgs - localSlice.length);
-          } else {
-            setHasMoreEarlierMessages(false);
-            setRemainingMessageCount(0);
-          }
-        }
-      } catch {}
-    } else {
-      // User has no cached sessions: ensure previous user's messages & active session are cleared!
-      setSessions([]);
-      setMessages([]);
-      setCurrentSessionId(null);
-      setHasMoreEarlierMessages(false);
-      setRemainingMessageCount(0);
     }
 
-    setLoadingSubMessage('Loading your chat sessions & workspace...');
+    // Guard: Prevent re-running initial wipe and sync if this user has already been hydrated
+    if (lastHydratedUserIdRef.current === currentUser.id && initialLoadCompletedRef.current) {
+      return;
+    }
 
-    // Safety timer ensures loading screen never permanently hangs if network drops
-    const loadingSafetyTimer = setTimeout(async () => {
-      if (!initialLoadCompletedRef.current) {
-        if (!cliStatusFetchedRef.current && currentUserRef.current?.id) {
-          try {
-            const status = await fetchCliStatus(true);
-            if (status) {
-              setCliStatus(status);
-              cliStatusFetchedRef.current = true;
-            }
-          } catch {}
-        }
-        initialLoadCompletedRef.current = true;
-        setIsPageLoading(false);
-      }
-    }, 10000);
-
-    syncSessions()
-      .then(async (merged) => {
-        // Guard: if user logged out or changed in the meantime, discard!
-        if (!currentUserRef.current?.id || currentUserRef.current.id !== currentUser.id) return;
-        if (!merged || merged.length === 0) {
-          setSessions([]);
-          setMessages([]);
-          setCurrentSessionId(null);
-          setHasMoreEarlierMessages(false);
-          setRemainingMessageCount(0);
-          await waitForWorkspaceAndProvidersReady(currentUser.id, null, currentUser.email);
-          if (!cliStatusFetchedRef.current) {
-            const status = await fetchCliStatus().catch(() => null);
-            if (status && currentUserRef.current?.id === currentUser.id) {
-              setCliStatus(status);
-              cliStatusFetchedRef.current = true;
-            }
-          }
-          clearTimeout(loadingSafetyTimer);
-          initialLoadCompletedRef.current = true;
-          setTimeout(() => setIsPageLoading(false), 200);
-          return;
-        }
-        let targetSessionId: string | null = null;
-        try {
-          const activeId = localStorage.getItem(`harness_current_session_id_${currentUser.id}`);
-          const target = activeId ? merged.find((s) => s.id === activeId) : merged[0];
-          if (target) {
-            targetSessionId = target.id;
-            if (!activeId) setCurrentSessionId(target.id);
-            setLoadingSubMessage('Fetching messages for active session...');
-            try {
-              const data = await sessionSyncService.getSession(target.id, { limit: 25 });
-              if (data && currentUserRef.current?.id === currentUser.id) {
-                setMessages(data.messages || []);
-                if (data.pagination) {
-                  setHasMoreEarlierMessages(data.pagination.hasMore);
-                  setRemainingMessageCount(data.pagination.remaining);
-                } else {
-                  setHasMoreEarlierMessages(false);
-                  setRemainingMessageCount(0);
-                }
-              }
-            } catch (err) {
-              console.error('Failed to fetch session messages during initial load', err);
-            }
-          }
-        } catch (err) {
-          console.error('Error during initial session target hydration', err);
-        } finally {
-          await waitForWorkspaceAndProvidersReady(currentUser.id, targetSessionId, currentUser.email);
-          if (!cliStatusFetchedRef.current) {
-            const status = await fetchCliStatus().catch(() => null);
-            if (status && currentUserRef.current?.id === currentUser.id) {
-              setCliStatus(status);
-              cliStatusFetchedRef.current = true;
-            }
-          }
-          clearTimeout(loadingSafetyTimer);
-          initialLoadCompletedRef.current = true;
-          setTimeout(() => setIsPageLoading(false), 200);
-        }
-      })
-      .catch(async (err) => {
-        console.warn('Initial session sync encountered error:', err);
-        if (!cliStatusFetchedRef.current && currentUserRef.current?.id) {
-          const status = await fetchCliStatus().catch(() => null);
-          if (status) {
-            setCliStatus(status);
-            cliStatusFetchedRef.current = true;
-          }
-        }
-        clearTimeout(loadingSafetyTimer);
-        initialLoadCompletedRef.current = true;
-        setIsPageLoading(false);
-      });
-
-    return () => {
-      clearTimeout(loadingSafetyTimer);
-    };
-  }, [currentUser?.id, syncSessions, waitForWorkspaceAndProvidersReady]);
+    hydrateUserWorkspace(currentUser);
+  }, [currentUser?.id, hydrateUserWorkspace, sessions.length]);
 
   const handleSelectSession = (sessionId: string) => {
     const session = sessions.find((s) => s.id === sessionId);
@@ -1399,6 +1407,7 @@ export const App: React.FC = () => {
     setLoadingMessage('Signing in to Atelier');
     setLoadingSubMessage('Configuring cloud workspace & synchronizing profile...');
     setIsPageLoading(true);
+    setIsAuthModalOpen(false);
 
     try {
       // Clear previous user's messages, active session, and sandbox selection immediately
@@ -1408,7 +1417,6 @@ export const App: React.FC = () => {
       setSelectedSandboxId(null);
       setHasMoreEarlierMessages(false);
       setRemainingMessageCount(0);
-      localStorage.removeItem('auth_token');
 
       let loggedInUser: UserProfile | null = null;
 
@@ -1456,35 +1464,18 @@ export const App: React.FC = () => {
       }
 
       const normalizedUser = normalizeUser(loggedInUser);
+      if (!normalizedUser) {
+        setIsPageLoading(false);
+        throw new Error('Failed to normalize authenticated user profile');
+      }
       currentUserRef.current = normalizedUser;
       setCurrentUser(normalizedUser);
 
-      // Synchronize workspace sessions & messages first
-      setLoadingSubMessage('Loading your chat sessions & workspace...');
-      const merged = await syncSessions();
-      let targetSessionId: string | null = null;
-      if (merged && merged.length > 0) {
-        const activeId = localStorage.getItem(`harness_current_session_id_${loggedInUser.id}`);
-        const target = activeId ? merged.find((s) => s.id === activeId) : merged[0];
-        if (target) {
-          targetSessionId = target.id;
-          if (!activeId) setCurrentSessionId(target.id);
-          setLoadingSubMessage('Fetching messages for active session...');
-          try {
-            const sData = await sessionSyncService.getSession(target.id, { limit: 25 });
-            if (sData) setMessages(sData.messages || []);
-          } catch {}
-        }
-      }
+      // Hydrate all 5 cloud resources in single-flight pipeline
+      // 3D cube waits for CLI detection, sandboxes, chats, active message, and quota
+      await hydrateUserWorkspace(normalizedUser, { forceFreshCli: true });
 
-      // Keep 3D cube loading screen active until ALL linked AI providers, quotas, and models are fetched
-      await waitForWorkspaceAndProvidersReady(loggedInUser.id, targetSessionId, loggedInUser.email);
-
-      setIsAuthModalOpen(false);
       showToast(`Welcome back, ${loggedInUser.name}!`);
-      setTimeout(() => {
-        setIsPageLoading(false);
-      }, 300);
     } catch (err: unknown) {
       setIsPageLoading(false);
       const errorMsg = err instanceof Error ? err.message : 'Authentication failed';

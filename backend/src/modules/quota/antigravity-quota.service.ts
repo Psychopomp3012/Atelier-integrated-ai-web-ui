@@ -1,4 +1,4 @@
-import type { AntigravityQuotaStats, GeminiQuotaStats, RecordTurnInput, CliQuotaLimits, QuotaGroup } from './quota.types.js';
+import type { AntigravityQuotaStats, RecordTurnInput, CliQuotaLimits, QuotaGroup } from './quota.types.js';
 import { cliAuthService } from '../auth/cli-auth.service.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
@@ -250,8 +250,6 @@ export class AntigravityQuotaService {
 
   private async fetchCliQuotaLimits(
     userKey: string,
-    persistence: CliTelemetryPersistence,
-    userEmail?: string,
     sessionId?: string,
     userId?: string
   ): Promise<CliQuotaLimits> {
@@ -389,7 +387,7 @@ export class AntigravityQuotaService {
           ? Math.round(effectiveTotalLatency / totalTurnsCount)
           : 0;
 
-      const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, email, sessionId, effectiveUserId);
+      const quotaLimits = await this.fetchCliQuotaLimits(userKey, sessionId, effectiveUserId);
 
       const logKey = `${effectiveUserId || userId || userEmail || 'default'}`;
       const logSnapshot = `${isLinked}:${totalTurnsCount}:${quotaLimits.groups.map((g) => g.name).join(',')}`;
@@ -521,7 +519,7 @@ export class AntigravityQuotaService {
       this.sessionStatsMap.set(input.sessionId, existing);
     }
 
-    const quotaLimits = await this.fetchCliQuotaLimits(userKey, persistence, input.userEmail);
+    const quotaLimits = await this.fetchCliQuotaLimits(userKey, undefined, input.userId);
 
     logger.info('[Antigravity Quota] Recorded turn', {
       userKey,

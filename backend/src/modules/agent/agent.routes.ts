@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { agentController } from './agent.controller.js';
-import { requireAuth, optionalAuth } from '../../middleware/auth.middleware.js';
+import { requireAuth } from '../../middleware/auth.middleware.js';
 import {
   agentPromptLimitHook,
   mutationLimitHook,

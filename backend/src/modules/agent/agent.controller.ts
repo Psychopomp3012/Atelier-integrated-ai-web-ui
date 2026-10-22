@@ -3,8 +3,6 @@ import { PromptExecutionInputSchema } from './agent.schema.js';
 import { agentService } from './agent.service.js';
 import { rateLimitService } from '../rate-limit/rate-limit.service.js';
 import { createSuccessResponse, createErrorResponse } from '../../utils/response.util.js';
-import { tokenUtil } from '../../utils/token.util.js';
-import { authService } from '../auth/auth.service.js';
 import { sandboxService } from '../sandbox/sandbox.service.js';
 import { firestoreBackendService } from '../../services/firestore.service.js';
 import { AppError } from '../../utils/error.util.js';
@@ -12,7 +10,6 @@ import { logger } from '../../utils/logger.util.js';
 
 export class AgentController {
   private getClientKey(req: FastifyRequest): string {
-    const authHeader = req.headers.authorization;
     return req.userId ? `user:${req.userId}` : this.getFallbackClientKey(req);
   }
 

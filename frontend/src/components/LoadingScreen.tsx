@@ -11,7 +11,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({
 }) => {
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-slate-50/95 dark:bg-[#090d16]/95 backdrop-blur-md transition-colors duration-300 select-none animate-fadeIn"
+      className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-slate-50/95 dark:bg-[#090d16]/95 backdrop-blur-md transition-colors duration-300 select-none animate-fadeIn"
       role="status"
       aria-live="polite"
     >

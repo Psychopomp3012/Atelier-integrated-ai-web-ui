@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import { FileType, Sandbox } from 'e2b';
 import type {
   ISandboxProvider,
@@ -59,13 +58,6 @@ export class E2BSandboxProvider implements ISandboxProvider {
     }, 60 * 60 * 1000).unref();
   }
 
-  private getStoragePath(): string {
-    const dir = path.join(os.homedir(), '.gemini');
-    if (!fs.existsSync(dir)) {
-      try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-    }
-    return path.join(dir, 'e2b_sandboxes.json');
-  }
 
   private renumberSandboxes(): void {
     const allRecords = Array.from(this.sandboxRecords.values()).sort(
@@ -443,8 +435,7 @@ export class E2BSandboxProvider implements ISandboxProvider {
    */
   public async verifyAndReactivateSandbox(
     sandboxId: string,
-    userId: string,
-    sessionId?: string
+    userId: string
   ): Promise<{ sandboxId: string; name: string }> {
     if (!sandboxId) {
       throw new Error('Sandbox ID is required.');
@@ -523,17 +514,6 @@ export class E2BSandboxProvider implements ISandboxProvider {
     });
   }
 
-  /**
-   * Safely writes a single file into /home/agent-runner inside the microVM via writeAgentRunnerFilesBatch.
-   */
-  private async writeAgentRunnerFile(
-    sandbox: Sandbox,
-    targetPath: string,
-    content: string,
-    mode = '600'
-  ): Promise<void> {
-    await this.writeAgentRunnerFilesBatch(sandbox, [{ targetPath, content, mode }]);
-  }
 
   /**
    * Enforces strict Linux DAC Dual-User Privilege Separation:
@@ -827,7 +807,6 @@ export class E2BSandboxProvider implements ISandboxProvider {
    */
   public async ensureSecurityBoundaryAndCredentials(sandbox: Sandbox, userId?: string): Promise<void> {
     const boundaryStart = Date.now();
-    const homedir = os.homedir();
     try {
       if (!this.initializedSandboxes.has(sandbox.sandboxId)) {
         const setupScript = `
@@ -1368,7 +1347,6 @@ exec env HOME=/home/agent-runner PATH="/home/agent-runner/.local/bin:/usr/local/
         cli: req.cli,
       };
     } catch (err: unknown) {
-      const durationMs = Date.now() - start;
       const msg = err instanceof Error ? err.message : String(err);
       this.addLog('ERROR', `[Sandbox-Native] ${req.cli} microVM command failed: ${msg}`);
       throw err;
