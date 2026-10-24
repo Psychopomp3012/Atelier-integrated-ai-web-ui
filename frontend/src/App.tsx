@@ -6,8 +6,10 @@ import {
   cliStatusAtom,
   selectedModelAtom,
   availableModelsAtom,
+  isFetchingModelsAtom,
   geminiQuotaAtom,
   codexQuotaAtom,
+  isFetchingQuotaAtom,
   rateLimitAtom,
   currentSessionIdAtom,
   sessionsAtom,
@@ -37,9 +39,9 @@ import { signOutFirebase } from './services/firebaseAuth.service';
 import { sessionSyncService } from './services/sessionSync.service';
 import { fetchCliStatus, closeGeminiCliLoginPopup, invalidateCliStatusCache, type CliStatus } from './services/cliAuth.service';
 import { apiFetch, isTokenExpired } from './utils/api.util';
-import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSession, ChatSessionDetails, StepItem, ModelOption, GeminiQuotaStats, CodexQuotaStats } from './types';
+import type { ModelType, ChatMessage, UserProfile, AIPlatform, LinkedAIPlatformAccount, ChatSessionDetails, StepItem, ModelOption, GeminiQuotaStats, CodexQuotaStats } from './types';
 import { NONE_MODEL, getModelDisplayInfo, getMinimumEffortModelId } from './types';
-import { fetchAvailableModels, invalidateModelsCache } from './services/models.service';
+import { fetchAvailableModels } from './services/models.service';
 import { preferencesService } from './services/preferences.service';
 import { computeSessionTokens } from './utils/tokenMetrics.util';
 import { checkModelQuotaExhausted } from './utils/quota.util';
@@ -286,6 +288,8 @@ export const App: React.FC = () => {
   const [, setRateLimit] = useAtom(rateLimitAtom);
   const [geminiQuota, setGeminiQuota] = useAtom(geminiQuotaAtom);
   const [codexQuota, setCodexQuota] = useAtom(codexQuotaAtom);
+  const setIsFetchingQuota = useSetAtom(isFetchingQuotaAtom);
+  const setIsFetchingModels = useSetAtom(isFetchingModelsAtom);
   const [cliStatus, setCliStatus] = useAtom(cliStatusAtom);
   const cliStatusFetchedRef = useRef<boolean>(false);
 
@@ -547,13 +551,14 @@ export const App: React.FC = () => {
     );
   }, [cliStatus]);
 
-  const refreshModels = useCallback((force = true) => {
+  const refreshModels = useCallback((): Promise<void> => {
     const userId = currentUserRef.current?.id;
     if (!userId) {
       setAvailableModels([]);
-      return;
+      return Promise.resolve();
     }
-    fetchAvailableModels()
+    setIsFetchingModels(true);
+    return fetchAvailableModels()
       .then((models) => {
         if (models && models.length > 0) {
           setAvailableModels(models);
@@ -592,7 +597,10 @@ export const App: React.FC = () => {
           setAvailableModels([]);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        setIsFetchingModels(false);
+      });
   }, [currentSessionId, handleSelectModel, setSelectedModel]);
 
   useEffect(() => {
@@ -603,7 +611,7 @@ export const App: React.FC = () => {
     // During initial workspace load, waitForWorkspaceAndProvidersReady performs
     // the single unified fetch for models, status, quotas, and sandboxes.
     if (initialLoadCompletedRef.current) {
-      refreshModels(false);
+      refreshModels();
     }
   }, [currentUser?.id, refreshModels]);
 
@@ -700,6 +708,7 @@ export const App: React.FC = () => {
       return inFlightQuotaPromiseRef.current;
     }
 
+    setIsFetchingQuota(true);
     inFlightQuotaPromiseRef.current = (async () => {
       try {
         lastQuotaFetchRef.current = Date.now();
@@ -726,6 +735,7 @@ export const App: React.FC = () => {
       } catch {
         // offline fallback
       } finally {
+        setIsFetchingQuota(false);
         inFlightQuotaPromiseRef.current = null;
       }
     })();
@@ -782,10 +792,6 @@ export const App: React.FC = () => {
       if (workspaceHydrationPromiseRef.current) {
         return workspaceHydrationPromiseRef.current;
       }
-      if (lastHydratedUserIdRef.current === user.id && initialLoadCompletedRef.current) {
-        setIsPageLoading(false);
-        return Promise.resolve();
-      }
 
       lastHydratedUserIdRef.current = user.id;
 
@@ -802,7 +808,6 @@ export const App: React.FC = () => {
 
         try {
           invalidateCliStatusCache();
-          invalidateModelsCache();
           cliStatusFetchedRef.current = false;
 
           // -------------------------------------------------------------------
@@ -864,6 +869,7 @@ export const App: React.FC = () => {
             (sandboxUsageRef.current?.sandboxes && sandboxUsageRef.current.sandboxes.length > 0)
           );
 
+          setIsFetchingModels(true);
           const [sessionData, quotaData, modelsData] = await Promise.all([
             targetSessionId
               ? sessionSyncService.getSession(targetSessionId, { limit: 25 }).catch(() => null)
@@ -871,6 +877,7 @@ export const App: React.FC = () => {
             fetchQuota(true, user.email, freshCliStatus, hasSandbox).catch(() => null),
             fetchAvailableModels().catch(() => []),
           ]);
+          setIsFetchingModels(false);
 
           // Guard: if user changed during phase 3
           if (!currentUserRef.current?.id || currentUserRef.current.id !== user.id) {
@@ -977,7 +984,7 @@ export const App: React.FC = () => {
     prevActiveSandboxIdRef.current = currentSbxId;
 
     if (!currentSbxId) {
-      refreshModels(false);
+      refreshModels();
     }
   }, [currentUser?.id, activeSandbox?.sandboxId, refreshModels]);
 
@@ -986,16 +993,30 @@ export const App: React.FC = () => {
     if (!currentUser?.id || !initialLoadCompletedRef.current) return;
     if (activeSandbox?.sandboxId && availableModels.length === 0) {
       const retryTimer = setTimeout(() => {
-        refreshModels(true);
+        refreshModels();
       }, 2500);
       return () => clearTimeout(retryTimer);
     }
   }, [currentUser?.id, activeSandbox?.sandboxId, availableModels.length, refreshModels]);
 
+  // Auto-retry acquiring live Codex quota if Codex is linked but groups are still initializing in microVM
+  useEffect(() => {
+    if (!currentUser?.id || !cliStatus?.codex?.linked) return;
+    const hasCodexGroups = Boolean(codexQuota?.quotaLimits?.groups && codexQuota.quotaLimits.groups.length > 0);
+    if (!hasCodexGroups) {
+      const retryTimer = setTimeout(() => {
+        fetchQuota(true);
+      }, 2000);
+      return () => clearTimeout(retryTimer);
+    }
+  }, [currentUser?.id, cliStatus?.codex?.linked, codexQuota?.quotaLimits?.groups?.length]);
+
   const handleCliStatusChange = useCallback((newStatus: CliStatus) => {
+    cliStatusRef.current = newStatus;
     setCliStatus(newStatus);
-    fetchQuota(true);
-  }, []);
+    fetchQuota(true, undefined, newStatus);
+    refreshModels();
+  }, [refreshModels]);
 
 
   const showToast = (msg: string) => {
@@ -1085,7 +1106,6 @@ export const App: React.FC = () => {
     workspaceHydrationPromiseRef.current = null;
     cliStatusFetchedRef.current = false;
     invalidateCliStatusCache();
-    invalidateModelsCache();
     const prevUserId = currentUserRef.current?.id;
     closeGeminiCliLoginPopup();
     // 1. Invalidate authentication tokens & caches
@@ -1488,6 +1508,8 @@ export const App: React.FC = () => {
         if (user) {
           syncUserProfileViaBackend(user);
         }
+        refreshModels();
+        fetchQuota(true);
         showToast(
           `Linked ${
             platform === 'claude_subscription' ? 'Claude Pro / Team' : 'ChatGPT Plus / Codex'
@@ -1526,6 +1548,7 @@ export const App: React.FC = () => {
         if (user) {
           syncUserProfileViaBackend(user);
         }
+        refreshModels();
         showToast(`Saved ${platform.toUpperCase()} API Key to secure sandbox`);
       } else {
         showToast(data.error?.message || 'Failed to save API key');
@@ -2698,7 +2721,7 @@ export const App: React.FC = () => {
                   onStartSandboxVM={handleStartSandboxVM}
                   onAttachExistingSandbox={handleAttachExistingSandbox}
                   isStartingSandbox={isStartingSandbox}
-                  onRefreshModels={() => refreshModels(true)}
+                  onRefreshModels={() => refreshModels()}
                   onOpenAuthModal={() => setIsAuthModalOpen(true)}
                 />
               </div>

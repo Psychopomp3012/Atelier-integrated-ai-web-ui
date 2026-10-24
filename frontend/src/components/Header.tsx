@@ -11,6 +11,7 @@ import {
   isDarkModeAtom,
   isInspectorOpenAtom,
   isTelemetryModalOpenAtom,
+  isFetchingQuotaAtom,
   sandboxUsageAtom,
   selectedModelAtom,
   currentSessionIdAtom,
@@ -88,6 +89,7 @@ export const Header: React.FC<HeaderProps> = ({
   const atomSandboxUsage = useAtomValue(sandboxUsageAtom);
   const atomSelectedModel = useAtomValue(selectedModelAtom);
   const atomCurrentSessionId = useAtomValue(currentSessionIdAtom);
+  const isFetchingQuota = useAtomValue(isFetchingQuotaAtom);
   const setIsAuthModalOpen = useSetAtom(isAuthModalOpenAtom);
   const setToastMessage = useSetAtom(toastMessageAtom);
 
@@ -489,10 +491,25 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-surface-container-highest text-outline border border-outline-variant/20">
               STANDBY
             </span>
-          ) : isModelLinked ? (
-            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              CONNECTED
+          ) : isFetchingQuota ? (
+            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20 flex items-center gap-1">
+              <span className="material-symbols-outlined text-[11px] animate-spin">progress_activity</span>
+              FETCHING
             </span>
+          ) : isModelLinked ? (
+            <div className="flex items-center gap-1.5">
+              <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                CONNECTED
+              </span>
+              <button
+                type="button"
+                onClick={() => onRefreshQuota?.()}
+                className="w-5 h-5 rounded hover:bg-surface-container-high flex items-center justify-center text-outline hover:text-on-surface transition-colors cursor-pointer"
+                title="Refresh Quota"
+              >
+                <span className="material-symbols-outlined text-[13px]">refresh</span>
+              </button>
+            </div>
           ) : null}
           {isMobileModal && (
             <button
@@ -695,6 +712,12 @@ export const Header: React.FC<HeaderProps> = ({
               {/* Authentic Rolling Quota Bar (if available from Codex session rate limits) */}
               {quotaLimits && quotaLimits.groups && quotaLimits.groups.length > 0 ? (
                 <div className="space-y-3">
+                  {isFetchingQuota && (
+                    <div className="flex items-center gap-1.5 text-[10px] text-primary px-1 font-mono">
+                      <span className="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
+                      <span>Refreshing live telemetry from microVM...</span>
+                    </div>
+                  )}
                   {quotaLimits.groups.map((group, gIdx) => (
                     <div
                       key={group.name || gIdx}
@@ -747,18 +770,26 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
               ) : (
                 <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/20 text-center space-y-2 text-xs">
-                  <div className="flex items-center justify-center gap-2 text-emerald-400">
-                    <span className="material-symbols-outlined text-[18px]">check_circle</span>
-                    <span className="font-semibold">Codex Sandbox Environment Ready</span>
+                  <div className="flex items-center justify-center gap-2 text-outline">
+                    <span className="material-symbols-outlined text-[18px] animate-spin">
+                      progress_activity
+                    </span>
+                    <span>Acquiring live limits from /quota...</span>
                   </div>
-                  <p className="text-[11px] text-outline leading-relaxed">
-                    Live dynamic session rate limits are fetched directly on response streams via OpenAI's Codex backend.
+                  <p className="text-[11px] text-outline">
+                    OpenAI Codex CLI is evaluating capacity for your linked ChatGPT account.
                   </p>
                 </div>
               )}
             </div>
           ) : quotaLimits && quotaLimits.groups && quotaLimits.groups.length > 0 ? (
             <div className="space-y-3">
+              {isFetchingQuota && (
+                <div className="flex items-center gap-1.5 text-[10px] text-primary px-1 font-mono">
+                  <span className="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
+                  <span>Refreshing live telemetry from microVM...</span>
+                </div>
+              )}
               {quotaLimits.groups.map((group, idx) => {
                 const isCurrentActiveGroup = relevantGroup?.name === group.name;
                 return (
@@ -1465,14 +1496,28 @@ export const Header: React.FC<HeaderProps> = ({
                 </>
               ) : (
                 <>
-                  {providerIcon}
+                  {isFetchingQuota && !codexPctText && fraction5h === undefined ? (
+                    <span className="material-symbols-outlined text-[14px] leading-none text-primary shrink-0 animate-spin">
+                      progress_activity
+                    </span>
+                  ) : (
+                    providerIcon
+                  )}
                   {isCodex && codexPctText && (
                     <span className="sm:hidden font-mono text-xs font-semibold leading-none text-on-surface">
                       {codexPctText}
                     </span>
                   )}
-                  <span className="whitespace-nowrap hidden lg:inline leading-none">{`${providerLabel}: ${quotaBadgeText}`}</span>
-                  <span className="whitespace-nowrap hidden sm:inline lg:hidden font-mono text-xs leading-none">{quotaBadgeText}</span>
+                  <span className="whitespace-nowrap hidden lg:inline leading-none">
+                    {isFetchingQuota && !codexPctText && fraction5h === undefined
+                      ? `${providerLabel}: Fetching...`
+                      : `${providerLabel}: ${quotaBadgeText}`}
+                  </span>
+                  <span className="whitespace-nowrap hidden sm:inline lg:hidden font-mono text-xs leading-none">
+                    {isFetchingQuota && !codexPctText && fraction5h === undefined
+                      ? 'Fetching...'
+                      : quotaBadgeText}
+                  </span>
                 </>
               )}
               <span className="material-symbols-outlined text-[13px] leading-none text-outline shrink-0 hidden sm:inline">

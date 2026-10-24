@@ -93,16 +93,11 @@ sequenceDiagram
             GW-->>FE: 200 OK { data: [ { id: "gpt-5.6-terra", ... } ] }
             FE->>FE: setAvailableModels(freshModels)
         and Query Quotas & Live Telemetry
-            FE->>GW: GET /api/v1/quota?userEmail=diwakar... (Account-Scoped)
-            GW->>GW: Check codexQuotaCache & geminiQuotaCache
-            alt Quota Cache Valid
-                GW-->>FE: 200 OK { codex: { limitRemaining: "99.00%" } } (150ms)
-            else Quota Cache Miss or Cold Start
-                GW->>VM: Execute: codex app-server --stdio (getAccountRateLimits)
-                VM-->>GW: Return remaining_fraction: 0.99
-                GW->>GW: Cache quota in codexQuotaCache (TTL 60s)
-                GW-->>FE: 200 OK { codex: { limitRemaining: "99.00%" } } (1800ms)
-            end
+            FE->>GW: GET /api/v1/quota?userEmail=...
+            GW->>GW: 4-Phase Defense: requireAuth + readApiLimitHook (Tier 5: 120/min)
+            GW->>VM: Execute: codex app-server --stdio (getAccountRateLimits) / agy
+            VM-->>GW: Live rate limits & token telemetry
+            GW-->>FE: 200 OK { antigravity: {...}, codex: {...} }
             FE->>FE: Update codexQuota and geminiQuota atoms
         end
     end

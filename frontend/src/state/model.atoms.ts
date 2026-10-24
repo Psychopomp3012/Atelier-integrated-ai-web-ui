@@ -13,3 +13,4 @@ const getInitialSelectedModel = (): string => {
 
 export const selectedModelAtom: PrimitiveAtom<string> = atom(getInitialSelectedModel());
 export const availableModelsAtom: PrimitiveAtom<ModelOption[]> = atom([] as ModelOption[]);
+export const isFetchingModelsAtom: PrimitiveAtom<boolean> = atom(false);

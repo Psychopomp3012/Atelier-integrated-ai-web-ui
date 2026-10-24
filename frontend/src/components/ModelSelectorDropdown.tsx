@@ -10,6 +10,7 @@ import {
   cliStatusAtom,
   selectedModelAtom,
   availableModelsAtom,
+  isFetchingModelsAtom,
   geminiQuotaAtom,
   codexQuotaAtom,
   sandboxUsageAtom,
@@ -121,6 +122,7 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   const atomGeminiQuota = useAtomValue(geminiQuotaAtom);
   const atomCodexQuota = useAtomValue(codexQuotaAtom);
   const atomSandboxUsage = useAtomValue(sandboxUsageAtom);
+  const isFetchingModels = useAtomValue(isFetchingModelsAtom);
   const setIsAuthModalOpen = useSetAtom(isAuthModalOpenAtom);
 
   const selectedModel = propSelectedModel ?? atomSelectedModel;
@@ -140,6 +142,7 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   const [hoveredModel, setHoveredModel] = useState<ModelOption | null>(null);
   const [hoveredModelTop, setHoveredModelTop] = useState<number>(0);
   const [isMobile, setIsMobile] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const column2Ref = useRef<HTMLDivElement>(null);
   const effortFlyoutRef = useRef<HTMLDivElement>(null);
@@ -237,13 +240,6 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
     };
   }, [isOpen]);
 
-  // If dropdown is opened and a sandbox microVM is attached but models haven't loaded yet, auto-trigger refresh
-  useEffect(() => {
-    if (isOpen && activeSandbox?.sandboxId && availableModels.length === 0 && onRefreshModels) {
-      onRefreshModels();
-    }
-  }, [isOpen, activeSandbox?.sandboxId, availableModels.length, onRefreshModels]);
-
   const displayInfo = getModelDisplayInfo(selectedModel, availableModels);
   const activeProvider = displayInfo.provider;
 
@@ -288,6 +284,29 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
       return m.provider === displayProvider;
     })
     : [];
+
+  // If dropdown is opened and a sandbox microVM is attached but models haven't loaded yet for this provider, auto-trigger refresh
+  const refreshedProvidersRef = useRef<Record<string, boolean>>({});
+  useEffect(() => {
+    // Reset when cli status changes (e.g. newly linked provider)
+    refreshedProvidersRef.current = {};
+  }, [activeCliStatus?.antigravity?.linked, activeCliStatus?.codex?.linked, activeCliStatus?.claude?.linked]);
+
+  useEffect(() => {
+    if (
+      isOpen &&
+      activeSandbox?.sandboxId &&
+      displayProvider &&
+      isProviderUnlocked(displayProvider) &&
+      providerModels.length === 0 &&
+      !isFetchingModels &&
+      !refreshedProvidersRef.current[displayProvider] &&
+      onRefreshModels
+    ) {
+      refreshedProvidersRef.current[displayProvider] = true;
+      onRefreshModels();
+    }
+  }, [isOpen, activeSandbox?.sandboxId, displayProvider, providerModels.length, isFetchingModels, onRefreshModels]);
 
   const hasAnySandbox = Boolean(sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0);
   const isSandboxAttached = Boolean(activeSandbox?.sandboxId);
@@ -391,14 +410,24 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
       >
         {selectedModel === 'none' ? (
           <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 truncate">
-            <span
-              className="material-symbols-outlined text-[15px] text-outline shrink-0"
-              style={{ fontVariationSettings: "'FILL' 1" }}
-            >
-              tune
+            {isFetchingModels ? (
+              <span className="material-symbols-outlined text-[15px] text-primary shrink-0 animate-spin">
+                progress_activity
+              </span>
+            ) : (
+              <span
+                className="material-symbols-outlined text-[15px] text-outline shrink-0"
+                style={{ fontVariationSettings: "'FILL' 1" }}
+              >
+                tune
+              </span>
+            )}
+            <span className="font-medium text-on-surface truncate hidden sm:inline">
+              {isFetchingModels ? 'Discovering Models...' : 'No Model Selected'}
             </span>
-            <span className="font-medium text-on-surface truncate hidden sm:inline">No Model Selected</span>
-            <span className="font-medium text-on-surface truncate sm:hidden">Select</span>
+            <span className="font-medium text-on-surface truncate sm:hidden">
+              {isFetchingModels ? 'Loading...' : 'Select'}
+            </span>
           </div>
         ) : (
           <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 overflow-hidden">
@@ -724,47 +753,47 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                   </div>
                 ) : providerModels.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-10 px-4 text-center my-auto space-y-3">
-                    {availableModels.length === 0 ? (
+                    {isFetchingModels || isRefreshing ? (
                       <>
                         <div className="relative flex items-center justify-center">
                           <span className="absolute w-10 h-10 rounded-full bg-primary/10 animate-ping" />
                           <div className="w-8 h-8 rounded-full border-2 border-primary/20 border-t-primary animate-spin" />
-                          {currentProviderMeta.iconSvg ? (
+                          {currentProviderMeta?.iconSvg ? (
                             <img
                               src={currentProviderMeta.iconSvg}
                               alt=""
                               className="w-4 h-4 object-contain absolute opacity-80"
                             />
                           ) : (
-                            <span className={`material-symbols-outlined text-[15px] absolute ${currentProviderMeta.iconColor}`}>
-                              {currentProviderMeta.icon}
+                            <span className={`material-symbols-outlined text-[15px] absolute ${currentProviderMeta?.iconColor || 'text-primary'}`}>
+                              {currentProviderMeta?.icon || 'smart_toy'}
                             </span>
                           )}
                         </div>
                         <div className="space-y-0.5">
                           <p className="text-xs font-semibold text-on-surface">Discovering models...</p>
                           <p className="text-[11px] text-outline">
-                            Querying {currentProviderMeta.shortLabel} CLI in Sandbox microVM ({activeSandbox?.name || 'attached'})
+                            Querying {currentProviderMeta?.shortLabel || 'Provider'} CLI in Sandbox microVM ({activeSandbox?.name || 'attached'})
                           </p>
                         </div>
                       </>
                     ) : (
                       <>
-                        {currentProviderMeta.iconSvg ? (
+                        {currentProviderMeta?.iconSvg ? (
                           <img
                             src={currentProviderMeta.iconSvg}
                             alt=""
                             className="w-7 h-7 object-contain opacity-50 mb-1"
                           />
                         ) : (
-                          <span className={`material-symbols-outlined text-[24px] opacity-50 ${currentProviderMeta.iconColor}`}>
-                            {currentProviderMeta.icon}
+                          <span className={`material-symbols-outlined text-[24px] opacity-50 ${currentProviderMeta?.iconColor || 'text-outline'}`}>
+                            {currentProviderMeta?.icon || 'smart_toy'}
                           </span>
                         )}
                         <div className="space-y-0.5">
                           <p className="text-xs font-semibold text-on-surface">No active models detected</p>
                           <p className="text-[11px] text-outline max-w-xs">
-                            {currentProviderMeta.shortLabel} CLI is preparing credentials in this microVM. Click Refresh Models to reload.
+                            {currentProviderMeta?.shortLabel || 'Provider'} CLI is preparing credentials in this microVM. Click Refresh Models to reload.
                           </p>
                         </div>
                       </>
@@ -772,11 +801,20 @@ export const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                     {onRefreshModels && (
                       <button
                         type="button"
-                        onClick={() => onRefreshModels()}
-                        className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 text-on-surface transition-colors cursor-pointer inline-flex items-center gap-1 shadow-xs"
+                        onClick={async () => {
+                          if (isRefreshing) return;
+                          setIsRefreshing(true);
+                          try {
+                            await onRefreshModels();
+                          } finally {
+                            setTimeout(() => setIsRefreshing(false), 500);
+                          }
+                        }}
+                        disabled={isRefreshing}
+                        className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-surface-container hover:bg-surface-container-high border border-outline-variant/20 text-on-surface transition-colors cursor-pointer inline-flex items-center gap-1 shadow-xs disabled:opacity-50"
                       >
-                        <span className="material-symbols-outlined text-[13px]">refresh</span>
-                        <span>Refresh Models</span>
+                        <span className={`material-symbols-outlined text-[13px] ${isRefreshing ? 'animate-spin text-primary' : ''}`}>refresh</span>
+                        <span>{isRefreshing ? 'Refreshing...' : 'Refresh Models'}</span>
                       </button>
                     )}
                   </div>

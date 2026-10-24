@@ -576,11 +576,7 @@ classDiagram
     }
 
     class ModelsServiceClient {
-      -cachedModels: ModelOption[]
-      -lastFetchTime: number
-      +fetchAvailableModels(force, sessionId, userId) Promise~ModelOption[]~
-      +invalidateModelsCache() void
-      -filterDuplicateModels(models) ModelOption[]
+      +fetchAvailableModels() Promise~ModelOption[]~
     }
 
     class SessionSyncServiceClient {

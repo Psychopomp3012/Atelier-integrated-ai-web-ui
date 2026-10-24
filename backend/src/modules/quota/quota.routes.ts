@@ -4,7 +4,7 @@ import { codexQuotaService } from './codex-quota.service.js';
 import { createSuccessResponse } from '../../utils/response.util.js';
 import { tokenUtil } from '../../utils/token.util.js';
 import { authService, getStableUserId } from '../auth/auth.service.js';
-import { requireAuth, optionalAuth } from '../../middleware/auth.middleware.js';
+import { requireAuth } from '../../middleware/auth.middleware.js';
 import {
   mutationLimitHook,
   readApiLimitHook,
@@ -46,8 +46,8 @@ export const quotaRoutes: FastifyPluginAsync = async (fastify) => {
     schema: {
       tags: ['Quota'],
       summary: 'Get unified quota stats for all linked AI CLIs',
-      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 5: Read APIs)\n🔓 **Auth**: Optional (`Bearer <JWT>`)\n\nLive discovery of Antigravity and Codex subscription turn counts, limits, and reset windows in a single payload.',
-      security: [{ bearerAuth: [] }, {}],
+      description: '⏱️ **Rate Limit**: `120 req / min` (Tier 5: Read APIs)\n🔒 **Auth**: Required (`Bearer <JWT>`)\n\nLive discovery of Antigravity and Codex subscription turn counts, limits, and reset windows in a single payload.',
+      security: [{ bearerAuth: [] }],
       querystring: {
         type: 'object',
         properties: {
@@ -57,7 +57,7 @@ export const quotaRoutes: FastifyPluginAsync = async (fastify) => {
         additionalProperties: false,
       },
     },
-    preValidation: [optionalAuth],
+    preValidation: [requireAuth],
     preHandler: [readApiLimitHook],
   }, async (request, reply) => {
     const { userId, userEmail } = await resolveUserFromRequest(request);

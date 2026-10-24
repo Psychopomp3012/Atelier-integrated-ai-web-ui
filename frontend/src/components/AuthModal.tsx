@@ -180,6 +180,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setAgyCodeInput('');
         setShowAgyCodeInput(false);
         setAgySuccess(false);
+        onClose();
       } else {
         setAgyAuthError(
           res.error ||
@@ -297,6 +298,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         await new Promise((r) => setTimeout(r, 1200));
         setCodexSuccess(false);
         setCodexProcessingStep(null);
+        onClose();
       } else {
         // First verify if actually linked before assuming failure
         const freshStatus = await fetchCliStatus(true).catch(() => null);
@@ -308,6 +310,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           await new Promise((r) => setTimeout(r, 1200));
           setCodexSuccess(false);
           setCodexProcessingStep(null);
+          onClose();
           return;
         }
 
@@ -1071,17 +1074,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                                   if (e.key === 'Enter' && !agyProcessingStep) handleSubmitAgyCode();
                                 }}
                                 className={`w-full bg-surface-container-lowest border rounded-lg px-3 py-2 text-xs text-on-surface outline-none font-mono transition-all ${agyProcessingStep
-                                  ? 'opacity-60 border-[#4285F4]/50 cursor-not-allowed bg-surface-container-low pl-8'
+                                  ? 'opacity-60 border-[#4285F4]/50 cursor-not-allowed bg-surface-container-low'
                                   : agyAuthError
                                     ? 'border-error/50 focus:border-error'
                                     : 'border-outline-variant/30 focus:border-primary'
                                   }`}
                               />
-                              {agyProcessingStep && (
-                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-[15px] text-[#4285F4] animate-spin">
-                                  sync
-                                </span>
-                              )}
                             </div>
                             <button
                               type="button"

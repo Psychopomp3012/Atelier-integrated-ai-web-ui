@@ -4,17 +4,6 @@ import type { ModelOption } from '../types';
 /**
  * Fetches available AI models dynamically discovered from Antigravity CLI.
  */
-let inFlightModelsPromise: Promise<ModelOption[]> | null = null;
-let lastModels: ModelOption[] | null = null;
-let lastModelsUserId: string | null = null;
-let lastModelsFetchTime = 0;
-
-export function invalidateModelsCache(): void {
-  lastModels = null;
-  lastModelsUserId = null;
-  lastModelsFetchTime = 0;
-  inFlightModelsPromise = null;
-}
 
 export async function fetchAvailableModels(): Promise<ModelOption[]> {
   try {

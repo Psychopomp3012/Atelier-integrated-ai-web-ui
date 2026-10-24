@@ -9,3 +9,4 @@ export const rateLimitAtom: PrimitiveAtom<RateLimitState> = atom<RateLimitState>
   remaining: 100,
   resetInSeconds: 0,
 });
+export const isFetchingQuotaAtom: PrimitiveAtom<boolean> = atom<boolean>(false);
