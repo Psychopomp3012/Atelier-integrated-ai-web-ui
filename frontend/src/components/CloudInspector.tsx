@@ -268,7 +268,7 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       try {
         const base64Data = str.split(',')[1];
         str = atob(base64Data);
-      } catch {}
+      } catch { }
     } else if (str.startsWith('data:image/svg+xml;utf8,')) {
       str = decodeURIComponent(str.split(',')[1]);
     }
@@ -365,11 +365,10 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
           type="button"
           onClick={() => handleOpenFile(node)}
           style={{ paddingLeft: `${Math.max(4, level * 16)}px` }}
-          className={`w-full flex items-center justify-between py-1 px-1.5 rounded-lg text-left transition-all cursor-pointer ${
-            isSelected
-              ? 'bg-primary/10 text-on-surface border border-primary/30 shadow-xs'
-              : 'hover:bg-surface-container/60 text-on-surface-variant hover:text-on-surface border border-transparent'
-          }`}
+          className={`w-full flex items-center justify-between py-1 px-1.5 rounded-lg text-left transition-all cursor-pointer ${isSelected
+            ? 'bg-primary/10 text-on-surface border border-primary/30 shadow-xs'
+            : 'hover:bg-surface-container/60 text-on-surface-variant hover:text-on-surface border border-transparent'
+            }`}
         >
           <div className="flex items-center gap-1.5 min-w-0">
             <span className={`material-symbols-outlined text-[15px] ${fileMeta.color} shrink-0`}>
@@ -399,9 +398,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
       )}
 
       <aside
-        className={`fixed right-0 top-0 bottom-0 w-[340px] max-w-[90vw] xl:w-[380px] bg-surface-container-low border-l border-outline-variant/30 flex flex-col z-50 transition-transform duration-300 ease-in-out ${
-          isOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'
-        }`}
+        className={`fixed right-0 top-0 bottom-0 w-[340px] max-w-[90vw] xl:w-[380px] bg-surface-container-low border-l border-outline-variant/30 flex flex-col z-50 transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0 shadow-2xl' : 'translate-x-full'
+          }`}
       >
         {/* Inspector Header */}
         <div className="h-14 border-b border-outline-variant/20 flex items-center justify-between px-space-md shrink-0">
@@ -423,9 +421,8 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
               title="Reload sandbox files & telemetry"
             >
               <span
-                className={`material-symbols-outlined text-[14px] ${
-                  isLoading || isRefreshing ? 'text-primary animate-spin' : 'text-outline'
-                }`}
+                className={`material-symbols-outlined text-[14px] ${isLoading || isRefreshing ? 'text-primary animate-spin' : 'text-outline'
+                  }`}
               >
                 sync
               </span>
@@ -450,39 +447,33 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
 
         {/* Workspace File Tree Sub-header with Active Sandbox Info, Quota Badge and Delete Action */}
         <div className="border-b border-outline-variant/20 px-space-md py-2 bg-surface-container-lowest flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2 min-w-0 mr-2">
-            <span className={`material-symbols-outlined text-[15px] shrink-0 ${currentSandbox ? 'text-primary' : 'text-outline'}`}>
-              {currentSandbox ? 'cloud_queue' : 'cloud_off'}
-            </span>
-            <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs font-semibold text-on-surface truncate" title={currentSandbox?.name}>
-                  {currentSandbox ? currentSandbox.name : 'No Sandbox (Standby)'}
-                </span>
-                {quotaUsage && (
-                  <span
-                    className={`text-[10px] font-mono px-1.5 py-0.2 rounded border shrink-0 transition-colors ${
-                      currentSandbox
-                        ? quotaUsage.used >= quotaUsage.max
-                          ? 'bg-amber-500/15 text-amber-400 border-amber-500/40 font-bold'
-                          : 'bg-surface-container text-on-surface-variant border-outline-variant/30'
-                        : 'bg-surface-container text-outline border-outline-variant/20'
+          <div className="flex flex-col min-w-0 mr-2">
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-semibold text-on-surface truncate" title={currentSandbox?.name}>
+                {currentSandbox ? currentSandbox.name : 'No Sandbox (Standby)'}
+              </span>
+              {quotaUsage && (
+                <span
+                  className={`text-[10px] font-mono px-1.5 py-0.2 rounded border shrink-0 transition-colors ${currentSandbox
+                    ? quotaUsage.used >= quotaUsage.max
+                      ? 'bg-amber-500/15 text-amber-400 border-amber-500/40 font-bold'
+                      : 'bg-surface-container text-on-surface-variant border-outline-variant/30'
+                    : 'bg-surface-container text-outline border-outline-variant/20'
                     }`}
-                    title={`Active Cloud Sandboxes: ${quotaUsage.used} of ${quotaUsage.max} maximum allowed`}
-                  >
-                    {quotaUsage.used}/{quotaUsage.max}
-                  </span>
-                )}
-              </div>
-              {currentSandbox ? (
-                <span className="text-[10px] text-outline flex items-center gap-1">
-                  <span className="material-symbols-outlined text-[11px] text-primary">cloud_done</span>
-                  <span>Active Cloud MicroVM</span>
+                  title={`Active Cloud Sandboxes: ${quotaUsage.used} of ${quotaUsage.max} maximum allowed`}
+                >
+                  {quotaUsage.used}/{quotaUsage.max}
                 </span>
-              ) : (
-                <span className="text-[10px] text-outline">Offline • No VM started</span>
               )}
             </div>
+            {currentSandbox ? (
+              <span className="text-[10px] text-outline flex items-center gap-1">
+                <span className="material-symbols-outlined text-[11px] text-primary">cloud_done</span>
+                <span>Active Cloud MicroVM</span>
+              </span>
+            ) : (
+              <span className="text-[10px] text-outline">Offline • No VM started</span>
+            )}
           </div>
 
           {!currentSandbox && (
@@ -563,11 +554,10 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => setActivePreviewTab('preview')}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                      activePreviewTab === 'preview'
-                        ? 'bg-surface-container-highest text-primary font-medium shadow-xs'
-                        : 'text-outline hover:text-on-surface'
-                    }`}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-all cursor-pointer ${activePreviewTab === 'preview'
+                      ? 'bg-surface-container-highest text-primary font-medium shadow-xs'
+                      : 'text-outline hover:text-on-surface'
+                      }`}
                   >
                     <span className="material-symbols-outlined text-[13px]">visibility</span>
                     <span>Preview</span>
@@ -575,11 +565,10 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => setActivePreviewTab('source')}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                      activePreviewTab === 'source'
-                        ? 'bg-surface-container-highest text-primary font-medium shadow-xs'
-                        : 'text-outline hover:text-on-surface'
-                    }`}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-all cursor-pointer ${activePreviewTab === 'source'
+                      ? 'bg-surface-container-highest text-primary font-medium shadow-xs'
+                      : 'text-outline hover:text-on-surface'
+                      }`}
                   >
                     <span className="material-symbols-outlined text-[13px]">code</span>
                     <span>Source</span>
@@ -686,38 +675,12 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
           <div className="flex-1 bg-surface-container-lowest p-space-md font-code-sm text-code-sm overflow-y-auto">
             <div className="text-outline border-b border-outline-variant/10 pb-space-xs mb-space-sm font-label-sm text-label-sm flex items-center justify-between">
               <div className="flex items-center gap-1.5">
-                <span>WORKSPACE ROOT</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    fetchFiles(false);
-                  }}
-                  disabled={isLoading || isRefreshing}
-                  className="p-0.5 rounded text-outline hover:text-primary transition-colors cursor-pointer disabled:cursor-not-allowed"
-                  title={isLoading || isRefreshing ? 'Syncing workspace files...' : 'Reload workspace files'}
-                >
-                  <span
-                    className={`material-symbols-outlined text-[13px] ${
-                      isLoading || isRefreshing ? 'text-primary animate-spin' : 'hover:scale-110'
-                    }`}
-                  >
-                    sync
-                  </span>
-                </button>
+                <span className="leading-none select-none">WORKSPACE ROOT</span>
               </div>
-              <span className="text-[10px] text-outline font-mono">/workspace</span>
+              <span className="text-[10px] text-outline font-mono leading-none">/workspace</span>
             </div>
 
-            {(isLoading || isRefreshing) && files.length > 0 && (
-              <div className="flex items-center justify-between px-2 py-1 mb-2 rounded bg-primary/10 border border-primary/20 text-primary text-[10px] animate-pulse">
-                <div className="flex items-center gap-1.5">
-                  <span className="material-symbols-outlined text-[12px] animate-spin">sync</span>
-                  <span className="font-medium">Reloading workspace files...</span>
-                </div>
-              </div>
-            )}
-
-            {(isLoading || isRefreshing) && files.length === 0 ? (
+            {isLoading || isRefreshing ? (
               <div className="space-y-2.5 px-space-xs py-4">
                 <div className="flex items-center gap-2.5 p-2 rounded-lg bg-surface-container/60 border border-outline-variant/15 animate-pulse">
                   <div className="w-4 h-4 rounded bg-primary/30 shrink-0" />
@@ -810,10 +773,6 @@ export const CloudInspector: React.FC<CloudInspectorProps> = ({
         {/* Inspector Footer */}
         <div className="p-space-sm border-t border-outline-variant/20 bg-surface-container flex items-center justify-between text-outline font-code-sm text-code-sm shrink-0">
           <span>Sandbox FS • Read-Only</span>
-          <span className="text-secondary font-medium flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-secondary inline-block" />
-            <span>SYNCED</span>
-          </span>
         </div>
       </aside>
     </>

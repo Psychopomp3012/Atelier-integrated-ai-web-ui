@@ -25,7 +25,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isOpen = false,
   onClose,
   isSyncing = false,
-  onRefreshSessions,
 }) => {
   const atomSessions = useAtomValue(sessionsAtom);
   const atomCurrentSessionId = useAtomValue(currentSessionIdAtom);
@@ -107,24 +106,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span className="font-label-sm text-label-sm uppercase tracking-wider text-outline">
                 Recent Chats
               </span>
-              <button
-                type="button"
-                onClick={onRefreshSessions}
-                disabled={isSyncing}
-                className="p-0.5 rounded text-outline hover:text-primary transition-colors cursor-pointer disabled:cursor-not-allowed"
-                title={isSyncing ? 'Syncing cloud sessions...' : 'Reload cloud sessions'}
-              >
-                <span
-                  className={`material-symbols-outlined text-[13px] ${isSyncing ? 'text-primary animate-spin' : 'hover:scale-110'
-                    }`}
-                >
-                  sync
-                </span>
-              </button>
             </div>
-            <span className="font-code-sm text-code-sm text-outline">
-              {isSyncing ? '...' : sessions.length}
-            </span>
           </div>
 
           {isSyncing && sessions.length === 0 ? (
@@ -241,7 +223,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               Atelier Studio
             </span>
             <div className="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/25 text-primary text-[10px] font-mono font-semibold tracking-wider shadow-[0_0_8px_rgba(99,102,241,0.15)] group-hover:shadow-[0_0_12px_rgba(99,102,241,0.3)] transition-all">
-              v0.1.6
+              v0.1.7
             </div>
           </div>
         </div>

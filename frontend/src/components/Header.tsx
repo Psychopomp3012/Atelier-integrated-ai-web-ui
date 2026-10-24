@@ -260,6 +260,7 @@ export const Header: React.FC<HeaderProps> = ({
   const confirmDeleteSandbox = async () => {
     if (!sandboxPendingDelete || deletingSandboxId) return;
     const targetId = sandboxPendingDelete.id;
+    const wasCurrent = sandboxPendingDelete.isCurrent;
     setDeletingSandboxId(targetId);
     setDeleteError(null);
     try {
@@ -268,12 +269,13 @@ export const Header: React.FC<HeaderProps> = ({
       });
       const data = await res.json();
       if (data.success) {
-        if (data.data?.usage) {
-          setInternalSandboxUsage(data.data.usage);
-        } else {
-          await fetchSandboxUsage();
+        const updatedUsage = data.data?.usage;
+        if (updatedUsage) {
+          setInternalSandboxUsage(updatedUsage);
         }
-        onSandboxChanged?.('');
+        await fetchSandboxUsage();
+        const nextActiveId = wasCurrent ? '' : (activeSandbox?.sandboxId || '');
+        onSandboxChanged?.(nextActiveId, updatedUsage);
         setSandboxPendingDelete(null);
       } else {
         setDeleteError(data.error?.message || 'Failed to delete sandbox VM');
@@ -1582,7 +1584,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           title={isInspectorOpen ? 'Hide Cloud Inspector' : 'Show Cloud Inspector'}
         >
-          <span className="material-symbols-outlined text-[16px] leading-none">troubleshoot</span>
+          <span className="material-symbols-outlined text-[16px] leading-none">folder_open</span>
           <span className="hidden sm:inline font-medium leading-none">Inspector</span>
         </button>
 

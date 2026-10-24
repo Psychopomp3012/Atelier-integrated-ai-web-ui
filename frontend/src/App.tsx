@@ -74,7 +74,7 @@ function parseUserMessageContent(content: string): ParsedUserMessage {
   while ((m = codeFileRegex.exec(content)) !== null) {
     const fileName = m[1].trim();
     const ext = fileName.split('.').pop()?.toLowerCase() || '';
-    const codeExts = ['ts','tsx','js','jsx','py','sh','json','html','css','sql','md','txt','yaml','yml'];
+    const codeExts = ['ts', 'tsx', 'js', 'jsx', 'py', 'sh', 'json', 'html', 'css', 'sql', 'md', 'txt', 'yaml', 'yml'];
     attachments.push({ name: fileName, isCode: codeExts.includes(ext) });
   }
   text = text.replace(codeFileRegex, '').trim();
@@ -140,10 +140,10 @@ export const isModelOptionLinked = (
   const linkedPlatforms = Array.isArray(user?.linkedPlatforms)
     ? user.linkedPlatforms
     : (user?.linkedPlatforms && typeof user.linkedPlatforms === 'object')
-    ? Object.values(user.linkedPlatforms).filter(
+      ? Object.values(user.linkedPlatforms).filter(
         (p): p is LinkedAIPlatformAccount => Boolean(p && typeof p === 'object' && 'platform' in p)
       )
-    : [];
+      : [];
 
   if (model.hostedBy === 'claude' || model.provider === 'claude' || model.id.startsWith('claude-')) {
     const isCliSubscription = Boolean(
@@ -231,7 +231,7 @@ export const App: React.FC = () => {
           activeSessionId: currentSessionId || null,
         });
       }
-    } catch {}
+    } catch { }
   }, [currentUser?.id, currentSessionId]);
 
   const [isLoading, setIsLoading] = useAtom(isGeneratingAtom);
@@ -302,7 +302,7 @@ export const App: React.FC = () => {
         if (currentUserRef.current?.id) {
           localStorage.setItem(`harness_cli_status_${currentUserRef.current.id}`, JSON.stringify(status));
         }
-      } catch {}
+      } catch { }
       fetchQuota(force, currentUserRef.current?.email);
       return status;
     }).catch(() => null);
@@ -326,7 +326,7 @@ export const App: React.FC = () => {
       if (cached && !cliStatusFetchedRef.current) {
         setCliStatus(JSON.parse(cached));
       }
-    } catch {}
+    } catch { }
 
     if (!cliStatusFetchedRef.current) {
       refreshCliStatus();
@@ -348,7 +348,7 @@ export const App: React.FC = () => {
       } else {
         localStorage.removeItem(key);
       }
-    } catch {}
+    } catch { }
   }, [selectedSandboxId, currentUser?.id]);
 
   // Synchronize sandbox selection when currentUser switches or logs out
@@ -431,7 +431,7 @@ export const App: React.FC = () => {
       setSandboxUsage({ used: 0, max: 3, sandboxes: [] });
       try {
         localStorage.removeItem('harness_selected_sandbox_id');
-      } catch {}
+      } catch { }
     }
   }, [currentUser]);
 
@@ -535,7 +535,7 @@ export const App: React.FC = () => {
         selectedModelId: modelId && modelId !== 'none' ? modelId : undefined,
         selectedEffort: display.effortLabel || 'default',
       });
-    } catch {}
+    } catch { }
   }, [setSelectedModel]);
 
   const isModelLinked = useMemo(() => {
@@ -597,7 +597,7 @@ export const App: React.FC = () => {
           setAvailableModels([]);
         }
       })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => {
         setIsFetchingModels(false);
       });
@@ -835,7 +835,7 @@ export const App: React.FC = () => {
             cliStatusFetchedRef.current = true;
             try {
               localStorage.setItem(`harness_cli_status_${user.id}`, JSON.stringify(cliData));
-            } catch {}
+            } catch { }
           }
 
           // -------------------------------------------------------------------
@@ -1094,7 +1094,7 @@ export const App: React.FC = () => {
           selectedEffort: undefined,
         });
       }
-    } catch {}
+    } catch { }
   }, [selectedModel, availableModels, currentUser?.id]);
 
   // Comprehensive user and session cleanup routine
@@ -1322,7 +1322,7 @@ export const App: React.FC = () => {
             setRemainingMessageCount(0);
           }
         }
-      }).catch(() => {});
+      }).catch(() => { });
     }
   };
 
@@ -1358,7 +1358,7 @@ export const App: React.FC = () => {
   const handleDeleteSession = async (sessionId: string) => {
     const updated = sessions.filter((s) => s.id !== sessionId);
     setSessions(updated);
-    sessionSyncService.deleteSession(sessionId, currentUser?.id).catch(() => {});
+    sessionSyncService.deleteSession(sessionId, currentUser?.id).catch(() => { });
 
     if (currentSessionId === sessionId) {
       setCurrentSessionId(null);
@@ -1427,7 +1427,7 @@ export const App: React.FC = () => {
             isBackendJwt = true;
           }
         }
-      } catch {}
+      } catch { }
 
       if (isBackendJwt) {
         localStorage.setItem('auth_token', idToken);
@@ -1511,8 +1511,7 @@ export const App: React.FC = () => {
         refreshModels();
         fetchQuota(true);
         showToast(
-          `Linked ${
-            platform === 'claude_subscription' ? 'Claude Pro / Team' : 'ChatGPT Plus / Codex'
+          `Linked ${platform === 'claude_subscription' ? 'Claude Pro / Team' : 'ChatGPT Plus / Codex'
           } Subscription!`
         );
       } else {
@@ -1563,7 +1562,7 @@ export const App: React.FC = () => {
     if (token) {
       apiFetch('/api/v1/auth/logout', {
         method: 'POST',
-      }).catch(() => {});
+      }).catch(() => { });
     }
     signOutFirebase();
     performUserCleanup();
@@ -1628,7 +1627,7 @@ export const App: React.FC = () => {
           truncateAfterMessageId: msgId,
         };
         updated[idx] = targetSession;
-        sessionSyncService.saveSession(targetSession, currentUser?.id).catch(() => {});
+        sessionSyncService.saveSession(targetSession, currentUser?.id).catch(() => { });
         return updated;
       }
       return prev;
@@ -2165,7 +2164,7 @@ export const App: React.FC = () => {
             if (idx >= 0) {
               const u = [...sPrev];
               u[idx] = { ...u[idx], messages: updated, updatedAt: new Date().toISOString() };
-              sessionSyncService.saveSession(u[idx], currentUser?.id).catch(() => {});
+              sessionSyncService.saveSession(u[idx], currentUser?.id).catch(() => { });
               return u;
             }
             return sPrev;
@@ -2286,7 +2285,7 @@ export const App: React.FC = () => {
         />
 
         {/* Main Workstation Canvas */}
-        <main className="relative pt-14 h-screen bg-background flex-1 flex flex-col">
+        <main className="relative pt-24 h-screen bg-background flex-1 flex flex-col">
           <div className="flex flex-col w-full flex-1 min-h-0">
             {/* Sub-Header Operations Ribbon */}
             <Ribbon
@@ -2321,106 +2320,106 @@ export const App: React.FC = () => {
                 {/* Sandbox Status & Action in Hero */}
                 {currentUser && (
                   activeSandbox ? (
-                  <div className="mt-6 flex items-center justify-between sm:justify-start gap-2.5 px-3 sm:px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium animate-in fade-in duration-200 max-w-full">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="relative flex h-2 w-2 shrink-0">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                      </span>
-                      <span className="truncate">{activeSandbox.name}</span>
+                    <div className="mt-6 flex items-center justify-between sm:justify-start gap-2.5 px-3 sm:px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium animate-in fade-in duration-200 max-w-full">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="relative flex h-2 w-2 shrink-0">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                        </span>
+                        <span className="truncate">{activeSandbox.name}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsInspectorOpen(true)}
+                        className="ml-auto sm:ml-2 text-primary hover:underline text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0 inline-flex items-center gap-1"
+                      >
+                        Open Inspector &rarr;
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsInspectorOpen(true)}
-                      className="ml-auto sm:ml-2 text-primary hover:underline text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0 inline-flex items-center gap-1"
-                    >
-                      Open Inspector &rarr;
-                    </button>
-                  </div>
-                ) : currentUser && sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0 ? (
-                  /* At least one cloud VM is already initialized in the user's account */
-                  <div className="mt-6 flex flex-col items-center gap-3 animate-in fade-in duration-200 max-w-xl">
-                    <p className="text-xs text-outline font-medium text-center">
-                      Cloud microVM ready. Attach this session to an active workspace:
-                    </p>
+                  ) : currentUser && sandboxUsage?.sandboxes && sandboxUsage.sandboxes.length > 0 ? (
+                    /* At least one cloud VM is already initialized in the user's account */
+                    <div className="mt-6 flex flex-col items-center gap-3 animate-in fade-in duration-200 max-w-xl">
+                      <p className="text-xs text-outline font-medium text-center">
+                        Cloud microVM ready. Attach this session to an active workspace:
+                      </p>
 
-                    <div className="flex flex-wrap items-center justify-center gap-2">
-                      {sandboxUsage.sandboxes.map((sb) => {
-                        return (
+                      <div className="flex flex-wrap items-center justify-center gap-2">
+                        {sandboxUsage.sandboxes.map((sb) => {
+                          return (
+                            <button
+                              key={sb.sandboxId}
+                              type="button"
+                              onClick={() => handleAttachExistingSandbox(sb.sandboxId)}
+                              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-surface-container-high hover:bg-surface-container-highest border border-primary/30 hover:border-primary text-on-surface text-xs font-semibold shadow-xs transition-all cursor-pointer active:scale-95 group"
+                              title={`Connect this chat to ${sb.name} (${sb.sandboxId})`}
+                            >
+                              <span className="relative flex h-2 w-2">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                              </span>
+                              <span>Connect to {sb.name}</span>
+                              <span className="material-symbols-outlined text-[13px] text-primary group-hover:translate-x-0.5 transition-transform">
+                                arrow_forward
+                              </span>
+                            </button>
+                          );
+                        })}
+
+                        {sandboxUsage.used < sandboxUsage.max ? (
                           <button
-                            key={sb.sandboxId}
                             type="button"
-                            onClick={() => handleAttachExistingSandbox(sb.sandboxId)}
-                            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-surface-container-high hover:bg-surface-container-highest border border-primary/30 hover:border-primary text-on-surface text-xs font-semibold shadow-xs transition-all cursor-pointer active:scale-95 group"
-                            title={`Connect this chat to ${sb.name} (${sb.sandboxId})`}
+                            onClick={handleStartSandboxVM}
+                            disabled={isStartingSandbox}
+                            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-outline-variant/30 hover:border-outline-variant/60 bg-surface-container hover:bg-surface-container-high text-xs font-medium text-on-surface-variant hover:text-on-surface transition-all cursor-pointer active:scale-95 disabled:opacity-50"
+                            title="Start another isolated cloud sandbox microVM"
                           >
-                            <span className="relative flex h-2 w-2">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                            </span>
-                            <span>Connect to {sb.name}</span>
-                            <span className="material-symbols-outlined text-[13px] text-primary group-hover:translate-x-0.5 transition-transform">
-                              arrow_forward
-                            </span>
+                            {isStartingSandbox ? (
+                              <>
+                                <span className="material-symbols-outlined text-[14px] animate-spin text-primary">progress_activity</span>
+                                <span>Booting...</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="material-symbols-outlined text-[15px] text-primary">add_circle</span>
+                                <span>+ New Sandbox</span>
+                              </>
+                            )}
                           </button>
-                        );
-                      })}
-
-                      {sandboxUsage.used < sandboxUsage.max ? (
-                        <button
-                          type="button"
-                          onClick={handleStartSandboxVM}
-                          disabled={isStartingSandbox}
-                          className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-outline-variant/30 hover:border-outline-variant/60 bg-surface-container hover:bg-surface-container-high text-xs font-medium text-on-surface-variant hover:text-on-surface transition-all cursor-pointer active:scale-95 disabled:opacity-50"
-                          title="Start another isolated cloud sandbox microVM"
-                        >
-                          {isStartingSandbox ? (
-                            <>
-                              <span className="material-symbols-outlined text-[14px] animate-spin text-primary">progress_activity</span>
-                              <span>Booting...</span>
-                            </>
-                          ) : (
-                            <>
-                              <span className="material-symbols-outlined text-[15px] text-primary">add_circle</span>
-                              <span>+ New Sandbox</span>
-                            </>
-                          )}
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => document.getElementById('cloud-sandboxes-menu-button')?.click()}
-                          className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-outline-variant/30 hover:border-outline-variant/60 bg-surface-container hover:bg-surface-container-high text-xs font-medium text-outline hover:text-on-surface transition-all cursor-pointer"
-                          title="Open Cloud Sandboxes menu to manage or delete sandboxes"
-                        >
-                          <span className="material-symbols-outlined text-[15px]">delete_sweep</span>
-                          <span>Free a Slot</span>
-                        </button>
-                      )}
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => document.getElementById('cloud-sandboxes-menu-button')?.click()}
+                            className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-outline-variant/30 hover:border-outline-variant/60 bg-surface-container hover:bg-surface-container-high text-xs font-medium text-outline hover:text-on-surface transition-all cursor-pointer"
+                            title="Open Cloud Sandboxes menu to manage or delete sandboxes"
+                          >
+                            <span className="material-symbols-outlined text-[15px]">delete_sweep</span>
+                            <span>Free a Slot</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ) : (
-                  /* No sandboxes initialized yet: Render Start Sandbox VM button without subtitle */
-                  <div className="mt-6 flex flex-col items-center gap-3 animate-in fade-in duration-200">
-                    <button
-                      type="button"
-                      onClick={handleStartSandboxVM}
-                      disabled={isStartingSandbox}
-                      className="flex items-center gap-2.5 px-5 py-2.5 rounded-xl bg-primary hover:bg-primary-fixed-dim text-on-primary text-xs font-semibold shadow-md hover:shadow-lg transition-all cursor-pointer active:scale-95 disabled:opacity-60"
-                    >
-                      {isStartingSandbox ? (
-                        <>
-                          <span className="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
-                          <span>Provisioning Cloud MicroVM...</span>
-                        </>
-                      ) : (
-                        <>
-                          <span className="material-symbols-outlined text-[18px]">bolt</span>
-                          <span>Start Sandbox VM</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
+                  ) : (
+                    /* No sandboxes initialized yet: Render Start Sandbox VM button without subtitle */
+                    <div className="mt-6 flex flex-col items-center gap-3 animate-in fade-in duration-200">
+                      <button
+                        type="button"
+                        onClick={handleStartSandboxVM}
+                        disabled={isStartingSandbox}
+                        className="flex items-center gap-2.5 px-5 py-2.5 rounded-xl bg-primary hover:bg-primary-fixed-dim text-on-primary text-xs font-semibold shadow-md hover:shadow-lg transition-all cursor-pointer active:scale-95 disabled:opacity-60"
+                      >
+                        {isStartingSandbox ? (
+                          <>
+                            <span className="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+                            <span>Provisioning Cloud MicroVM...</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="material-symbols-outlined text-[18px]">bolt</span>
+                            <span>Start Sandbox VM</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   )
                 )}
               </div>
@@ -2568,11 +2567,10 @@ export const App: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => handleCopyMessage(msg.content, msg.id)}
-                              className={`p-1 rounded-md transition-colors cursor-pointer ${
-                                copiedMessageId === msg.id
+                              className={`p-1 rounded-md transition-colors cursor-pointer ${copiedMessageId === msg.id
                                   ? 'text-emerald-500 bg-emerald-500/10'
                                   : 'text-outline hover:text-on-surface hover:bg-surface-container-high'
-                              }`}
+                                }`}
                               title={copiedMessageId === msg.id ? 'Copied to clipboard' : 'Copy prompt text'}
                               aria-label={copiedMessageId === msg.id ? 'Copied' : 'Copy prompt text'}
                             >
@@ -2632,7 +2630,7 @@ export const App: React.FC = () => {
                               msg.sandboxName ||
                               (msg.executionResult?.sandboxId && msg.executionResult.sandboxId !== 'none'
                                 ? (sandboxUsage?.sandboxes?.find((s) => s.sandboxId === msg.executionResult?.sandboxId)?.name ||
-                                   `Sandbox (${msg.executionResult.sandboxId.substring(0, 6)})`)
+                                  `Sandbox (${msg.executionResult.sandboxId.substring(0, 6)})`)
                                 : activeSandbox?.name);
                             if (!displaySandboxName) return null;
                             return (

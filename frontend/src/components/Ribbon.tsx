@@ -11,7 +11,7 @@ export const Ribbon: React.FC<RibbonProps> = ({
 }) => {
   return (
     <div
-      className="sticky top-14 z-30 w-full bg-surface-container-lowest/90 backdrop-blur-md px-3 md:px-margin-desktop py-2 flex items-center justify-end gap-space-sm shadow-sm border-b border-outline-variant/10"
+      className="fixed top-14 z-30 left-0 right-0 bg-surface-container-lowest/90 backdrop-blur-md px-3 md:px-margin-desktop py-2 flex items-center justify-end gap-space-sm shadow-sm border-b border-outline-variant/10"
     >
       {/* Quick Action Commands Toolbar */}
       <div className="flex items-center gap-1 sm:gap-space-sm shrink-0">
